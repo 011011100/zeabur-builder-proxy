@@ -10,10 +10,10 @@ buildkitd picked by rendezvous routing, pushes to an in-cluster registry, and th
 
 | Part | State |
 | --- | --- |
-| Controller, Job wrapper, images | Built; 51 unit tests pass |
-| Manifests, `scripts/poc.sh` | Written; applied once on the test cluster |
-| Dockerfile build end to end | **Not verified yet** (see [Test cluster](#test-cluster)) |
-| Railpack build end to end | **Not verified yet** |
+| Dockerfile build, polling trigger | Verified on the test cluster |
+| Railpack build (M1) | Verified on the test cluster |
+| Failures: missing ref, missing Dockerfile | Verified: `SourceReady=False RefNotFound`; `BuildRun` Failed `BuildFailed` |
+| Unit tests | 52 pass |
 
 ## Requirements
 
@@ -70,9 +70,9 @@ kubectl delete -f deploy/crds.json
 ## Decisions
 
 - **`hostUsers: false` by default.** Rootful `moby/buildkit:v0.34.1` with `privileged: true` in a
-  user namespace ran a `RUN` step on the test cluster (k3s v1.36.5, containerd 2.3.4, kernel 7.0,
-  arm64), with root in the container mapped to an unprivileged host range. `HOST_USERS=true` falls
-  back to a plainly privileged container.
+  user namespace ran every build above on the test cluster; buildkitd's `/proc/self/uid_map` was
+  `0 3195928576 65536`, root in the container mapped to an unprivileged host range.
+  `HOST_USERS=true` falls back to a plainly privileged container.
 - **Provenance:** jobspec passes no `attest:provenance` option, so buildctl's default applies. The
   plan's intended setting is `mode=min`; it is not set yet.
 - **Registry:** `registry:2.8.3` over plain HTTP in `builder-registry`, without authentication or
@@ -87,17 +87,54 @@ kubectl delete -f deploy/crds.json
 
 ## Test cluster
 
-The single-node k3d cluster on the `zeabur-test` VM (2 CPU, 4 GB, 62 GB disk). Image builds took
-3 min 31 s on an aarch64 Mac (Docker, Nix container, cold Cargo cache).
+The single-node k3d cluster on the `zeabur-test` VM: k3s v1.36.5, containerd 2.3.4, kernel 7.0,
+arm64, 2 CPU, 4 GB. Images were built on an aarch64 Mac (3 min 31 s with a cold Cargo cache) and
+imported with `k3d image import`. `scripts/poc.sh` started all four sample Builds at once, so the
+builds shared buildkitd and the two CPUs.
 
-The first run did not reach a build. Loading the images and pulling buildkitd brought the VM disk
-under kubelet's eviction threshold (DiskPressure at about 3 GB free). Kubelet tainted the node and
-evicted every Pod on it, other workloads included, and its image GC removed the imported images.
-The PoC workloads are scaled to zero until the node has at least 8 GB free.
+### Results
+
+| Build | Revision | Image |
+| --- | --- | --- |
+| `whoami` | `1ce75d0` | `…/builder-poc/whoami:master-1792608027-1ce75d0@sha256:687e297d70a419afb58641107ba75f3235dcb7abe33422ea8a93d259d5ffd73f` |
+| `hello-python` | `62c0894` | `…/builder-poc/hello-python:main-1792608027-62c0894@sha256:3894b8d8dd5d57341368a0fa25fd224beea3cc831ca89ab21eecd8683e777337` |
+
+`…` is `registry.builder-registry.svc.cluster.local:5000`. The registry lists both tags and the
+`buildcache` tag; the controller published a `BuildSucceeded` event for each run.
+
+### Timings
+
+Cold is an empty buildkitd cache and registry. Warm is the same commits again after deleting and
+recreating the Builds, with the cache from the cold run. End to end is from the `BuildRun`'s
+creation to its `completionTime`.
+
+| Build | Cache | Fetch | Plan | Build and push | End to end | Steps cached |
+| --- | --- | --- | --- | --- | --- | --- |
+| `whoami` | cold | 1.0 s | – | 34.3 s | 67 s¹ | 0 of 18 |
+| `whoami` | warm | 1.0 s | – | 18.7 s | 23 s | 8 of 18 |
+| `hello-python` | cold | 1.0 s | 7.0 s | 55.9 s | 67 s | 0 of 24 |
+| `hello-python` | warm | 1.0 s | 5.0 s | 3.4 s | 14 s | 14 of 24 |
+| `no-such-dockerfile` | – | 1.0 s | – | 0.1 s | 5 s | – |
+
+¹ Includes a 30-second retry: runs started together raced to create the buildkitd client Secret.
+That is fixed; the warm run had no retry.
+
+The warm `whoami` image has the same digest as the cold one. The warm `hello-python` image has a
+different digest (`sha256:fae44b3f…`); why has not been looked into.
+
+### Disk
+
+At its peak the proof of concept used about 4.5 GB on the node: buildkitd's cache 3.0 GB, the
+registry 0.76 GB, the images in k3d about 0.4 GB and their copies in the VM's Docker 0.58 GB.
+`buildctl prune --all` freed 3.2 GB. The node must keep well above kubelet's eviction threshold:
+an earlier attempt, on a disk with about 5 GB free, put the node under DiskPressure and evicted
+every Pod on it.
 
 ## Known gaps
 
-- End-to-end results, digests and timings are still missing (above).
+- Ready stays `Unknown` (`NotBuilt`) until a run finishes; a missing ref shows only in
+  `SourceReady`.
+- Only one buildkitd instance was tried; routing across several was not exercised end to end.
 - Git: public HTTPS repositories only; `credentialsRef` reports `CredentialsMissing`.
 - Triggers: polling per Build only; no webhooks, no repository-level poller, no rebuild annotation.
 - Controller: a single replica without leader election; no quotas or admission limits.
