@@ -1,0 +1,404 @@
+use k8s_openapi::api::batch::v1::{JobCondition, JobStatus};
+use k8s_openapi::api::core::v1::{
+    ContainerState, ContainerStateRunning, ContainerStateTerminated, PodStatus,
+};
+use k8s_openapi::apimachinery::pkg::apis::meta::v1::Time;
+use zeabur_builder_api::build::{
+    BuildSpec, GitSource, OutputSpec, PlanPolicy, SourceSpec, TriggerSpec,
+};
+use zeabur_builder_api::build_run::BuildRunSpec;
+
+use super::*;
+
+const A: &str = "3e1a9c2d4f0b5a6c7d8e9f0a1b2c3d4e5f6a7b8c";
+const B: &str = "0123456789abcdef0123456789abcdef01234567";
+const DIGEST: &str = "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+
+fn now() -> Timestamp {
+    "2026-10-22T08:00:00Z".parse().unwrap()
+}
+
+fn build() -> Build {
+    let mut build = Build::new(
+        "api",
+        BuildSpec {
+            source: SourceSpec {
+                git: GitSource {
+                    url: "https://github.com/acme/api".to_owned(),
+                    git_ref: "main".to_owned(),
+                    context_dir: None,
+                    dockerfile: None,
+                },
+                credentials_ref: None,
+            },
+            builder_ref: "dockerfile".to_owned(),
+            output: None,
+            env: Vec::new(),
+            triggers: TriggerSpec::default(),
+            plan: PlanPolicy::default(),
+            concurrency: Concurrency::default(),
+            history_limit: None,
+            notify: Vec::new(),
+            suspend: false,
+        },
+    );
+    build.metadata.namespace = Some("team-a".to_owned());
+    build
+}
+
+fn run(name: &str, revision: &str, phase: Option<Phase>, at: &str) -> BuildRun {
+    let mut run = BuildRun::new(
+        name,
+        BuildRunSpec {
+            build_ref: "api".to_owned(),
+            revision: revision.to_owned(),
+            plan_digest: None,
+            force_replan: false,
+            trigger: None,
+        },
+    );
+    run.metadata.creation_timestamp = Some(Time(at.parse().unwrap()));
+    run.status = Some(BuildRunStatus {
+        phase,
+        completion_time: is_finished(phase).then(|| at.to_owned()),
+        ..BuildRunStatus::default()
+    });
+    run
+}
+
+#[test]
+fn durations() {
+    assert_eq!(parse_duration("90s"), Some(Duration::from_secs(90)));
+    assert_eq!(parse_duration("1m30s"), Some(Duration::from_secs(90)));
+    assert_eq!(parse_duration("1.5h"), Some(Duration::from_mins(90)));
+    assert_eq!(parse_duration("250ms"), Some(Duration::from_millis(250)));
+    assert_eq!(parse_duration(""), None);
+    assert_eq!(parse_duration("10"), None);
+    assert_eq!(parse_duration("m"), None);
+    assert_eq!(parse_duration("1d"), None);
+}
+
+#[test]
+fn conditions_keep_their_transition_time() {
+    let mut conditions = Vec::new();
+    let earlier: Timestamp = "2026-10-22T07:00:00Z".parse().unwrap();
+    set_condition(
+        &mut conditions,
+        "Ready",
+        ConditionStatus::True,
+        "Succeeded",
+        "",
+        earlier,
+        Some(1),
+    );
+    set_condition(
+        &mut conditions,
+        "Ready",
+        ConditionStatus::True,
+        "Succeeded",
+        "again",
+        now(),
+        Some(2),
+    );
+    assert_eq!(conditions.len(), 1);
+    assert_eq!(conditions[0].last_transition_time, earlier.to_string());
+    assert_eq!(conditions[0].message, "again");
+    set_condition(
+        &mut conditions,
+        "Ready",
+        ConditionStatus::False,
+        "BuildFailed",
+        "",
+        now(),
+        Some(2),
+    );
+    assert_eq!(conditions[0].last_transition_time, now().to_string());
+}
+
+#[test]
+fn resolves_once_per_interval_or_new_generation() {
+    let status = BuildStatus {
+        remote_revision: Some(A.to_owned()),
+        last_resolved_at: Some("2026-10-22T07:59:30Z".to_owned()),
+        observed_generation: Some(1),
+        ..BuildStatus::default()
+    };
+    let minute = Duration::from_mins(1);
+    assert!(!needs_resolve(Some(&status), Some(1), minute, now()));
+    assert!(needs_resolve(Some(&status), Some(2), minute, now()));
+    assert!(needs_resolve(
+        Some(&status),
+        Some(1),
+        Duration::from_secs(30),
+        now()
+    ));
+    assert!(needs_resolve(None, Some(1), minute, now()));
+}
+
+#[test]
+fn a_new_commit_replaces_the_running_build() {
+    let build = build();
+    let runs = [run(
+        "api-1",
+        A,
+        Some(Phase::Building),
+        "2026-10-22T07:00:00Z",
+    )];
+    assert_eq!(
+        next_run(&build, B, &runs),
+        NextRun {
+            create: true,
+            cancel: vec!["api-1".to_owned()]
+        }
+    );
+    assert_eq!(next_run(&build, A, &runs), NextRun::default());
+}
+
+#[test]
+fn queue_waits_and_failures_are_not_retried() {
+    let mut build = build();
+    build.spec.concurrency = Concurrency::Queue;
+    let running = [run(
+        "api-1",
+        A,
+        Some(Phase::Building),
+        "2026-10-22T07:00:00Z",
+    )];
+    assert_eq!(next_run(&build, B, &running), NextRun::default());
+    let failed = [run("api-1", A, Some(Phase::Failed), "2026-10-22T07:00:00Z")];
+    assert_eq!(next_run(&build, A, &failed), NextRun::default());
+    assert!(next_run(&build, B, &failed).create);
+
+    build.spec.suspend = true;
+    assert_eq!(next_run(&build, B, &failed), NextRun::default());
+}
+
+#[test]
+fn a_built_commit_is_not_built_again_after_pruning() {
+    let mut build = build();
+    build.status = Some(BuildStatus {
+        latest_revision: Some(A.to_owned()),
+        ..BuildStatus::default()
+    });
+    assert_eq!(next_run(&build, A, &[]), NextRun::default());
+}
+
+#[test]
+fn pruning_keeps_the_newest_success() {
+    let runs = [
+        run("api-1", A, Some(Phase::Succeeded), "2026-10-22T01:00:00Z"),
+        run("api-2", B, Some(Phase::Failed), "2026-10-22T02:00:00Z"),
+        run("api-3", B, Some(Phase::Failed), "2026-10-22T03:00:00Z"),
+        run("api-4", B, Some(Phase::Cancelled), "2026-10-22T04:00:00Z"),
+        run("api-5", B, Some(Phase::Building), "2026-10-22T05:00:00Z"),
+    ];
+    assert_eq!(prune(&runs, 2), ["api-2"]);
+    assert_eq!(prune(&runs, 1), ["api-2", "api-3"]);
+    assert_eq!(prune(&runs, 10), Vec::<String>::new());
+}
+
+#[test]
+fn image_and_tags() {
+    let mut build = build();
+    let run = run("api-x7k2p", A, None, "2025-10-21T15:00:00Z");
+    assert_eq!(
+        image(&build, "registry.local:5000/"),
+        "registry.local:5000/team-a/api"
+    );
+    assert_eq!(tags(&build, &run).unwrap(), ["main-1761058800-3e1a9c2"]);
+    build.spec.source.git.git_ref = "refs/heads/feature/x".to_owned();
+    build.spec.output = Some(OutputSpec {
+        image: Some("ghcr.io/acme/api".to_owned()),
+        extra_tags: vec!["latest".to_owned()],
+        ..OutputSpec::default()
+    });
+    assert_eq!(image(&build, "registry.local:5000"), "ghcr.io/acme/api");
+    assert_eq!(
+        tags(&build, &run).unwrap(),
+        ["feature-x-1761058800-3e1a9c2", "latest"]
+    );
+}
+
+#[test]
+fn summary_points_at_the_newest_success() {
+    let mut ok = run("api-1", A, Some(Phase::Succeeded), "2026-10-22T01:00:00Z");
+    if let Some(s) = ok.status.as_mut() {
+        s.tags = vec!["main-1-3e1a9c2".to_owned()];
+        s.image_digest = Some(DIGEST.to_owned());
+    }
+    let mut bad = run("api-2", B, Some(Phase::Failed), "2026-10-22T02:00:00Z");
+    if let Some(s) = bad.status.as_mut() {
+        s.reason = Some(Reason::BuildFailed);
+        s.message = Some("exit code: 2".to_owned());
+    }
+    let mut status = BuildStatus::default();
+    summarise(&mut status, &[ok.clone()], "r/team-a/api", now(), Some(1));
+    assert_eq!(
+        status.latest_image.as_deref(),
+        Some(format!("r/team-a/api:main-1-3e1a9c2@{DIGEST}").as_str())
+    );
+    assert_eq!(status.conditions[0].status, ConditionStatus::True);
+
+    summarise(&mut status, &[ok, bad], "r/team-a/api", now(), Some(1));
+    assert_eq!(status.latest_revision.as_deref(), Some(A));
+    assert_eq!(status.last_build_run_ref.as_deref(), Some("api-2"));
+    assert_eq!(status.conditions[0].status, ConditionStatus::False);
+    assert_eq!(status.conditions[0].reason, "BuildFailed");
+    assert_eq!(status.conditions[0].message, "api-2: exit code: 2");
+}
+
+fn job(condition: Option<(&str, &str)>) -> Job {
+    Job {
+        status: Some(JobStatus {
+            conditions: condition.map(|(kind, reason)| {
+                vec![JobCondition {
+                    type_: kind.to_owned(),
+                    status: "True".to_owned(),
+                    reason: Some(reason.to_owned()),
+                    ..JobCondition::default()
+                }]
+            }),
+            ..JobStatus::default()
+        }),
+        ..Job::default()
+    }
+}
+
+fn container(name: &str, state: ContainerState) -> ContainerStatus {
+    ContainerStatus {
+        name: name.to_owned(),
+        state: Some(state),
+        ..ContainerStatus::default()
+    }
+}
+
+fn terminated(code: i32, message: Option<&str>) -> ContainerState {
+    ContainerState {
+        terminated: Some(ContainerStateTerminated {
+            exit_code: code,
+            message: message.map(str::to_owned),
+            reason: Some(if code == 0 { "Completed" } else { "Error" }.to_owned()),
+            ..ContainerStateTerminated::default()
+        }),
+        ..ContainerState::default()
+    }
+}
+
+fn running() -> ContainerState {
+    ContainerState {
+        running: Some(ContainerStateRunning::default()),
+        ..ContainerState::default()
+    }
+}
+
+fn pod(init: Vec<ContainerStatus>, main: Vec<ContainerStatus>) -> Pod {
+    Pod {
+        status: Some(PodStatus {
+            init_container_statuses: Some(init),
+            container_statuses: Some(main),
+            ..PodStatus::default()
+        }),
+        ..Pod::default()
+    }
+}
+
+#[test]
+fn phases_follow_the_pod() {
+    let none = job(None);
+    assert_eq!(observe(&none, None), Observed::Running(Phase::Pending));
+    let fetching = pod(vec![container("fetch", running())], vec![]);
+    assert_eq!(
+        observe(&none, Some(&fetching)),
+        Observed::Running(Phase::Planning)
+    );
+    let building = pod(
+        vec![container("fetch", terminated(0, None))],
+        vec![container("build", running())],
+    );
+    assert_eq!(
+        observe(&none, Some(&building)),
+        Observed::Running(Phase::Building)
+    );
+}
+
+#[test]
+fn success_carries_the_digest() {
+    let message = format!(
+        r#"{{"result":"succeeded","digest":"{DIGEST}","tags":["main-1-3e1a9c2"],"phases":{{"fetch":1.0,"build":12.34}},"cache":{{"total":5,"cached":3}}}}"#
+    );
+    let done = pod(
+        vec![container("fetch", terminated(0, None))],
+        vec![container("build", terminated(0, Some(&message)))],
+    );
+    let Observed::Finished(status) = observe(&job(Some(("Complete", ""))), Some(&done)) else {
+        panic!("finished expected")
+    };
+    assert_eq!(status.phase, Some(Phase::Succeeded));
+    assert_eq!(status.image_digest.as_deref(), Some(DIGEST));
+    assert_eq!(status.tags, ["main-1-3e1a9c2"]);
+    assert_eq!(status.phase_durations["build"], "12.3s");
+    assert_eq!(
+        status.cache_stats,
+        Some(CacheStats {
+            total: 5,
+            cached: 3
+        })
+    );
+}
+
+#[test]
+fn failures_name_their_phase() {
+    let failed_job = job(Some(("Failed", "BackoffLimitExceeded")));
+    let fetch = pod(
+        vec![container(
+            "fetch",
+            terminated(128, Some("fatal: couldn't find remote ref")),
+        )],
+        vec![],
+    );
+    let Observed::Finished(status) = observe(&failed_job, Some(&fetch)) else {
+        panic!()
+    };
+    assert_eq!(status.reason, Some(Reason::SourceFailed));
+
+    let plan = pod(
+        vec![
+            container("fetch", terminated(0, None)),
+            container("plan", terminated(1, None)),
+        ],
+        vec![],
+    );
+    let Observed::Finished(status) = observe(&failed_job, Some(&plan)) else {
+        panic!()
+    };
+    assert_eq!(status.reason, Some(Reason::PlanFailed));
+    assert_eq!(status.message.as_deref(), Some("Error"));
+
+    let build = pod(
+        vec![container("fetch", terminated(0, None))],
+        vec![container(
+            "build",
+            terminated(
+                1,
+                Some(r#"{"result":"failed","reason":"PushFailed","message":"denied"}"#),
+            ),
+        )],
+    );
+    let Observed::Finished(status) = observe(&failed_job, Some(&build)) else {
+        panic!()
+    };
+    assert_eq!(status.reason, Some(Reason::PushFailed));
+    assert_eq!(status.message.as_deref(), Some("denied"));
+
+    let Observed::Finished(status) =
+        observe(&job(Some(("Failed", "DeadlineExceeded"))), Some(&build))
+    else {
+        panic!()
+    };
+    assert_eq!(status.reason, Some(Reason::Timeout));
+
+    let Observed::Finished(status) = observe(&failed_job, None) else {
+        panic!()
+    };
+    assert_eq!(status.reason, Some(Reason::InfraError));
+}

@@ -15,5 +15,26 @@ categories = ["development-tools::build-utils", "command-line-utilities"]
 workspace = true
 
 [dependencies]
+zeabur-builder-core.workspace = true
 zeabur-builder-api.workspace = true
+zeabur-builder-jobspec.workspace = true
+bytes.workspace = true
 clap.workspace = true
+futures-util.workspace = true
+http.workspace = true
+http-body-util.workspace = true
+hyper.workspace = true
+hyper-rustls.workspace = true
+hyper-util.workspace = true
+jiff.workspace = true
+k8s-openapi.workspace = true
+kube = { workspace = true, features = ["client", "runtime", "rustls-tls", "aws-lc-rs"] }
+rcgen.workspace = true
+rustls.workspace = true
+rustls-native-certs.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
