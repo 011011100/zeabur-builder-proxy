@@ -158,6 +158,7 @@
               },
               "readOnlyRootFilesystem": true
             },
+            "terminationMessagePolicy": "FallbackToLogsOnError",
             "volumeMounts": [
               {
                 "mountPath": "/workspace",

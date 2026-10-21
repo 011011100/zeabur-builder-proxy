@@ -273,6 +273,8 @@ fn fetch_container(inputs: &JobInputs<'_>) -> Container {
             env("GIT_ALLOW_PROTOCOL", "https:http:ssh:git"),
         ]),
         volume_mounts: Some(mounts),
+        // Git's error is on stderr; the controller shows its last lines as the run's message.
+        termination_message_policy: Some("FallbackToLogsOnError".to_owned()),
         ..hardened()
     }
 }
@@ -355,6 +357,7 @@ fn plan_container(inputs: &JobInputs<'_>) -> Result<Option<Container>, JobError>
         env: Some(env_vars),
         env_from,
         volume_mounts: Some(mounts),
+        termination_message_policy: Some("FallbackToLogsOnError".to_owned()),
         ..hardened()
     }))
 }
