@@ -404,6 +404,9 @@ async fn reconcile_run(run: Arc<BuildRun>, ctx: Arc<Context>) -> Result<Action, 
         return start(&ctx, &run, status).await;
     };
 
+    let Some(status) = decide::recorded(status, &job, now()) else {
+        return Ok(Action::requeue(Duration::from_secs(2)));
+    };
     let pods: Api<Pod> = Api::namespaced(ctx.client.clone(), &namespace);
     let pod = pods
         .list(&ListParams::default().labels(&format!("batch.kubernetes.io/job-name={name}")))

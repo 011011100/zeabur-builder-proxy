@@ -49,6 +49,30 @@ pub(crate) const fn is_finished(phase: Option<Phase>) -> bool {
     )
 }
 
+/// How long a Job may go unrecorded in its run's status before the controller takes it as
+/// stopped between creating the Job and recording it.
+pub(crate) const START_GRACE: Duration = Duration::from_mins(1);
+
+/// The status to build on once a run's Job exists: as it is when it names the Job; `None` while
+/// the start may still be recording it, since writing an older status would drop what the start
+/// writes; past [`START_GRACE`], the Job adopted.
+pub(crate) fn recorded(
+    status: BuildRunStatus,
+    job: &Job,
+    now: Timestamp,
+) -> Option<BuildRunStatus> {
+    if status.job_ref.is_some() {
+        return Some(status);
+    }
+    let created = job.metadata.creation_timestamp.as_ref()?.0;
+    let age = now.duration_since(created).unsigned_abs();
+    (age >= START_GRACE).then(|| BuildRunStatus {
+        job_ref: job.metadata.name.clone(),
+        start_time: Some(created.to_string()),
+        ..status
+    })
+}
+
 fn phase(run: &BuildRun) -> Option<Phase> {
     run.status.as_ref().and_then(|s| s.phase)
 }

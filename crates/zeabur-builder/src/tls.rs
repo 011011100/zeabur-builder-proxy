@@ -168,7 +168,11 @@ pub(crate) async fn copy_secret(
                 .await
                 .map(drop)
         }
-        None => api.create(&PostParams::default(), &wanted).await.map(drop),
+        // Runs started together race to create the copy; the loser finds it there.
+        None => match api.create(&PostParams::default(), &wanted).await {
+            Err(kube::Error::Api(status)) if status.is_already_exists() => Ok(()),
+            result => result.map(drop),
+        },
     }
 }
 

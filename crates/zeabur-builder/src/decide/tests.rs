@@ -402,3 +402,24 @@ fn failures_name_their_phase() {
     };
     assert_eq!(status.reason, Some(Reason::InfraError));
 }
+
+#[test]
+fn a_job_is_used_once_its_run_records_it() {
+    let mut job = job(None);
+    job.metadata.name = Some("app-x1".to_owned());
+    job.metadata.creation_timestamp = Some(Time(now()));
+    let unrecorded = BuildRunStatus::default();
+    assert_eq!(recorded(unrecorded.clone(), &job, now()), None);
+
+    let started = BuildRunStatus {
+        job_ref: Some("app-x1".to_owned()),
+        buildkitd_instance: Some("buildkitd-0".to_owned()),
+        ..BuildRunStatus::default()
+    };
+    assert_eq!(recorded(started.clone(), &job, now()), Some(started));
+
+    let later = now() + START_GRACE;
+    let adopted = recorded(unrecorded, &job, later).unwrap();
+    assert_eq!(adopted.job_ref.as_deref(), Some("app-x1"));
+    assert_eq!(adopted.start_time, Some(now().to_string()));
+}
