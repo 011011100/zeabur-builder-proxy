@@ -259,6 +259,12 @@
                 "type": "string"
               },
               {
+                "jsonPath": ".status.latestImage",
+                "name": "Image",
+                "priority": 1,
+                "type": "string"
+              },
+              {
                 "jsonPath": ".metadata.creationTimestamp",
                 "name": "Age",
                 "type": "date"

@@ -29,7 +29,7 @@ cargo deny --locked check
 Generated files are committed and checked by tests. Regenerate them with:
 
 ```sh
-cargo run -q -- crds > deploy/crds.json
+cargo run -q -p zeabur-builder -- crds > deploy/crds.json
 ZEABUR_BUILDER_BLESS=1 cargo nextest run -p zeabur-builder-jobspec   # build Job golden files
 ```
 
@@ -75,6 +75,6 @@ Use a disposable cluster with its own kubeconfig, never your normal context:
 ```sh
 export KUBECONFIG=$(mktemp -d)/kubeconfig
 kind create cluster --name zeabur-builder
-cargo run -q -- crds | kubectl apply -f -
+cargo run -q -p zeabur-builder -- crds | kubectl apply -f -
 kind delete cluster --name zeabur-builder
 ```

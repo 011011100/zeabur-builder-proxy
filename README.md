@@ -53,7 +53,7 @@ api-x7k2p   api     Succeeded            2m        30s        2m
 ```sh
 nix develop
 cargo nextest run --workspace
-cargo run -q -- crds | kubectl apply -f -      # on a disposable cluster
+cargo run -q -p zeabur-builder -- crds | kubectl apply -f -   # on a disposable cluster
 ```
 
 ## Contributing

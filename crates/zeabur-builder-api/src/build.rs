@@ -73,6 +73,12 @@ pub const RELATIVE_PATH_PATTERN: &str =
         json_path = ".status.conditions[?(@.type==\"Ready\")].status"
     ),
     printcolumn(
+        name = "Image",
+        type_ = "string",
+        json_path = ".status.latestImage",
+        priority = 1
+    ),
+    printcolumn(
         name = "Age",
         type_ = "date",
         json_path = ".metadata.creationTimestamp"
