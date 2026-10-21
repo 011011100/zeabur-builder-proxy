@@ -1,0 +1,5 @@
+# The build Job's `fetch` and `build` containers: BuildKit's own image, for `buildctl`, `git` and
+# `ssh`, plus the static `zeabur-builder-job` wrapper. Built by scripts/build-images.sh.
+ARG BUILDKIT=docker.io/moby/buildkit:v0.34.1
+FROM ${BUILDKIT}
+COPY --chmod=0555 zeabur-builder-job /usr/bin/zeabur-builder-job

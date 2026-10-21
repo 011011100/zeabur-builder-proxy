@@ -1,0 +1,17 @@
+# The Railpack planner: `railpack prepare` writes the plan the frontend builds. The version must
+# match the frontend's (ghcr.io/railwayapp/railpack-frontend) in the `railpack` ClusterBuilder.
+# Railpack is MIT-licensed: https://github.com/railwayapp/railpack
+FROM docker.io/library/alpine:3.22
+ARG RAILPACK_VERSION=v0.43.0
+ARG TARGETARCH
+RUN set -eu; \
+    case "$TARGETARCH" in arm64) arch=arm64 ;; amd64) arch=x86_64 ;; *) exit 1 ;; esac; \
+    file="railpack-${RAILPACK_VERSION}-${arch}-unknown-linux-musl.tar.gz"; \
+    base="https://github.com/railwayapp/railpack/releases/download/${RAILPACK_VERSION}"; \
+    cd /tmp; \
+    wget -q "$base/$file" "$base/checksums.txt"; \
+    grep " $file\$" checksums.txt | sha256sum -c -; \
+    tar -xzf "$file" -C /usr/local/bin railpack; \
+    rm -f "$file" checksums.txt; \
+    railpack --version
+USER 1000:1000

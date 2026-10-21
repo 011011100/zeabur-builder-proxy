@@ -58,6 +58,7 @@
 
               # Kubernetes and BuildKit integration tests
               kind
+              k3d
               kubectl
               buildkit
 
@@ -67,7 +68,24 @@
             env = {
               # Required by rust-analyzer
               RUST_SRC_PATH = "${pkgs.rustToolchain}/lib/rustlib/src/rust/library";
-            };
+              # Mozilla's CA bundle (MPL-2.0), copied into the controller image for HTTPS to Git
+              # servers; pinned with nixpkgs.
+              ZEABUR_BUILDER_CA_BUNDLE = "${pkgs.cacert}/etc/ssl/certs/ca-bundle.crt";
+            }
+            // pkgs.lib.optionalAttrs pkgs.stdenv.hostPlatform.isLinux (
+              # Static musl builds of the host architecture: aws-lc-sys must be compiled against musl
+              # headers, not glibc ones.
+              let
+                muslCc = pkgs.pkgsStatic.stdenv.cc;
+                bin = "${muslCc}/bin/${muslCc.targetPrefix}";
+                triple = "${pkgs.stdenv.hostPlatform.parsed.cpu.name}_unknown_linux_musl";
+              in
+              {
+                "CC_${triple}" = "${bin}cc";
+                "AR_${triple}" = "${bin}ar";
+                "CARGO_TARGET_${pkgs.lib.toUpper triple}_LINKER" = "${bin}cc";
+              }
+            );
           };
         }
       );
