@@ -1,0 +1,61 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_call:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTDOCFLAGS: -D warnings
+
+jobs:
+  check:
+    name: ${{ matrix.name }}
+    runs-on: ubuntu-26.04-arm
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: format
+            run: cargo fmt --all --check && nixfmt --check flake.nix && shellcheck scripts/*.sh && actionlint
+          - name: clippy
+            run: cargo lint
+          - name: docs
+            run: cargo doc --workspace --no-deps --document-private-items --locked
+          - name: test
+            run: cargo nextest run --workspace --all-features --locked --no-tests=warn
+          - name: cargo-deny
+            run: cargo deny --locked check
+          - name: levels
+            run: ./scripts/check-levels.sh
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: DeterminateSystems/determinate-nix-action@d0c908e6cbe9f89f36ed8205a3ab6f092636916a # v3.23.1
+      # rust-cache keys on `rustc -vV`: put the pinned toolchain from the dev shell on PATH first,
+      # otherwise it fails ("Command failed: rustc -vV") or keys on the image's rustc.
+      - run: dirname "$(nix develop --command bash -c 'command -v rustc')" >> "$GITHUB_PATH"
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          key: ${{ matrix.name }}
+      - run: nix develop --command bash -c '${{ matrix.run }}'
+
+  dco:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-slim
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - run: ./scripts/check-dco.sh "${{ github.event.pull_request.base.sha }}" "${{ github.event.pull_request.head.sha }}"
