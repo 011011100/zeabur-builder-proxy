@@ -231,6 +231,7 @@ pub fn job(inputs: &JobInputs<'_>) -> Result<Job, JobError> {
 /// GitLab, Gitea and `git daemon` (protocol v2) do; the checkout is then verified against the SHA.
 const FETCH_SCRIPT: &str = r#"set -eu
 start=$(date +%s)
+mkdir -p /workspace/plan /workspace/out
 if [ -f /etc/zeabur-builder/git/ssh-privatekey ]; then
   install -m 0600 /etc/zeabur-builder/git/ssh-privatekey /tmp/id
   export GIT_SSH_COMMAND="ssh -i /tmp/id -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile=/etc/zeabur-builder/git/known_hosts"
