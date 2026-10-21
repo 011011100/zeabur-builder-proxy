@@ -1,0 +1,334 @@
+//! `Build`: what to build, and the newest image of it.
+
+#![expect(
+    unreachable_pub,
+    reason = "the KubeSchema derive re-emits these types inside a private module"
+)]
+
+use kube::{CustomResource, KubeSchema};
+use schemars::JsonSchema;
+use serde::{Deserialize, Serialize};
+
+use crate::common::{
+    Condition, DURATION_PATTERN, MAX_NAME, REVISION_PATTERN, SecretKeyRef, SecretRef,
+};
+
+/// Longest repository URL.
+pub const MAX_URL: usize = 2048;
+/// Longest Git ref.
+pub const MAX_REF: usize = 255;
+/// Longest path inside the repository.
+pub const MAX_PATH: usize = 1024;
+/// Longest image repository.
+pub const MAX_IMAGE: usize = 512;
+/// Longest tag template.
+pub const MAX_TAG_TEMPLATE: usize = 256;
+/// Most extra tags.
+pub const MAX_EXTRA_TAGS: usize = 8;
+/// Most build variables.
+pub const MAX_ENV: usize = 128;
+/// Most notification targets.
+pub const MAX_NOTIFY: usize = 8;
+/// Most base images remembered.
+pub const MAX_BASE_IMAGES: usize = 10;
+/// Most conditions.
+pub const MAX_CONDITIONS: usize = 8;
+/// A relative path whose segments do not start with `.`, so it cannot climb out with `..`.
+pub const RELATIVE_PATH_PATTERN: &str =
+    r"^[A-Za-z0-9_@+-][A-Za-z0-9._@+-]*(/[A-Za-z0-9_@+-][A-Za-z0-9._@+-]*)*$";
+
+/// A Git ref to follow and the image to keep built from it.
+///
+/// ```yaml
+/// apiVersion: builder.zeabur.com/v1alpha1
+/// kind: Build
+/// metadata: {name: api, namespace: team-a}
+/// spec:
+///   source: {git: {url: https://github.com/acme/api, ref: main}}
+///   builderRef: railpack
+/// ```
+#[expect(
+    clippy::duplicated_attributes,
+    reason = "repeated printcolumn arguments such as `type_ = \"string\"` are distinct columns"
+)]
+#[derive(CustomResource, KubeSchema, Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+#[kube(
+    group = "builder.zeabur.com",
+    version = "v1alpha1",
+    kind = "Build",
+    namespaced,
+    status = "BuildStatus",
+    shortname = "zbbuild",
+    category = "zeabur-builder",
+    printcolumn(name = "Builder", type_ = "string", json_path = ".spec.builderRef"),
+    printcolumn(name = "Source", type_ = "string", json_path = ".status.sourceMode"),
+    printcolumn(
+        name = "Revision",
+        type_ = "string",
+        json_path = ".status.latestRevision"
+    ),
+    printcolumn(
+        name = "Ready",
+        type_ = "string",
+        json_path = ".status.conditions[?(@.type==\"Ready\")].status"
+    ),
+    printcolumn(
+        name = "Age",
+        type_ = "date",
+        json_path = ".metadata.creationTimestamp"
+    ),
+    doc = "A Git ref that Zeabur Builder keeps built into a container image."
+)]
+#[serde(rename_all = "camelCase")]
+pub struct BuildSpec {
+    /// Where the source comes from.
+    pub source: SourceSpec,
+    /// The `ClusterBuilder`.
+    #[schemars(length(min = 1, max = MAX_NAME))]
+    pub builder_ref: String,
+    /// Where to push. Default: `<defaultRegistry>/<namespace>/<name>`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output: Option<OutputSpec>,
+    /// Build variables, always passed as `BuildKit` secrets, never as build arguments.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[schemars(length(max = MAX_ENV))]
+    pub env: Vec<EnvVar>,
+    /// What starts a build.
+    #[serde(default)]
+    pub triggers: TriggerSpec,
+    /// Plan pinning, for planners that are not deterministic.
+    #[serde(default)]
+    pub plan: PlanPolicy,
+    /// What a new commit does to a running build.
+    #[serde(default)]
+    pub concurrency: Concurrency,
+    /// Finished `BuildRun`s to keep. The newest success is always kept. Default 10.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(range(min = 1, max = 100))]
+    pub history_limit: Option<i32>,
+    /// Who to tell after a successful build.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[schemars(length(max = MAX_NOTIFY))]
+    pub notify: Vec<NotifyTarget>,
+    /// Stop automatic builds. `BuildRun`s created by hand still run.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub suspend: bool,
+}
+
+/// The source.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct SourceSpec {
+    /// The Git repository.
+    pub git: GitSource,
+    /// Credentials for a plain Git server: a `kubernetes.io/ssh-auth` Secret (with `known_hosts`)
+    /// or a `kubernetes.io/basic-auth` one, labelled `builder.zeabur.com/git-credentials: "true"`.
+    /// Ignored when a GitHub App covers the repository.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub credentials_ref: Option<SecretRef>,
+}
+
+/// A Git repository and ref.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct GitSource {
+    /// `https://`, `ssh://` or `user@host:path`.
+    #[schemars(length(min = 1, max = MAX_URL))]
+    pub url: String,
+    /// A branch or tag; no wildcards.
+    #[schemars(length(min = 1, max = MAX_REF))]
+    #[serde(rename = "ref")]
+    pub git_ref: String,
+    /// The build context inside the repository, for monorepos.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(length(max = MAX_PATH), regex(pattern = RELATIVE_PATH_PATTERN))]
+    pub context_dir: Option<String>,
+    /// The Dockerfile, relative to the context, for the `dockerfile` builder. Default
+    /// `Dockerfile`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(length(max = MAX_PATH), regex(pattern = RELATIVE_PATH_PATTERN))]
+    pub dockerfile: Option<String>,
+}
+
+/// The image to push.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq, JsonSchema, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct OutputSpec {
+    /// The image repository, without a tag.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(length(max = MAX_IMAGE), regex(pattern = r"^[a-z0-9]([a-z0-9._:/-]*[a-z0-9])?$"))]
+    pub image: Option<String>,
+    /// The tag: `{{.Field}}` with `.Branch`, `.ShortSHA`, `.SHA`, `.UnixTime` and `.BuildRun`.
+    /// Default `{{.Branch}}-{{.UnixTime}}-{{.ShortSHA}}`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(length(max = MAX_TAG_TEMPLATE))]
+    pub tag_template: Option<String>,
+    /// Fixed tags pushed as well, such as `latest`. Rollout tools should not rely on them.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[schemars(
+        length(max = MAX_EXTRA_TAGS),
+        inner(length(max = 128), regex(pattern = r"^[A-Za-z0-9_][A-Za-z0-9._-]{0,127}$"))
+    )]
+    pub extra_tags: Vec<String>,
+    /// A `kubernetes.io/dockerconfigjson` Secret to push with instead of the controller's.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub push_secret_ref: Option<SecretRef>,
+}
+
+/// A build variable.
+#[derive(KubeSchema, Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+#[x_kube(
+    validation = Rule::new("has(self.value) != has(self.valueFrom)").message("set exactly one of value and valueFrom")
+)]
+#[serde(rename_all = "camelCase")]
+pub struct EnvVar {
+    /// The name, as the build sees it.
+    #[schemars(
+        length(min = 1, max = 128),
+        regex(pattern = "^[A-Za-z_][A-Za-z0-9_]*$")
+    )]
+    pub name: String,
+    /// A literal value.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(length(max = 32768))]
+    pub value: Option<String>,
+    /// A value from a Secret in the same namespace.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub value_from: Option<EnvVarSource>,
+}
+
+/// Where a variable's value comes from.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct EnvVarSource {
+    /// A key of a Secret.
+    pub secret_key_ref: SecretKeyRef,
+}
+
+/// What starts a build.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq, JsonSchema, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct TriggerSpec {
+    /// GitHub App push events. Default true when a GitHub App covers the repository.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub webhook: Option<bool>,
+    /// How often to check the ref. Default `1m` for plain Git, `10m` as a safety net with a
+    /// GitHub App.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(length(max = 32), regex(pattern = DURATION_PATTERN))]
+    pub poll_interval: Option<String>,
+    /// Rebuild when a base image's digest changes.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub on_base_image_change: bool,
+}
+
+/// Plan pinning.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq, JsonSchema, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct PlanPolicy {
+    /// Reuse the last successful plan. Default true; ignored for deterministic planners.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pin: Option<bool>,
+    /// New plans wait for `builder.zeabur.com/approve-plan`.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub require_approval: bool,
+    /// When a pinned plan fails to build, plan again once. Default true.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auto_replan_on_failure: Option<bool>,
+}
+
+/// What a new commit does to a build in progress.
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq, JsonSchema, Default)]
+pub enum Concurrency {
+    /// Cancel it and build the new commit.
+    #[default]
+    Replace,
+    /// Let it finish, then build the new commit.
+    Queue,
+}
+
+/// A notification after a successful build.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct NotifyTarget {
+    /// The receiver.
+    #[serde(rename = "type")]
+    pub kind: NotifyType,
+    /// Where to POST.
+    #[schemars(length(min = 1, max = MAX_URL), regex(pattern = "^https?://"))]
+    pub url: String,
+    /// A token or HMAC key.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub secret_ref: Option<SecretRef>,
+}
+
+/// Notification receivers.
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq, JsonSchema)]
+pub enum NotifyType {
+    /// Keel's native webhook, `{"name", "tag"}`.
+    #[serde(rename = "keel")]
+    Keel,
+    /// A Flux `Receiver` of type `generic-hmac`.
+    #[serde(rename = "flux-receiver")]
+    FluxReceiver,
+    /// A JSON document, signed when a key is given.
+    #[serde(rename = "generic")]
+    Generic,
+}
+
+/// What the controller knows about a `Build`.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq, JsonSchema, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct BuildStatus {
+    /// The generation last acted on.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub observed_generation: Option<i64>,
+    /// `GitHubApp` or `PlainGit`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_mode: Option<SourceMode>,
+    /// The commit the ref points at.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(length(max = 40), regex(pattern = REVISION_PATTERN))]
+    pub remote_revision: Option<String>,
+    /// When the ref was last resolved.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(extend("format" = "date-time"))]
+    pub last_resolved_at: Option<String>,
+    /// When a webhook last woke this `Build`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(extend("format" = "date-time"))]
+    pub last_webhook_at: Option<String>,
+    /// The commit of the newest successful build.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(length(max = 40), regex(pattern = REVISION_PATTERN))]
+    pub latest_revision: Option<String>,
+    /// Its image, `repository:tag@sha256:…`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(length(max = 1024))]
+    pub latest_image: Option<String>,
+    /// The newest `BuildRun`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(length(max = MAX_NAME))]
+    pub last_build_run_ref: Option<String>,
+    /// The plan reused by the next build.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(length(max = 71), regex(pattern = crate::common::DIGEST_PATTERN))]
+    pub pinned_plan_digest: Option<String>,
+    /// Base images of the newest successful build, `name@sha256:…`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[schemars(length(max = MAX_BASE_IMAGES), inner(length(max = 1024)))]
+    pub base_images: Vec<String>,
+    /// `SourceReady`, `BuilderReady`, `Ready` and `PlanApprovalPending`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[schemars(length(max = MAX_CONDITIONS))]
+    pub conditions: Vec<Condition>,
+}
+
+/// How the source is reached.
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq, JsonSchema)]
+pub enum SourceMode {
+    /// Through a GitHub App installation.
+    GitHubApp,
+    /// Over plain Git.
+    PlainGit,
+}

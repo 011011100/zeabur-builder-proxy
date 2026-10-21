@@ -1,0 +1,19 @@
+[package]
+name = "zeabur-builder"
+description = "Zeabur Builder: a Kubernetes operator that turns Git commits into container images with BuildKit"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+repository = "https://github.com/zeabur/builder"
+readme = "../../README.md"
+keywords = ["kubernetes", "buildkit", "operator"]
+categories = ["development-tools::build-utils", "command-line-utilities"]
+
+[lints]
+workspace = true
+
+[dependencies]
+zeabur-builder-api.workspace = true
+clap.workspace = true
