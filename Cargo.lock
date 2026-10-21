@@ -673,6 +673,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "zeabur-builder-job"
+version = "0.0.1"
+dependencies = [
+ "base64",
+ "serde",
+ "serde_json",
+ "sha2",
+ "zeabur-builder-core",
+]
+
+[[package]]
 name = "zeabur-builder-jobspec"
 version = "0.0.1"
 dependencies = [
