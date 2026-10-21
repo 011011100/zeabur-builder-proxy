@@ -1,0 +1,102 @@
+# The controller, its permissions and the two ClusterBuilders of the proof of concept.
+# __IMAGE_PREFIX__ and __TAG__ name the images built by scripts/build-images.sh.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: zeabur-builder
+  namespace: builder-system
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: zeabur-builder
+rules:
+  - apiGroups: [builder.zeabur.com]
+    resources: [builds, buildruns, clusterbuilders]
+    verbs: [get, list, watch, create, delete]
+  - apiGroups: [builder.zeabur.com]
+    resources: [builds/status, buildruns/status]
+    verbs: [get, patch]
+  - apiGroups: [batch]
+    resources: [jobs]
+    verbs: [get, list, watch, create, delete]
+  - apiGroups: [""]
+    resources: [pods]
+    verbs: [get, list, watch]
+  # The buildkitd certificates, and the client certificate and push credentials copied into
+  # build namespaces. Cluster-wide for the proof of concept.
+  - apiGroups: [""]
+    resources: [secrets]
+    verbs: [get, create, update, delete]
+  - apiGroups: [events.k8s.io]
+    resources: [events]
+    verbs: [create, patch]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: zeabur-builder
+roleRef: {apiGroup: rbac.authorization.k8s.io, kind: ClusterRole, name: zeabur-builder}
+subjects:
+  - {kind: ServiceAccount, name: zeabur-builder, namespace: builder-system}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: zeabur-builder
+  namespace: builder-system
+  labels: {app.kubernetes.io/name: zeabur-builder}
+spec:
+  # No leader election yet: exactly one replica.
+  replicas: 1
+  strategy: {type: Recreate}
+  selector:
+    matchLabels: {app.kubernetes.io/name: zeabur-builder}
+  template:
+    metadata:
+      labels: {app.kubernetes.io/name: zeabur-builder}
+    spec:
+      serviceAccountName: zeabur-builder
+      securityContext:
+        runAsNonRoot: true
+        seccompProfile: {type: RuntimeDefault}
+      containers:
+        - name: controller
+          image: __IMAGE_PREFIX__/builder:__TAG__
+          imagePullPolicy: IfNotPresent
+          args: [controller]
+          env:
+            - name: POD_NAMESPACE
+              valueFrom: {fieldRef: {fieldPath: metadata.namespace}}
+            - name: POD_NAME
+              valueFrom: {fieldRef: {fieldPath: metadata.name}}
+            - {name: ZEABUR_BUILDER_DEFAULT_REGISTRY, value: registry.builder-registry.svc.cluster.local:5000}
+            - {name: ZEABUR_BUILDER_JOB_IMAGE, value: __IMAGE_PREFIX__/builder-job:__TAG__}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: {drop: [ALL]}
+          resources:
+            requests: {cpu: 10m, memory: 32Mi}
+            limits: {memory: 256Mi}
+---
+apiVersion: builder.zeabur.com/v1alpha1
+kind: ClusterBuilder
+metadata:
+  name: dockerfile
+spec:
+  type: dockerfile
+  frontend: {type: dockerfile.v0}
+---
+apiVersion: builder.zeabur.com/v1alpha1
+kind: ClusterBuilder
+metadata:
+  name: railpack
+spec:
+  type: railpack
+  planner:
+    image: __IMAGE_PREFIX__/builder-railpack:__TAG__
+    deterministic: true
+  frontend:
+    type: gateway.v0
+    source: ghcr.io/railwayapp/railpack-frontend:v0.43.0

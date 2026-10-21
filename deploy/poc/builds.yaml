@@ -1,0 +1,34 @@
+# Sample Builds: a Dockerfile repository, a repository without a Dockerfile (Railpack), and two
+# that fail on purpose, one at the source and one in the build.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: builder-poc
+---
+apiVersion: builder.zeabur.com/v1alpha1
+kind: Build
+metadata: {name: whoami, namespace: builder-poc}
+spec:
+  source: {git: {url: https://github.com/traefik/whoami, ref: master}}
+  builderRef: dockerfile
+---
+apiVersion: builder.zeabur.com/v1alpha1
+kind: Build
+metadata: {name: hello-python, namespace: builder-poc}
+spec:
+  source: {git: {url: https://github.com/dockersamples/helloworld-demo-python, ref: main}}
+  builderRef: railpack
+---
+apiVersion: builder.zeabur.com/v1alpha1
+kind: Build
+metadata: {name: no-such-ref, namespace: builder-poc}
+spec:
+  source: {git: {url: https://github.com/traefik/whoami, ref: no-such-branch}}
+  builderRef: dockerfile
+---
+apiVersion: builder.zeabur.com/v1alpha1
+kind: Build
+metadata: {name: no-such-dockerfile, namespace: builder-poc}
+spec:
+  source: {git: {url: https://github.com/traefik/whoami, ref: master, dockerfile: Dockerfile.missing}}
+  builderRef: dockerfile

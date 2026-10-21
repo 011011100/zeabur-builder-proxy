@@ -1,0 +1,98 @@
+# The buildkitd pool (plan §7.1): rootful buildkitd in a StatefulSet with one cache volume per
+# instance, mTLS on TCP and the readiness probe on the local socket. Adapted from BuildKit's
+# examples/kubernetes/statefulset.userns.yaml (Apache-2.0, https://github.com/moby/buildkit).
+# __HOST_USERS__ is false to run each instance in a user namespace (Kubernetes >= 1.33), true to
+# fall back to a plainly privileged container; __REPLICAS__ is the pool size.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: buildkitd
+  namespace: builder-system
+data:
+  buildkitd.toml: |
+    [worker.oci]
+      enabled = true
+      gc = true
+      [[worker.oci.gcpolicy]]
+        all = true
+        maxUsedSpace = "80%"
+        # Prune before the node's disk reaches kubelet's eviction threshold (by default 10% free
+        # on nodefs, 15% on imagefs, 5% on k3s), whatever the cache size.
+        minFreeSpace = "20%"
+    [worker.containerd]
+      enabled = false
+    [registry."registry.builder-registry.svc.cluster.local:5000"]
+      http = true
+      insecure = true
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: buildkitd
+  namespace: builder-system
+spec:
+  clusterIP: None
+  selector: {app.kubernetes.io/name: buildkitd}
+  ports: [{port: 1234, name: grpc}]
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: buildkitd
+  namespace: builder-system
+  labels: {app.kubernetes.io/name: buildkitd}
+spec:
+  serviceName: buildkitd
+  podManagementPolicy: Parallel
+  replicas: __REPLICAS__
+  selector:
+    matchLabels: {app.kubernetes.io/name: buildkitd}
+  template:
+    metadata:
+      labels: {app.kubernetes.io/name: buildkitd}
+    spec:
+      hostUsers: __HOST_USERS__
+      containers:
+        - name: buildkitd
+          image: docker.io/moby/buildkit:v0.34.1
+          args:
+            - --config=/etc/buildkit/buildkitd.toml
+            - --addr=unix:///run/buildkit/buildkitd.sock
+            - --addr=tcp://0.0.0.0:1234
+            - --tlscacert=/certs/ca.pem
+            - --tlscert=/certs/cert.pem
+            - --tlskey=/certs/key.pem
+          ports: [{containerPort: 1234, name: grpc}]
+          readinessProbe:
+            exec:
+              command: [buildctl, --addr, unix:///run/buildkit/buildkitd.sock, debug, workers]
+            initialDelaySeconds: 3
+            periodSeconds: 10
+          livenessProbe:
+            exec:
+              command: [buildctl, --addr, unix:///run/buildkit/buildkitd.sock, debug, workers]
+            initialDelaySeconds: 10
+            periodSeconds: 30
+          securityContext:
+            # In a user namespace (hostUsers: false) root and privileges are the namespace's,
+            # not the node's.
+            privileged: true
+          resources:
+            requests: {cpu: 100m, memory: 256Mi}
+          volumeMounts:
+            - {name: config, mountPath: /etc/buildkit, readOnly: true}
+            - {name: certs, mountPath: /certs, readOnly: true}
+            - {name: cache, mountPath: /var/lib/buildkit}
+      volumes:
+        - name: config
+          configMap: {name: buildkitd}
+        # Created by the controller on its first start.
+        - name: certs
+          secret: {secretName: buildkitd-tls}
+  volumeClaimTemplates:
+    - metadata:
+        name: cache
+      spec:
+        accessModes: [ReadWriteOnce]
+        resources:
+          requests: {storage: 10Gi}
