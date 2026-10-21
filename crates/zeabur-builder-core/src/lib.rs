@@ -1,5 +1,6 @@
 //! Zeabur Builder's decisions that need no I/O.
 //!
+//! - [`git`]: resolving a branch or tag to a commit from a Git server's answer.
 //! - [`repo`]: one key per Git repository, however its URL is written, so a webhook, a poll and a
 //!   `Build` agree on which repository they mean.
 //! - [`tag`]: the immutable, sortable image tag of a build.
@@ -10,6 +11,7 @@
 //! The controller and the Job image both depend on this crate, which is why it stays free of I/O,
 //! clocks and randomness: the same inputs always give the same decision.
 
+pub mod git;
 pub mod progress;
 pub mod repo;
 pub mod result;
