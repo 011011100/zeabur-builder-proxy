@@ -53,7 +53,8 @@ pub mod labels {
 
 /// Annotations people write to act on a `Build`, and that the controller writes for them.
 pub mod annotations {
-    /// On a `Build`: a new value rebuilds the ref's current commit.
+    /// On a `Build`: a new value rebuilds the ref's current commit. On a `BuildRun` the
+    /// controller created: the `Build`'s value when it was created, the request it answered.
     pub const REBUILD: &str = "builder.zeabur.com/rebuild";
     /// On a `Build`: a new value drops the pinned plan and plans again.
     pub const REPLAN: &str = "builder.zeabur.com/replan";

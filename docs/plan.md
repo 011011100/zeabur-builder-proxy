@@ -249,6 +249,8 @@ type BuildStatus struct {
 - `builder.zeabur.com/replan: <任意值>`：值變更就丟棄 pin 的 plan，重新規劃
 - `builder.zeabur.com/approve-plan: <plan digest>`：核准指定的 plan
 
+> **〔變更〕** controller 建立的每個 BuildRun 都帶上 Build 當下的 `rebuild` 值。Build 的值與最新一筆帶此值的 BuildRun 不同時才重建（`trigger=manual`），依 `concurrency` 處理；清理歷史時保留這筆 BuildRun。`suspend` 期間不重建，值保留，解除後才建置。
+
 ### 3.3 BuildRun（namespaced；代表一次執行，spec 不可變）
 
 ```go
@@ -680,6 +682,8 @@ type NotifyTarget struct {
 - `flux-receiver`：觸發 Flux 的 `Receiver`，讓 ImageRepository 立刻重新掃描。**〔已驗證〕** 使用 `generic-hmac` 類型，header 為 `X-Signature: sha256=<hex>`，`resources` 列出 `image.toolkit.fluxcd.io/v1` 的 `ImageRepository`。
 - `generic`：POST 一份 JSON（build、namespace、revision、image、digest、tags），若有提供 key 就加上 HMAC 簽章 header。
 - 通知失敗**不影響** BuildRun 的結果，只記錄 Event 與 `notify_errors_total` 指標；最多重試 3 次（指數退避）。
+
+> **〔變更〕** 由 Build reconciler 在 status 記下最新一次成功之後送出，只送這一次成功；送完（不論成敗）在該 BuildRun 寫入 `status.notifiedAt`，之後不再送。結果記成 Build 上的 Event `BuildNotified` 或 `NotifyFailed`。`keel` 的 `name` 是不含 tag 的 image repository，`tag` 是 tag 模板產生的那個（`status.tags` 第一個）；`secretRef` 指向含 `username`、`password` 的 Secret，以 HTTP basic auth 送出。`flux-receiver`、`generic` 與 `notify_errors_total` 尚未實作，前兩者只記錄 log。
 
 文件需附上整合範例（放在 `docs/integrations/`）：
 - **Flux Image Automation**：`ImagePolicy` 搭配 `filterTags`，用正規表示式 `^main-(?P<ts>[0-9]+)-[a-f0-9]+$` 抽出 `ts`，再用 `numerical` 排序取最新

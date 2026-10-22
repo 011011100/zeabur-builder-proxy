@@ -4,7 +4,7 @@ use k8s_openapi::api::core::v1::{
 };
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::Time;
 use zeabur_builder_api::build::{
-    BuildSpec, GitSource, OutputSpec, PlanPolicy, SourceSpec, TriggerSpec,
+    BuildSpec, GitSource, NotifyTarget, NotifyType, OutputSpec, PlanPolicy, SourceSpec, TriggerSpec,
 };
 use zeabur_builder_api::build_run::BuildRunSpec;
 
@@ -124,15 +124,17 @@ fn resolves_once_per_interval_or_new_generation() {
         ..BuildStatus::default()
     };
     let minute = Duration::from_mins(1);
-    assert!(!needs_resolve(Some(&status), Some(1), minute, now()));
-    assert!(needs_resolve(Some(&status), Some(2), minute, now()));
+    assert!(!needs_resolve(Some(&status), Some(1), false, minute, now()));
+    assert!(needs_resolve(Some(&status), Some(2), false, minute, now()));
     assert!(needs_resolve(
         Some(&status),
         Some(1),
+        false,
         Duration::from_secs(30),
         now()
     ));
-    assert!(needs_resolve(None, Some(1), minute, now()));
+    assert!(needs_resolve(None, Some(1), false, minute, now()));
+    assert!(needs_resolve(Some(&status), Some(1), true, minute, now()));
 }
 
 #[test]
@@ -147,7 +149,7 @@ fn a_new_commit_replaces_the_running_build() {
     assert_eq!(
         next_run(&build, B, &runs),
         NextRun {
-            create: true,
+            create: Some(Trigger::Poll),
             cancel: vec!["api-1".to_owned()]
         }
     );
@@ -167,7 +169,7 @@ fn queue_waits_and_failures_are_not_retried() {
     assert_eq!(next_run(&build, B, &running), NextRun::default());
     let failed = [run("api-1", A, Some(Phase::Failed), "2026-10-22T07:00:00Z")];
     assert_eq!(next_run(&build, A, &failed), NextRun::default());
-    assert!(next_run(&build, B, &failed).create);
+    assert_eq!(next_run(&build, B, &failed).create, Some(Trigger::Poll));
 
     build.spec.suspend = true;
     assert_eq!(next_run(&build, B, &failed), NextRun::default());
@@ -181,6 +183,96 @@ fn a_built_commit_is_not_built_again_after_pruning() {
         ..BuildStatus::default()
     });
     assert_eq!(next_run(&build, A, &[]), NextRun::default());
+}
+
+fn rebuild(mut meta: ObjectMeta, value: &str) -> ObjectMeta {
+    meta.annotations
+        .get_or_insert_default()
+        .insert(annotations::REBUILD.to_owned(), value.to_owned());
+    meta
+}
+
+#[test]
+fn a_new_rebuild_value_builds_the_commit_again() {
+    let mut build = build();
+    build.status = Some(BuildStatus {
+        latest_revision: Some(A.to_owned()),
+        ..BuildStatus::default()
+    });
+    let mut first = run("api-1", A, Some(Phase::Succeeded), "2026-10-22T07:00:00Z");
+    assert_eq!(next_run(&build, A, &[first.clone()]), NextRun::default());
+
+    build.metadata = rebuild(build.metadata, "1");
+    assert_eq!(pending_rebuild(&build, &[first.clone()]), Some("1"));
+    assert_eq!(
+        next_run(&build, A, &[first.clone()]),
+        NextRun {
+            create: Some(Trigger::Manual),
+            cancel: Vec::new()
+        }
+    );
+    assert_eq!(
+        next_run(&build, A, &[]).create,
+        Some(Trigger::Manual),
+        "after pruning too"
+    );
+
+    first.metadata = rebuild(first.metadata, "1");
+    let by_hand = run("api-2", A, Some(Phase::Failed), "2026-10-22T07:30:00Z");
+    let runs = [first, by_hand];
+    assert_eq!(pending_rebuild(&build, &runs), None);
+    assert_eq!(next_run(&build, A, &runs), NextRun::default());
+
+    build.metadata = rebuild(build.metadata, "2");
+    assert_eq!(next_run(&build, A, &runs).create, Some(Trigger::Manual));
+    assert_eq!(
+        next_run(&build, B, &runs).create,
+        Some(Trigger::Poll),
+        "a new commit answers the rebuild too"
+    );
+}
+
+#[test]
+fn a_rebuild_follows_concurrency_and_waits_for_suspend() {
+    let mut build = build();
+    build.metadata = rebuild(build.metadata, "2");
+    let mut running = run("api-1", A, Some(Phase::Building), "2026-10-22T07:00:00Z");
+    running.metadata = rebuild(running.metadata, "1");
+    let runs = [running.clone()];
+    assert_eq!(
+        next_run(&build, A, &runs),
+        NextRun {
+            create: Some(Trigger::Manual),
+            cancel: vec!["api-1".to_owned()]
+        }
+    );
+
+    build.spec.concurrency = Concurrency::Queue;
+    assert_eq!(next_run(&build, A, &runs), NextRun::default());
+    assert_eq!(pending_rebuild(&build, &runs), Some("2"));
+
+    build.spec.suspend = true;
+    assert_eq!(pending_rebuild(&build, &runs), None);
+    let mut done = running;
+    done.status = Some(BuildRunStatus {
+        phase: Some(Phase::Succeeded),
+        ..BuildRunStatus::default()
+    });
+    assert_eq!(next_run(&build, A, &[done.clone()]), NextRun::default());
+    build.spec.suspend = false;
+    assert_eq!(next_run(&build, A, &[done]).create, Some(Trigger::Manual));
+}
+
+#[test]
+fn pruning_keeps_the_answer_to_the_last_rebuild() {
+    let mut answered = run("api-1", A, Some(Phase::Failed), "2026-10-22T01:00:00Z");
+    answered.metadata = rebuild(answered.metadata, "1");
+    let runs = [
+        answered,
+        run("api-2", A, Some(Phase::Failed), "2026-10-22T02:00:00Z"),
+        run("api-3", A, Some(Phase::Failed), "2026-10-22T03:00:00Z"),
+    ];
+    assert_eq!(prune(&runs, 1), ["api-2"]);
 }
 
 #[test]
@@ -284,6 +376,57 @@ fn summary_points_at_the_newest_success() {
     assert_eq!(status.conditions[0].status, ConditionStatus::False);
     assert_eq!(status.conditions[0].reason, "BuildFailed");
     assert_eq!(status.conditions[0].message, "api-2: exit code: 2");
+}
+
+fn succeeded(name: &str, revision: &str, at: &str, tags: &[&str]) -> BuildRun {
+    let mut run = run(name, revision, Some(Phase::Succeeded), at);
+    if let Some(s) = run.status.as_mut() {
+        s.tags = tags.iter().map(|t| (*t).to_owned()).collect();
+        s.image_digest = Some(DIGEST.to_owned());
+    }
+    run
+}
+
+#[test]
+fn the_newest_success_is_notified_once() {
+    let mut build = build();
+    let old = succeeded("api-1", A, "2026-10-22T01:00:00Z", &["main-1-3e1a9c2"]);
+    let mut new = succeeded("api-2", B, "2026-10-22T02:00:00Z", &["main-2-0123456"]);
+    let failed = run("api-3", A, Some(Phase::Failed), "2026-10-22T03:00:00Z");
+    let runs = [old.clone(), new.clone(), failed.clone()];
+    assert!(notify_due(&build, &runs).is_none(), "no targets");
+
+    build.spec.notify = vec![NotifyTarget {
+        kind: NotifyType::Keel,
+        url: "http://keel.keel:9300/v1/webhooks/native".to_owned(),
+        secret_ref: None,
+    }];
+    assert_eq!(
+        notify_due(&build, &runs).and_then(|r| r.metadata.name.as_deref()),
+        Some("api-2")
+    );
+    if let Some(s) = new.status.as_mut() {
+        s.notified_at = Some(now().to_string());
+    }
+    assert!(notify_due(&build, &[old, new, failed]).is_none());
+}
+
+#[test]
+fn keel_gets_the_repository_and_the_template_tag() {
+    let run = succeeded(
+        "api-1",
+        A,
+        "2026-10-22T01:00:00Z",
+        &["main-1-3e1a9c2", "latest"],
+    );
+    let payload = keel_payload("registry.local:5000/team-a/api", &run).unwrap();
+    assert_eq!(
+        serde_json::to_value(payload).unwrap(),
+        serde_json::json!({"name": "registry.local:5000/team-a/api", "tag": "main-1-3e1a9c2"})
+    );
+    let untagged = succeeded("api-2", A, "2026-10-22T01:00:00Z", &[]);
+    assert_eq!(keel_payload("r/team-a/api", &untagged), None);
+    assert_eq!(NOTIFY_BACKOFF.len() + 1, 3, "three attempts");
 }
 
 fn job(condition: Option<(&str, &str)>) -> Job {

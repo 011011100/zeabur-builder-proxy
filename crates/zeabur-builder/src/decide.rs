@@ -6,9 +6,12 @@ use std::time::Duration;
 use jiff::Timestamp;
 use k8s_openapi::api::batch::v1::Job;
 use k8s_openapi::api::core::v1::{ContainerStatus, Pod};
+use k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta;
+use serde::Serialize;
+use zeabur_builder_api::annotations;
 use zeabur_builder_api::build::{Build, BuildStatus, Concurrency};
 use zeabur_builder_api::build_run::{
-    BuildRun, BuildRunStatus, CacheStats, Phase, PlanSource, Reason,
+    BuildRun, BuildRunStatus, CacheStats, Phase, PlanSource, Reason, Trigger,
 };
 use zeabur_builder_api::common::{Condition, ConditionStatus};
 use zeabur_builder_core::result::{self, BuildResult, FailureReason, Outcome};
@@ -103,15 +106,17 @@ pub(crate) fn set_condition(
 }
 
 /// Whether the ref must be asked again, or the last answer is recent enough. A new generation
-/// (the spec changed) always asks.
+/// (the spec changed) always asks, and so does a pending rebuild, which builds the commit the ref
+/// points at now.
 pub(crate) fn needs_resolve(
     status: Option<&BuildStatus>,
     generation: Option<i64>,
+    rebuild: bool,
     interval: Duration,
     now: Timestamp,
 ) -> bool {
     let Some(status) = status else { return true };
-    if status.remote_revision.is_none() || status.observed_generation != generation {
+    if rebuild || status.remote_revision.is_none() || status.observed_generation != generation {
         return true;
     }
     let Some(last) = status
@@ -124,30 +129,71 @@ pub(crate) fn needs_resolve(
     now.duration_since(last).unsigned_abs() >= interval
 }
 
+fn rebuild_value(meta: &ObjectMeta) -> Option<&str> {
+    meta.annotations
+        .as_ref()?
+        .get(annotations::REBUILD)
+        .map(String::as_str)
+}
+
+/// The newest run that records a `rebuild` value: the request last answered.
+fn answered_rebuild(runs: &[BuildRun]) -> Option<&BuildRun> {
+    runs.iter()
+        .filter(|r| rebuild_value(&r.metadata).is_some())
+        .max_by_key(|r| {
+            (
+                r.metadata.creation_timestamp.as_ref().map(|t| t.0),
+                r.metadata.name.as_deref(),
+            )
+        })
+}
+
+/// The `Build`'s `rebuild` value when it differs from the one on the newest run that records
+/// one. Every run the controller creates records the value of that moment, so a value set before
+/// a build asks for nothing more once that build starts.
+///
+/// A suspended `Build` has none pending: plan §4.1 skips steps 4 to 6, the rebuild among them.
+/// The request is kept and runs when `suspend` is cleared; a `BuildRun` created by hand still
+/// runs while suspended.
+pub(crate) fn pending_rebuild<'a>(build: &'a Build, runs: &[BuildRun]) -> Option<&'a str> {
+    if build.spec.suspend {
+        return None;
+    }
+    let wanted = rebuild_value(&build.metadata)?;
+    let answered = answered_rebuild(runs).and_then(|r| rebuild_value(&r.metadata));
+    (answered != Some(wanted)).then_some(wanted)
+}
+
 /// What the `Build` reconciler does about the commit the ref points at.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub(crate) struct NextRun {
-    /// Start a `BuildRun` for the commit.
-    pub(crate) create: bool,
-    /// Cancel these unfinished runs of older commits (`Replace`).
+    /// Start a `BuildRun` for the commit, with this trigger.
+    pub(crate) create: Option<Trigger>,
+    /// Cancel these unfinished runs (`Replace`).
     pub(crate) cancel: Vec<String>,
 }
 
 /// Decides whether `remote` needs a build (plan §4.1, steps 4 to 6).
 ///
 /// A commit that already has a `BuildRun`, in any phase, gets no other: a failed build is not
-/// retried by itself, which would loop on a broken commit.
+/// retried by itself, which would loop on a broken commit. A [pending rebuild](pending_rebuild)
+/// builds it again, as `Manual`, under the same concurrency rules as a new commit.
 pub(crate) fn next_run(build: &Build, remote: &str, runs: &[BuildRun]) -> NextRun {
-    if build.spec.suspend || runs.iter().any(|r| r.spec.revision == remote) {
+    if build.spec.suspend {
         return NextRun::default();
     }
     let latest = build
         .status
         .as_ref()
         .and_then(|s| s.latest_revision.as_deref());
-    if latest == Some(remote) {
+    let new_commit = latest != Some(remote) && !runs.iter().any(|r| r.spec.revision == remote);
+    let trigger = if new_commit {
+        Trigger::Poll
+    } else if pending_rebuild(build, runs).is_some() {
+        Trigger::Manual
+    } else {
         return NextRun::default();
-    }
+    };
     let active: Vec<String> = runs
         .iter()
         .filter(|r| !is_finished(phase(r)))
@@ -155,11 +201,11 @@ pub(crate) fn next_run(build: &Build, remote: &str, runs: &[BuildRun]) -> NextRu
         .collect();
     match build.spec.concurrency {
         Concurrency::Replace => NextRun {
-            create: true,
+            create: Some(trigger),
             cancel: active,
         },
         Concurrency::Queue if active.is_empty() => NextRun {
-            create: true,
+            create: Some(trigger),
             cancel: Vec::new(),
         },
         Concurrency::Queue => NextRun::default(),
@@ -194,16 +240,18 @@ pub(crate) fn latest_finished(runs: &[BuildRun]) -> Option<&BuildRun> {
 }
 
 /// Finished runs beyond the `Build`'s history limit, oldest first. The newest success is kept
-/// whatever its age, since `status.latestImage` points at it.
+/// whatever its age, since `status.latestImage` points at it, and so is the run that answered the
+/// last rebuild, without which the same request would look new.
 pub(crate) fn prune(runs: &[BuildRun], limit: usize) -> Vec<String> {
-    let keep = latest_success(runs).and_then(|r| r.metadata.name.clone());
+    let keep = [latest_success(runs), answered_rebuild(runs)]
+        .map(|r| r.and_then(|r| r.metadata.name.as_deref()));
     let mut finished: Vec<&BuildRun> = runs.iter().filter(|r| is_finished(phase(r))).collect();
     finished.sort_by_key(|r| std::cmp::Reverse(finished_at(r)));
     let mut names: Vec<String> = finished
         .into_iter()
         .skip(limit)
         .filter_map(|r| r.metadata.name.clone())
-        .filter(|name| Some(name) != keep.as_ref())
+        .filter(|name| !keep.contains(&Some(name.as_str())))
         .collect();
     names.reverse();
     names
@@ -351,6 +399,35 @@ pub(crate) fn summarise(
         generation,
     );
 }
+
+/// The run whose image the `Build`'s notify targets are owed: the newest success, which
+/// `status.latestImage` names, until it is marked sent. Older successes are superseded and never
+/// sent.
+pub(crate) fn notify_due<'a>(build: &Build, runs: &'a [BuildRun]) -> Option<&'a BuildRun> {
+    if build.spec.notify.is_empty() {
+        return None;
+    }
+    latest_success(runs).filter(|r| r.status.as_ref().is_some_and(|s| s.notified_at.is_none()))
+}
+
+/// The body of Keel's native webhook (plan §9): the repository without a tag, and the run's first
+/// tag, the one rendered from the tag template.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub(crate) struct KeelPayload<'a> {
+    /// The repository.
+    pub(crate) name: &'a str,
+    /// The tag.
+    pub(crate) tag: &'a str,
+}
+
+/// The Keel payload for a run, or `None` when it recorded no tag.
+pub(crate) fn keel_payload<'a>(image: &'a str, run: &'a BuildRun) -> Option<KeelPayload<'a>> {
+    let tag = run.status.as_ref()?.tags.first()?;
+    Some(KeelPayload { name: image, tag })
+}
+
+/// The waits between notify attempts: three attempts with exponential backoff (plan §9).
+pub(crate) const NOTIFY_BACKOFF: [Duration; 2] = [Duration::from_secs(1), Duration::from_secs(4)];
 
 /// What the Job and its Pod say about a run.
 #[derive(Debug, Clone, PartialEq)]

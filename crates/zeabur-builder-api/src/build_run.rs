@@ -150,6 +150,11 @@ pub struct BuildRunStatus {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schemars(extend("format" = "date-time"))]
     pub completion_time: Option<String>,
+    /// When the `Build`'s notify targets were sent this run's image, whatever they answered.
+    /// Set once; a run with it is not sent again.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(extend("format" = "date-time"))]
+    pub notified_at: Option<String>,
     /// `AwaitingApproval`, when the run only planned.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     #[schemars(length(max = 8))]

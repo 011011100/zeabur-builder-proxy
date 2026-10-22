@@ -18,6 +18,7 @@ workspace = true
 zeabur-builder-core.workspace = true
 zeabur-builder-api.workspace = true
 zeabur-builder-jobspec.workspace = true
+base64.workspace = true
 bytes.workspace = true
 clap.workspace = true
 futures-util.workspace = true

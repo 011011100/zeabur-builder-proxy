@@ -3,6 +3,7 @@
 mod controller;
 mod daemon;
 mod decide;
+mod notify;
 mod output;
 mod remote;
 mod tls;

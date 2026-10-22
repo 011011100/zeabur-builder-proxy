@@ -2514,6 +2514,7 @@ dependencies = [
 name = "zeabur-builder"
 version = "0.0.1"
 dependencies = [
+ "base64 0.22.1",
  "bytes",
  "clap",
  "futures-util",

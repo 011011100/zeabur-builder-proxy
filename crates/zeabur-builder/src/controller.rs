@@ -1,9 +1,11 @@
 //! The two reconcilers (plan §4.1, §4.2), on kube-runtime.
 //!
-//! - **Build**: resolves the ref, creates a `BuildRun` for a new commit, cancels or waits for older
-//!   runs, prunes history and summarises the newest result in its status. Requeued every poll
-//!   interval; the ref is asked again only when the last answer is older than the interval or the
-//!   spec changed, so status changes of its runs cost no request to the Git server.
+//! - **Build**: resolves the ref, creates a `BuildRun` for a new commit or a new `rebuild` value,
+//!   cancels or waits for older runs, prunes history, summarises the newest result in its status
+//!   and sends that result to its notify targets. Requeued every poll interval; the ref is asked
+//!   again only when the last answer is older than the interval, the spec changed or a rebuild is
+//!   pending, so status changes of its runs cost no request to the Git server. Any change to the
+//!   `Build`, annotations included, wakes it.
 //! - **`BuildRun`**: waits for a slot in its namespace and for the namespace's buildkitd
 //!   ([`crate::daemon`]), creates the Job and follows it to a result.
 //!
@@ -11,7 +13,7 @@
 //! written with server-side apply, so a field the controller stops setting is removed.
 //!
 //! Not yet: leader election (run one replica), the repository-level poller and webhooks
-//! (plan §4.3, §4.4) and the `rebuild` annotation.
+//! (plan §4.3, §4.4), and `flux-receiver` and `generic` notify targets.
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -21,7 +23,7 @@ use futures_util::StreamExt as _;
 use jiff::Timestamp;
 use k8s_openapi::ByteString;
 use k8s_openapi::api::batch::v1::Job;
-use k8s_openapi::api::core::v1::{Namespace, Pod, Secret};
+use k8s_openapi::api::core::v1::{Namespace, ObjectReference, Pod, Secret};
 use kube::api::{
     Api, DeleteParams, ListParams, ObjectMeta, Patch, PatchParams, PostParams, PropagationPolicy,
 };
@@ -31,7 +33,7 @@ use kube::runtime::watcher;
 use kube::{Client, Resource as _, ResourceExt as _};
 use serde::Serialize;
 use thiserror::Error;
-use zeabur_builder_api::build::{Build, BuildStatus, SourceMode};
+use zeabur_builder_api::build::{Build, BuildStatus, NotifyTarget, NotifyType, SourceMode};
 use zeabur_builder_api::build_run::{
     BuildRun, BuildRunSpec, BuildRunStatus, Phase, Reason, Trigger,
 };
@@ -42,7 +44,8 @@ use zeabur_builder_core::repo::RepoKey;
 use zeabur_builder_jobspec::{GitAuth, JobInputs};
 
 use crate::decide::{self, Observed};
-use crate::remote::Resolver;
+use crate::notify::{self, Credentials};
+use crate::remote::{self, HttpClient, Resolver};
 use crate::{daemon, tls};
 
 const MANAGER: &str = "zeabur-builder";
@@ -77,6 +80,7 @@ pub(crate) struct Settings {
 
 struct Context {
     client: Client,
+    http: HttpClient,
     resolver: Resolver,
     recorder: Recorder,
     settings: Settings,
@@ -116,6 +120,7 @@ where
 /// Runs both controllers and the buildkitd sweep until a termination signal.
 pub(crate) async fn run(client: Client, settings: Settings) -> Result<(), String> {
     let sweep = daemon::sweep_forever(client.clone(), Arc::clone(&settings.daemon));
+    let http = remote::http_client()?;
     let context = Arc::new(Context {
         recorder: Recorder::new(
             client.clone(),
@@ -124,7 +129,8 @@ pub(crate) async fn run(client: Client, settings: Settings) -> Result<(), String
                 instance: std::env::var("POD_NAME").ok(),
             },
         ),
-        resolver: Resolver::new()?,
+        resolver: Resolver::new(http.clone()),
+        http,
         client: client.clone(),
         settings,
     });
@@ -221,20 +227,21 @@ async fn reconcile_build(build: Arc<Build>, ctx: Arc<Context>) -> Result<Action,
         generation,
     );
 
-    let resolved = resolve_source(&ctx, &build, &mut status, interval, at).await;
-
     let mut runs = runs_api
         .list(&ListParams::default().fields(&format!("spec.buildRef={name}")))
         .await?
         .items;
+    let rebuild = decide::pending_rebuild(&build, &runs).is_some();
+    let resolved = resolve_source(&ctx, &build, &mut status, rebuild, interval, at).await;
+
     if let (Some(sha), Some(_)) = (&resolved, &builder) {
         let next = decide::next_run(&build, sha, &runs);
         for cancel in &next.cancel {
             cancel_run(&ctx, &namespace, cancel).await?;
         }
-        if next.create {
-            let run = create_run(&runs_api, &build, sha).await?;
-            tracing::info!(build = %name, namespace = %namespace, buildrun = %run.name_any(), revision = %sha, "new commit");
+        if let Some(trigger) = next.create {
+            let run = create_run(&runs_api, &build, sha, trigger).await?;
+            tracing::info!(build = %name, namespace = %namespace, buildrun = %run.name_any(), revision = %sha, ?trigger, "new run");
             runs.push(run);
         }
     }
@@ -258,6 +265,9 @@ async fn reconcile_build(build: Arc<Build>, ctx: Arc<Context>) -> Result<Action,
     if build.status.as_ref() != Some(&status) {
         apply_status(&builds, &name, &status).await?;
     }
+    if let Some(run) = decide::notify_due(&build, &runs) {
+        notify_targets(&ctx, &build, run, &image).await?;
+    }
     Ok(Action::requeue(jitter(interval, &name)))
 }
 
@@ -266,6 +276,7 @@ async fn resolve_source(
     ctx: &Context,
     build: &Build,
     status: &mut BuildStatus,
+    rebuild: bool,
     interval: Duration,
     at: Timestamp,
 ) -> Option<String> {
@@ -276,7 +287,7 @@ async fn resolve_source(
             "CredentialsMissing",
             "Git credentials are not supported yet; only public repositories".to_owned(),
         ))
-    } else if !decide::needs_resolve(build.status.as_ref(), generation, interval, at) {
+    } else if !decide::needs_resolve(build.status.as_ref(), generation, rebuild, interval, at) {
         status
             .remote_revision
             .clone()
@@ -329,15 +340,26 @@ fn not_found(e: kube::Error) -> Result<(), Error> {
     Err(e.into())
 }
 
-async fn create_run(api: &Api<BuildRun>, build: &Build, sha: &str) -> Result<BuildRun, Error> {
+/// Creates a run of `sha`, carrying the `Build`'s `rebuild` value as the request it answers.
+async fn create_run(
+    api: &Api<BuildRun>,
+    build: &Build,
+    sha: &str,
+    trigger: Trigger,
+) -> Result<BuildRun, Error> {
     let name = build.name_any();
     let owner = build
         .controller_owner_ref(&())
         .ok_or_else(|| Error::Invalid("the Build has no UID".to_owned()))?;
+    let rebuild = build
+        .annotations()
+        .get(annotations::REBUILD)
+        .map(|v| BTreeMap::from([(annotations::REBUILD.to_owned(), v.clone())]));
     let run = BuildRun {
         metadata: ObjectMeta {
             generate_name: Some(format!("{name}-")),
             namespace: build.namespace(),
+            annotations: rebuild,
             labels: Some(BTreeMap::from([
                 (labels::BUILD.to_owned(), name.clone()),
                 (labels::MANAGED_BY.to_owned(), labels::MANAGER.to_owned()),
@@ -350,7 +372,7 @@ async fn create_run(api: &Api<BuildRun>, build: &Build, sha: &str) -> Result<Bui
             revision: sha.to_owned(),
             plan_digest: None,
             force_replan: false,
-            trigger: Some(Trigger::Poll),
+            trigger: Some(trigger),
         },
         status: None,
     };
@@ -365,7 +387,7 @@ async fn cancel_run(ctx: &Context, namespace: &str, name: &str) -> Result<(), Er
     let mut status = run.status.clone().unwrap_or_default();
     status.phase = Some(Phase::Cancelled);
     status.reason = Some(Reason::Cancelled);
-    status.message = Some("a newer commit replaced it".to_owned());
+    status.message = Some("a newer run replaced it".to_owned());
     status.completion_time = Some(now().to_string());
     apply_status(&runs, name, &status).await?;
     Api::<Job>::namespaced(ctx.client.clone(), namespace)
@@ -482,17 +504,125 @@ async fn finish(
         ),
     };
     tracing::info!(buildrun = %name, namespace = %namespace, reason, note, "finished");
+    record(ctx, &run.object_ref(&()), type_, reason, "Build", &note).await;
+    Ok(Action::await_change())
+}
+
+async fn record(
+    ctx: &Context,
+    object: &ObjectReference,
+    type_: EventType,
+    reason: &str,
+    action: &str,
+    note: &str,
+) {
     let event = Event {
         type_,
         reason: reason.to_owned(),
         note: Some(note.chars().take(1000).collect()),
-        action: "Build".to_owned(),
+        action: action.to_owned(),
         secondary: None,
     };
-    if let Err(e) = ctx.recorder.publish(&event, &run.object_ref(&())).await {
+    if let Err(e) = ctx.recorder.publish(&event, object).await {
         tracing::warn!(error = %e, "event not recorded");
     }
-    Ok(Action::await_change())
+}
+
+/// Sends a run's image to the `Build`'s notify targets (plan §9), records each answer as an
+/// Event on the `Build` and marks the run sent, whatever the answers: a failure never fails the
+/// run nor is sent again. A crash between sending and marking sends once more.
+async fn notify_targets(
+    ctx: &Context,
+    build: &Build,
+    run: &BuildRun,
+    image: &str,
+) -> Result<(), Error> {
+    let namespace = build.namespace().unwrap_or_default();
+    let reference = build.object_ref(&());
+    for target in &build.spec.notify {
+        let sent = match target.kind {
+            NotifyType::Keel => send_keel(ctx, &namespace, target, image, run).await,
+            NotifyType::FluxReceiver | NotifyType::Generic => {
+                tracing::warn!(build = %build.name_any(), %namespace, kind = ?target.kind, url = %target.url, "notify type not supported yet; skipped");
+                continue;
+            }
+        };
+        match sent {
+            Ok(tag) => {
+                let note = format!("sent {image}:{tag} to {}", target.url);
+                record(
+                    ctx,
+                    &reference,
+                    EventType::Normal,
+                    "BuildNotified",
+                    "Notify",
+                    &note,
+                )
+                .await;
+            }
+            Err(e) => {
+                tracing::warn!(build = %build.name_any(), %namespace, url = %target.url, error = %e, "notify failed");
+                let note = format!("{}: {e}", target.url);
+                record(
+                    ctx,
+                    &reference,
+                    EventType::Warning,
+                    "NotifyFailed",
+                    "Notify",
+                    &note,
+                )
+                .await;
+            }
+        }
+    }
+    let status = BuildRunStatus {
+        notified_at: Some(now().to_string()),
+        ..run.status.clone().unwrap_or_default()
+    };
+    apply_status(
+        &Api::<BuildRun>::namespaced(ctx.client.clone(), &namespace),
+        &run.name_any(),
+        &status,
+    )
+    .await
+}
+
+/// Keel's native webhook; the tag sent.
+async fn send_keel(
+    ctx: &Context,
+    namespace: &str,
+    target: &NotifyTarget,
+    image: &str,
+    run: &BuildRun,
+) -> Result<String, String> {
+    let payload =
+        decide::keel_payload(image, run).ok_or_else(|| "the run recorded no tag".to_owned())?;
+    let credentials = match &target.secret_ref {
+        Some(secret) => Some(basic_auth(ctx, namespace, &secret.name).await?),
+        None => None,
+    };
+    let body = serde_json::to_vec(&payload).map_err(|e| e.to_string())?;
+    notify::post(&ctx.http, &target.url, credentials.as_ref(), &body).await?;
+    Ok(payload.tag.to_owned())
+}
+
+/// `username` and `password` of a Secret in the `Build`'s namespace.
+async fn basic_auth(ctx: &Context, namespace: &str, name: &str) -> Result<Credentials, String> {
+    let secret = Api::<Secret>::namespaced(ctx.client.clone(), namespace)
+        .get_opt(name)
+        .await
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| format!("no Secret `{name}`"))?;
+    let data = secret.data.unwrap_or_default();
+    let key = |key: &str| {
+        data.get(key)
+            .and_then(|v| String::from_utf8(v.0.clone()).ok())
+            .ok_or_else(|| format!("Secret `{name}` has no `{key}`"))
+    };
+    Ok(Credentials {
+        username: key("username")?,
+        password: key("password")?,
+    })
 }
 
 async fn pending(

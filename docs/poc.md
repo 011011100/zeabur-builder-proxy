@@ -197,8 +197,8 @@ registry-push-poc-c with push credentials in builder-system`），也沒有建�
 
 - Ready 在第一個 run 結束前都是 `Unknown`（`NotBuilt`）；ref 不存在只顯示在 `SourceReady`。
 - Git：只支援公開的 HTTPS repo；`credentialsRef` 回報 `CredentialsMissing`。
-- 觸發：只有每個 Build 各自 polling；沒有 webhook、沒有 repo 層級的 poller，`rebuild` annotation
-  已定義但還沒處理。
+- 觸發：每個 Build 各自 polling 與 `rebuild` annotation；沒有 webhook、沒有 repo 層級的 poller。
+  annotation 是在上面這些結果之後加的，只有單元測試涵蓋。
 - Controller：單一 replica，沒有 leader election。幾個 run 同時 reconcile 時，namespace 的並行數可能
   超過上限一個。縮到 0 與新 run 開始之間也可能互相競爭；新 run 的建立時間算作活動，所以窗口很小。
 - buildkitd：`buildkitd.toml` 改了之後，要等各 namespace 的 buildkitd 下次啟動才生效。縮到 0 時
@@ -210,5 +210,7 @@ registry-push-poc-c with push credentials in builder-system`），也沒有建�
   Zot 的 ACL 要重新載入。Zot 在 kubelet 同步 Secret 後（約一分鐘）才看得到新密碼。
 - RBAC：Secret 仍是叢集範圍，用來複製 client 憑證與推送帳號。
 - Registry：plain HTTP；Pod 重啟後 image 就沒了。
+- 通知：只支援 `keel`，在上面這些結果之後加的；`flux-receiver` 與 `generic` 只記錄 log 後略過；
+  沒有 `notify_errors_total` 指標。
 - sandbox runtime（`--buildkitd-runtime-class`）沒有在 gVisor 或 Kata 上試過。
-- 不在範圍內：zbplan（M4）、GitHub App、rollout 整合。
+- 不在範圍內：zbplan（M4）、GitHub App。

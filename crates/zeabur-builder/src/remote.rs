@@ -54,38 +54,44 @@ impl ResolveError {
     }
 }
 
+/// An HTTP/1.1 client for `http://` and `https://` URLs.
+pub(crate) type HttpClient = Client<HttpsConnector<HttpConnector>, Full<Bytes>>;
+
+/// A client that trusts the system's CA bundle (`SSL_CERT_FILE` or `/etc/ssl/certs`).
+pub(crate) fn http_client() -> Result<HttpClient, String> {
+    let mut roots = rustls::RootCertStore::empty();
+    let found = rustls_native_certs::load_native_certs();
+    for cert in found.certs {
+        roots.add(cert).map_err(|e| e.to_string())?;
+    }
+    if roots.is_empty() {
+        return Err(format!("no CA certificates found: {:?}", found.errors));
+    }
+    let config = ClientConfig::builder_with_provider(Arc::new(
+        rustls::crypto::aws_lc_rs::default_provider(),
+    ))
+    .with_safe_default_protocol_versions()
+    .map_err(|e| e.to_string())?
+    .with_root_certificates(roots)
+    .with_no_client_auth();
+    let https = HttpsConnectorBuilder::new()
+        .with_tls_config(config)
+        .https_or_http()
+        .enable_http1()
+        .build();
+    Ok(Client::builder(TokioExecutor::new()).build(https))
+}
+
 /// An HTTP client for Git servers.
 #[derive(Debug, Clone)]
 pub(crate) struct Resolver {
-    client: Client<HttpsConnector<HttpConnector>, Full<Bytes>>,
+    client: HttpClient,
 }
 
 impl Resolver {
-    /// Trusts the system's CA bundle (`SSL_CERT_FILE` or `/etc/ssl/certs`).
-    pub(crate) fn new() -> Result<Self, String> {
-        let mut roots = rustls::RootCertStore::empty();
-        let found = rustls_native_certs::load_native_certs();
-        for cert in found.certs {
-            roots.add(cert).map_err(|e| e.to_string())?;
-        }
-        if roots.is_empty() {
-            return Err(format!("no CA certificates found: {:?}", found.errors));
-        }
-        let config = ClientConfig::builder_with_provider(Arc::new(
-            rustls::crypto::aws_lc_rs::default_provider(),
-        ))
-        .with_safe_default_protocol_versions()
-        .map_err(|e| e.to_string())?
-        .with_root_certificates(roots)
-        .with_no_client_auth();
-        let https = HttpsConnectorBuilder::new()
-            .with_tls_config(config)
-            .https_or_http()
-            .enable_http1()
-            .build();
-        Ok(Self {
-            client: Client::builder(TokioExecutor::new()).build(https),
-        })
+    /// Asks with `client`.
+    pub(crate) const fn new(client: HttpClient) -> Self {
+        Self { client }
     }
 
     async fn request(

@@ -967,6 +967,12 @@
                         "nullable": true,
                         "type": "string"
                       },
+                      "notifiedAt": {
+                        "description": "When the `Build`'s notify targets were sent this run's image, whatever they answered.\nSet once; a run with it is not sent again.",
+                        "format": "date-time",
+                        "nullable": true,
+                        "type": "string"
+                      },
                       "phase": {
                         "description": "The phases: `Pending → Planning → Building → Succeeded | Failed | Cancelled`.",
                         "enum": [
