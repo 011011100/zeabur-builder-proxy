@@ -1,5 +1,6 @@
 # The controller, its permissions and the two ClusterBuilders of the proof of concept.
-# __IMAGE_PREFIX__ and __TAG__ name the images built by scripts/build-images.sh.
+# __IMAGE_PREFIX__ and __TAG__ name the images built by scripts/build-images.sh; __HOST_USERS__ is
+# buildkitd's hostUsers and __IDLE__ the seconds before an idle buildkitd scales to zero.
 apiVersion: v1
 kind: ServiceAccount
 metadata:
@@ -23,8 +24,12 @@ rules:
   - apiGroups: [""]
     resources: [pods]
     verbs: [get, list, watch]
-  # The buildkitd certificates, and the client certificate and push credentials copied into
-  # build namespaces. Cluster-wide for the proof of concept.
+  # A namespace's max-concurrent-builds annotation, and whether it still exists.
+  - apiGroups: [""]
+    resources: [namespaces]
+    verbs: [get]
+  # The client certificate and push credentials copied into build namespaces. Cluster-wide for
+  # the proof of concept.
   - apiGroups: [""]
     resources: [secrets]
     verbs: [get, create, update, delete]
@@ -37,6 +42,35 @@ kind: ClusterRoleBinding
 metadata:
   name: zeabur-builder
 roleRef: {apiGroup: rbac.authorization.k8s.io, kind: ClusterRole, name: zeabur-builder}
+subjects:
+  - {kind: ServiceAccount, name: zeabur-builder, namespace: builder-system}
+---
+# Each namespace's buildkitd, in builder-system only.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: zeabur-builder-buildkitd
+  namespace: builder-system
+rules:
+  - apiGroups: [apps]
+    resources: [statefulsets]
+    verbs: [get, list, watch, create, patch, delete]
+  - apiGroups: [apps]
+    resources: [statefulsets/scale]
+    verbs: [patch]
+  - apiGroups: [""]
+    resources: [services]
+    verbs: [get, create, patch, delete]
+  - apiGroups: [networking.k8s.io]
+    resources: [networkpolicies]
+    verbs: [get, create, patch, delete]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: zeabur-builder-buildkitd
+  namespace: builder-system
+roleRef: {apiGroup: rbac.authorization.k8s.io, kind: Role, name: zeabur-builder-buildkitd}
 subjects:
   - {kind: ServiceAccount, name: zeabur-builder, namespace: builder-system}
 ---
@@ -64,7 +98,11 @@ spec:
         - name: controller
           image: __IMAGE_PREFIX__/builder:__TAG__
           imagePullPolicy: IfNotPresent
-          args: [controller]
+          args:
+            - controller
+            - --buildkitd-cache-size=10Gi
+            - --buildkitd-host-users=__HOST_USERS__
+            - --buildkitd-idle=__IDLE__
           env:
             - name: POD_NAMESPACE
               valueFrom: {fieldRef: {fieldPath: metadata.namespace}}
@@ -72,6 +110,7 @@ spec:
               valueFrom: {fieldRef: {fieldPath: metadata.name}}
             - {name: ZEABUR_BUILDER_DEFAULT_REGISTRY, value: registry.builder-registry.svc.cluster.local:5000}
             - {name: ZEABUR_BUILDER_JOB_IMAGE, value: __IMAGE_PREFIX__/builder-job:__TAG__}
+            - {name: ZEABUR_BUILDER_REGISTRY_AUTH_PREFIX, value: registry-push-}
           securityContext:
             allowPrivilegeEscalation: false
             readOnlyRootFilesystem: true

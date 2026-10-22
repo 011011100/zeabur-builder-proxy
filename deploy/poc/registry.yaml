@@ -1,10 +1,6 @@
-# A plain-HTTP registry for the proof of concept, without authentication or persistence. buildkitd
-# is told it is insecure in buildkitd.yaml. Not for production: see docs/poc.md.
-apiVersion: v1
-kind: Namespace
-metadata:
-  name: builder-registry
----
+# Zot over plain HTTP for the proof of concept, without persistence. scripts/poc.sh writes its
+# config and htpasswd: every build namespace has a user named after it that may push only below
+# `<namespace>/`, and anyone may pull. Not for production: see docs/poc.md.
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -13,24 +9,42 @@ metadata:
   labels: {app.kubernetes.io/name: registry}
 spec:
   replicas: 1
+  strategy: {type: Recreate}
   selector:
     matchLabels: {app.kubernetes.io/name: registry}
   template:
     metadata:
       labels: {app.kubernetes.io/name: registry}
     spec:
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        fsGroup: 1000
+        seccompProfile: {type: RuntimeDefault}
       containers:
-        - name: registry
-          image: docker.io/library/registry:2.8.3
+        - name: zot
+          image: ghcr.io/project-zot/zot:v2.1.22
+          args: [serve, /etc/zot/config.json]
           ports: [{containerPort: 5000, name: http}]
-          env:
-            - {name: REGISTRY_STORAGE_DELETE_ENABLED, value: "true"}
           readinessProbe:
-            httpGet: {path: /v2/, port: http}
-          volumeMounts: [{name: data, mountPath: /var/lib/registry}]
+            tcpSocket: {port: http}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: {drop: [ALL]}
+          volumeMounts:
+            - {name: config, mountPath: /etc/zot/config.json, subPath: config.json, readOnly: true}
+            # A Secret volume, not subPath: Zot reloads accounts when the file changes.
+            - {name: htpasswd, mountPath: /etc/zot/auth, readOnly: true}
+            - {name: data, mountPath: /var/lib/registry}
           resources:
-            requests: {cpu: 10m, memory: 32Mi}
+            requests: {cpu: 10m, memory: 64Mi}
       volumes:
+        - name: config
+          configMap: {name: zot}
+        - name: htpasswd
+          secret: {secretName: zot-htpasswd}
         - name: data
           emptyDir: {}
 ---

@@ -1,8 +1,6 @@
-# The buildkitd pool (plan §7.1): rootful buildkitd in a StatefulSet with one cache volume per
-# instance, mTLS on TCP and the readiness probe on the local socket. Adapted from BuildKit's
-# examples/kubernetes/statefulset.userns.yaml (Apache-2.0, https://github.com/moby/buildkit).
-# __HOST_USERS__ is false to run each instance in a user namespace (Kubernetes >= 1.33), true to
-# fall back to a plainly privileged container; __REPLICAS__ is the pool size.
+# What every namespace's buildkitd shares (plan §7): its config, and the egress policy of its
+# RUN steps. The controller creates each namespace's StatefulSet, headless Service and ingress
+# NetworkPolicy in builder-system the first time the namespace builds.
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -10,8 +8,15 @@ metadata:
   namespace: builder-system
 data:
   buildkitd.toml: |
+    # RUN --network=host and --security=insecure stay refused.
+    insecure-entitlements = []
+
     [worker.oci]
       enabled = true
+      # Each RUN step gets its own network namespace on a bridge, masqueraded to the Pod's
+      # address, so the egress policy below applies to it. "auto" would give RUN the Pod's own
+      # network namespace when /etc/buildkit/cni.json is missing.
+      networkMode = "bridge"
       gc = true
       [[worker.oci.gcpolicy]]
         all = true
@@ -21,78 +26,52 @@ data:
         minFreeSpace = "20%"
     [worker.containerd]
       enabled = false
+
+    # Gateway frontends, including those a Dockerfile names in `# syntax=`, only from these
+    # repositories. The Railpack ClusterBuilder's frontend must be listed.
+    [frontend."gateway.v0"]
+      allowedRepositories = [
+        "docker.io/docker/dockerfile",
+        "docker.io/docker/dockerfile-upstream",
+        "ghcr.io/railwayapp/railpack-frontend",
+      ]
+
     [registry."registry.builder-registry.svc.cluster.local:5000"]
       http = true
-      insecure = true
 ---
-apiVersion: v1
-kind: Service
+# RUN steps leave through the buildkitd Pod's address. They may resolve names, push to and pull
+# from the registry, and reach public addresses; not Pods, Services, nodes or the cloud metadata
+# endpoint. The private ranges cover k3s's Pod (10.42.0.0/16) and Service (10.43.0.0/16) CIDRs and
+# most node networks; a cluster on public addresses must add its own CIDRs. IPv4 only.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
 metadata:
-  name: buildkitd
+  name: buildkitd-egress
   namespace: builder-system
 spec:
-  clusterIP: None
-  selector: {app.kubernetes.io/name: buildkitd}
-  ports: [{port: 1234, name: grpc}]
----
-apiVersion: apps/v1
-kind: StatefulSet
-metadata:
-  name: buildkitd
-  namespace: builder-system
-  labels: {app.kubernetes.io/name: buildkitd}
-spec:
-  serviceName: buildkitd
-  podManagementPolicy: Parallel
-  replicas: __REPLICAS__
-  selector:
+  podSelector:
     matchLabels: {app.kubernetes.io/name: buildkitd}
-  template:
-    metadata:
-      labels: {app.kubernetes.io/name: buildkitd}
-    spec:
-      hostUsers: __HOST_USERS__
-      containers:
-        - name: buildkitd
-          image: docker.io/moby/buildkit:v0.34.1
-          args:
-            - --config=/etc/buildkit/buildkitd.toml
-            - --addr=unix:///run/buildkit/buildkitd.sock
-            - --addr=tcp://0.0.0.0:1234
-            - --tlscacert=/certs/ca.pem
-            - --tlscert=/certs/cert.pem
-            - --tlskey=/certs/key.pem
-          ports: [{containerPort: 1234, name: grpc}]
-          readinessProbe:
-            exec:
-              command: [buildctl, --addr, unix:///run/buildkit/buildkitd.sock, debug, workers]
-            initialDelaySeconds: 3
-            periodSeconds: 10
-          livenessProbe:
-            exec:
-              command: [buildctl, --addr, unix:///run/buildkit/buildkitd.sock, debug, workers]
-            initialDelaySeconds: 10
-            periodSeconds: 30
-          securityContext:
-            # In a user namespace (hostUsers: false) root and privileges are the namespace's,
-            # not the node's.
-            privileged: true
-          resources:
-            requests: {cpu: 100m, memory: 256Mi}
-          volumeMounts:
-            - {name: config, mountPath: /etc/buildkit, readOnly: true}
-            - {name: certs, mountPath: /certs, readOnly: true}
-            - {name: cache, mountPath: /var/lib/buildkit}
-      volumes:
-        - name: config
-          configMap: {name: buildkitd}
-        # Created by the controller on its first start.
-        - name: certs
-          secret: {secretName: buildkitd-tls}
-  volumeClaimTemplates:
-    - metadata:
-        name: cache
-      spec:
-        accessModes: [ReadWriteOnce]
-        resources:
-          requests: {storage: 10Gi}
+  policyTypes: [Egress]
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels: {kubernetes.io/metadata.name: kube-system}
+          podSelector:
+            matchLabels: {k8s-app: kube-dns}
+      ports: [{port: 53, protocol: UDP}, {port: 53, protocol: TCP}]
+    - to:
+        - namespaceSelector:
+            matchLabels: {kubernetes.io/metadata.name: builder-registry}
+          podSelector:
+            matchLabels: {app.kubernetes.io/name: registry}
+      ports: [{port: 5000, protocol: TCP}]
+    - to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+            except:
+              - 10.0.0.0/8
+              - 100.64.0.0/10
+              - 127.0.0.0/8
+              - 169.254.0.0/16
+              - 172.16.0.0/12
+              - 192.168.0.0/16
