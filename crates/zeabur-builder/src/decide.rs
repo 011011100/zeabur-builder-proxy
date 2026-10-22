@@ -209,6 +209,49 @@ pub(crate) fn prune(runs: &[BuildRun], limit: usize) -> Vec<String> {
     names
 }
 
+/// Concurrent builds per namespace when the controller sets none (plan §11).
+pub(crate) const DEFAULT_MAX_CONCURRENT: u32 = 3;
+
+/// A namespace's limit of concurrent builds: its annotation when it holds a positive number,
+/// else the controller's.
+pub(crate) fn concurrency_limit(annotation: Option<&str>, default: u32) -> u32 {
+    annotation
+        .and_then(|a| a.trim().parse::<u32>().ok())
+        .filter(|&n| n > 0)
+        .unwrap_or(default)
+}
+
+/// Runs that hold a slot of their namespace's buildkitd: unfinished, with a Job.
+pub(crate) fn slots_taken(runs: &[BuildRun]) -> usize {
+    runs.iter()
+        .filter(|r| !is_finished(phase(r)))
+        .filter(|r| r.status.as_ref().is_some_and(|s| s.job_ref.is_some()))
+        .count()
+}
+
+fn last_activity(run: &BuildRun) -> Option<Timestamp> {
+    let created = run.metadata.creation_timestamp.as_ref().map(|t| t.0);
+    let completed = run
+        .status
+        .as_ref()
+        .and_then(|s| s.completion_time.as_deref())
+        .and_then(|t| t.parse::<Timestamp>().ok());
+    created.max(completed)
+}
+
+/// Whether a namespace's buildkitd may scale to zero: none of its runs is unfinished, and none
+/// was created or finished within `after`. A run created a moment ago counts, so a build that is
+/// starting keeps the daemon it is about to use.
+pub(crate) fn idle(runs: &[BuildRun], now: Timestamp, after: Duration) -> bool {
+    if runs.iter().any(|r| !is_finished(phase(r))) {
+        return false;
+    }
+    runs.iter()
+        .filter_map(last_activity)
+        .max()
+        .is_none_or(|last| now.duration_since(last).unsigned_abs() >= after)
+}
+
 /// The image repository a `Build` pushes to.
 pub(crate) fn image(build: &Build, default_registry: &str) -> String {
     if let Some(image) = build.spec.output.as_ref().and_then(|o| o.image.clone()) {

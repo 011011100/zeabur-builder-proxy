@@ -4,13 +4,14 @@
 //!   runs, prunes history and summarises the newest result in its status. Requeued every poll
 //!   interval; the ref is asked again only when the last answer is older than the interval or the
 //!   spec changed, so status changes of its runs cost no request to the Git server.
-//! - **`BuildRun`**: picks a buildkitd instance, creates the Job and follows it to a result.
+//! - **`BuildRun`**: waits for a slot in its namespace and for the namespace's buildkitd
+//!   ([`crate::daemon`]), creates the Job and follows it to a result.
 //!
 //! Decisions are in [`crate::decide`]; this module only reads and writes objects. Status is
 //! written with server-side apply, so a field the controller stops setting is removed.
 //!
 //! Not yet: leader election (run one replica), the repository-level poller and webhooks
-//! (plan §4.3, §4.4), the `rebuild` annotation, and per-namespace quotas.
+//! (plan §4.3, §4.4) and the `rebuild` annotation.
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -20,7 +21,7 @@ use futures_util::StreamExt as _;
 use jiff::Timestamp;
 use k8s_openapi::ByteString;
 use k8s_openapi::api::batch::v1::Job;
-use k8s_openapi::api::core::v1::{Pod, Secret};
+use k8s_openapi::api::core::v1::{Namespace, Pod, Secret};
 use kube::api::{
     Api, DeleteParams, ListParams, ObjectMeta, Patch, PatchParams, PostParams, PropagationPolicy,
 };
@@ -36,34 +37,36 @@ use zeabur_builder_api::build_run::{
 };
 use zeabur_builder_api::cluster_builder::ClusterBuilder;
 use zeabur_builder_api::common::ConditionStatus;
-use zeabur_builder_api::labels;
+use zeabur_builder_api::{annotations, labels};
 use zeabur_builder_core::repo::RepoKey;
-use zeabur_builder_core::route::{self, Instance, Route};
 use zeabur_builder_jobspec::{GitAuth, JobInputs};
 
 use crate::decide::{self, Observed};
 use crate::remote::Resolver;
-use crate::tls;
+use crate::{daemon, tls};
 
 const MANAGER: &str = "zeabur-builder";
 /// How often a waiting `BuildRun` is looked at again.
 const PENDING_RETRY: Duration = Duration::from_secs(15);
+/// How often a `BuildRun` waiting for its buildkitd to start is looked at again.
+const STARTING_RETRY: Duration = Duration::from_secs(2);
 /// The name of the client certificate Secret in a build namespace.
 const CLIENT_TLS_COPY: &str = "zeabur-builder-buildkit-client";
 
 /// Settings, from the command line.
 #[derive(Debug, Clone)]
 pub(crate) struct Settings {
-    /// Where the certificates live.
-    pub(crate) tls: tls::Locations,
-    /// Selects buildkitd Pods in `tls.buildkitd_namespace`.
-    pub(crate) buildkitd_selector: String,
-    /// Builds one buildkitd instance runs at once.
-    pub(crate) buildkitd_slots: u32,
+    /// The controller's namespace, where the push credentials are kept.
+    pub(crate) namespace: String,
+    /// How each namespace's buildkitd runs.
+    pub(crate) daemon: Arc<daemon::Settings>,
+    /// Builds a namespace runs at once, unless its annotation says otherwise.
+    pub(crate) max_concurrent: u32,
     /// The registry for `Build`s without `spec.output.image`.
     pub(crate) default_registry: String,
-    /// A `kubernetes.io/dockerconfigjson` Secret in the controller's namespace.
-    pub(crate) registry_auth_secret: Option<String>,
+    /// With a prefix, the `kubernetes.io/dockerconfigjson` Secret `<prefix><namespace>` in the
+    /// controller's namespace holds a namespace's push credentials; without, pushes are anonymous.
+    pub(crate) registry_auth_prefix: Option<String>,
     /// The image of `fetch` and `build`.
     pub(crate) job_image: String,
     /// `activeDeadlineSeconds`.
@@ -110,11 +113,9 @@ where
     Ok(())
 }
 
-/// Runs both controllers until a termination signal.
+/// Runs both controllers and the buildkitd sweep until a termination signal.
 pub(crate) async fn run(client: Client, settings: Settings) -> Result<(), String> {
-    tls::ensure(&client, &settings.tls)
-        .await
-        .map_err(|e| format!("cannot create buildkitd certificates: {e}"))?;
+    let sweep = daemon::sweep_forever(client.clone(), Arc::clone(&settings.daemon));
     let context = Arc::new(Context {
         recorder: Recorder::new(
             client.clone(),
@@ -157,7 +158,10 @@ pub(crate) async fn run(client: Client, settings: Settings) -> Result<(), String
             tracing::warn!(error = %e, "buildrun reconcile");
         }
     });
-    tokio::join!(builds, runs);
+    tokio::select! {
+        ((), ()) = async { tokio::join!(builds, runs) } => {}
+        () = sweep => {}
+    }
     Ok(())
 }
 
@@ -498,6 +502,11 @@ async fn pending(
     reason: Reason,
     message: String,
 ) -> Result<Action, Error> {
+    let retry = if reason == Reason::BuildkitdStarting {
+        STARTING_RETRY
+    } else {
+        PENDING_RETRY
+    };
     status.phase = Some(Phase::Pending);
     status.reason = Some(reason);
     status.message = Some(message);
@@ -506,51 +515,7 @@ async fn pending(
             Api::<BuildRun>::namespaced(ctx.client.clone(), &run.namespace().unwrap_or_default());
         apply_status(&api, &run.name_any(), &status).await?;
     }
-    Ok(Action::requeue(PENDING_RETRY))
-}
-
-/// The buildkitd instance for a routing key (plan §7.3), counting unfinished runs against slots.
-async fn pick_instance(ctx: &Context, key: &str, run: &str) -> Result<Option<String>, Error> {
-    let pods: Api<Pod> = Api::namespaced(ctx.client.clone(), &ctx.settings.tls.buildkitd_namespace);
-    let pods = pods
-        .list(&ListParams::default().labels(&ctx.settings.buildkitd_selector))
-        .await?
-        .items;
-    let runs = Api::<BuildRun>::all(ctx.client.clone())
-        .list(&ListParams::default())
-        .await?
-        .items;
-    let instances: Vec<Instance> = pods
-        .iter()
-        .map(|pod| {
-            let name = pod.name_any();
-            let ready = pod
-                .status
-                .as_ref()
-                .and_then(|s| s.conditions.as_ref())
-                .is_some_and(|c| c.iter().any(|c| c.type_ == "Ready" && c.status == "True"));
-            let running = runs
-                .iter()
-                .filter_map(|r| r.status.as_ref())
-                .filter(|s| !decide::is_finished(s.phase) && s.job_ref.is_some())
-                .filter(|s| s.buildkitd_instance.as_deref() == Some(name.as_str()))
-                .count();
-            Instance {
-                name,
-                ready,
-                running: u32::try_from(running).unwrap_or(u32::MAX),
-                slots: ctx.settings.buildkitd_slots,
-            }
-        })
-        .collect();
-    Ok(match route::pick(key, &instances) {
-        Route::Preferred(i) => Some(i.name.clone()),
-        Route::Fallback(i) => {
-            tracing::info!(buildrun = %run, instance = %i.name, "routed to a fallback instance");
-            Some(i.name.clone())
-        }
-        Route::NoCapacity => None,
-    })
+    Ok(Action::requeue(retry))
 }
 
 /// The run's `Build` and its `ClusterBuilder`, or why one is missing.
@@ -583,6 +548,45 @@ where
     }
 }
 
+/// Whether the namespace may start another build: a free slot and push credentials, which it
+/// returns; otherwise why it waits.
+async fn admit(
+    ctx: &Context,
+    namespace: &str,
+) -> Result<Result<ByteString, (Reason, String)>, Error> {
+    let settings = &ctx.settings;
+    let runs = Api::<BuildRun>::namespaced(ctx.client.clone(), namespace)
+        .list(&ListParams::default())
+        .await?
+        .items;
+    let limit = decide::concurrency_limit(
+        Api::<Namespace>::all(ctx.client.clone())
+            .get_opt(namespace)
+            .await?
+            .as_ref()
+            .and_then(|n| n.annotations().get(annotations::MAX_CONCURRENT_BUILDS))
+            .map(String::as_str),
+        settings.max_concurrent,
+    );
+    let taken = decide::slots_taken(&runs);
+    if taken >= usize::try_from(limit).unwrap_or(usize::MAX) {
+        return Ok(Err((
+            Reason::QuotaExceeded,
+            format!("{taken} of the namespace's {limit} builds are running"),
+        )));
+    }
+    Ok(registry_auth(ctx, namespace).await?.ok_or_else(|| {
+        (
+            Reason::RegistryCredentialsMissing,
+            format!(
+                "no Secret `{}{namespace}` with push credentials in `{}`",
+                settings.registry_auth_prefix.as_deref().unwrap_or_default(),
+                settings.namespace
+            ),
+        )
+    }))
+}
+
 async fn start(ctx: &Context, run: &BuildRun, status: BuildRunStatus) -> Result<Action, Error> {
     let namespace = run.namespace().unwrap_or_default();
     let name = run.name_any();
@@ -596,51 +600,33 @@ async fn start(ctx: &Context, run: &BuildRun, status: BuildRunStatus) -> Result<
         message: Some(message),
         ..BuildRunStatus::default()
     };
-    let repo = match RepoKey::parse(&build.spec.source.git.url) {
-        Ok(repo) => repo,
-        Err(e) => return finish(ctx, run, fail(e.to_string())).await,
-    };
+    if let Err(e) = RepoKey::parse(&build.spec.source.git.url) {
+        return finish(ctx, run, fail(e.to_string())).await;
+    }
     let tags = match decide::tags(&build, run) {
         Ok(tags) => tags,
         Err(e) => return finish(ctx, run, fail(e.to_string())).await,
     };
 
-    let key = route::route_key(
-        &repo,
-        build
-            .spec
-            .source
-            .git
-            .context_dir
-            .as_deref()
-            .unwrap_or_default(),
-    );
-    let Some(instance) = pick_instance(ctx, &key, &name).await? else {
+    let settings = &ctx.settings;
+    let registry_auth = match admit(ctx, &namespace).await? {
+        Ok(auth) => auth,
+        Err((reason, message)) => return pending(ctx, run, status, reason, message).await,
+    };
+    let woken = daemon::wake(&ctx.client, &settings.daemon, &namespace).await?;
+    if !woken.ready {
         return pending(
             ctx,
             run,
             status,
-            Reason::NoBuildkitdCapacity,
-            "no buildkitd instance is ready with a free slot".to_owned(),
+            Reason::BuildkitdStarting,
+            format!("waiting for {} to be ready", woken.pod),
         )
         .await;
-    };
-    let settings = &ctx.settings;
-    let addr = format!(
-        "tcp://{instance}.{}.{}.svc:1234",
-        settings.tls.service, settings.tls.buildkitd_namespace
-    );
-
-    tls::copy_secret(
-        &ctx.client,
-        &settings.tls.controller_namespace,
-        &settings.tls.client_secret,
-        &namespace,
-        CLIENT_TLS_COPY,
-    )
-    .await?;
+    }
+    tls::put_client(&ctx.client, &namespace, CLIENT_TLS_COPY, &woken.client).await?;
     let registry_secret = format!("{name}-registry");
-    ensure_registry_secret(ctx, run, &registry_secret).await?;
+    ensure_registry_secret(ctx, run, &registry_secret, registry_auth).await?;
 
     let image = decide::image(&build, &settings.default_registry);
     let job = zeabur_builder_jobspec::job(&JobInputs {
@@ -650,7 +636,7 @@ async fn start(ctx: &Context, run: &BuildRun, status: BuildRunStatus) -> Result<
         builder: &builder.spec,
         image: &image,
         tags: &tags,
-        buildkitd_addr: &addr,
+        buildkitd_addr: &woken.address,
         job_image: &settings.job_image,
         git_auth: GitAuth::Anonymous,
         planner_credentials: None,
@@ -669,7 +655,7 @@ async fn start(ctx: &Context, run: &BuildRun, status: BuildRunStatus) -> Result<
         reason: None,
         message: None,
         job_ref: Some(name.clone()),
-        buildkitd_instance: Some(instance.clone()),
+        buildkitd_instance: Some(woken.pod.clone()),
         start_time: Some(now().to_string()),
         tags: tags.clone(),
         ..status
@@ -680,28 +666,39 @@ async fn start(ctx: &Context, run: &BuildRun, status: BuildRunStatus) -> Result<
         &next,
     )
     .await?;
-    tracing::info!(buildrun = %name, namespace = %namespace, %instance, image = %image, "job created");
+    tracing::info!(buildrun = %name, namespace = %namespace, buildkitd = %woken.pod, image = %image, "job created");
     Ok(Action::await_change())
 }
 
-/// The run's copy of the push credentials (plan §8), owned by the `BuildRun` and deleted when it
-/// finishes. Without a configured Secret, an empty Docker config: the registry takes anonymous
-/// pushes.
-async fn ensure_registry_secret(ctx: &Context, run: &BuildRun, name: &str) -> Result<(), Error> {
-    let namespace = run.namespace().unwrap_or_default();
-    let config = match &ctx.settings.registry_auth_secret {
-        Some(source) => {
-            Api::<Secret>::namespaced(ctx.client.clone(), &ctx.settings.tls.controller_namespace)
-                .get(source)
-                .await?
-                .data
-                .and_then(|mut d| d.remove(".dockerconfigjson"))
-                .ok_or_else(|| {
-                    Error::Invalid(format!("Secret `{source}` has no .dockerconfigjson"))
-                })?
-        }
-        None => ByteString(br#"{"auths":{}}"#.to_vec()),
+/// A namespace's push credentials (plan §8): its own Secret when the controller is given a
+/// prefix, `None` while that Secret is missing; an empty Docker config otherwise, for a registry
+/// that takes anonymous pushes.
+async fn registry_auth(ctx: &Context, namespace: &str) -> Result<Option<ByteString>, Error> {
+    let Some(prefix) = &ctx.settings.registry_auth_prefix else {
+        return Ok(Some(ByteString(br#"{"auths":{}}"#.to_vec())));
     };
+    let name = format!("{prefix}{namespace}");
+    let Some(secret) = Api::<Secret>::namespaced(ctx.client.clone(), &ctx.settings.namespace)
+        .get_opt(&name)
+        .await?
+    else {
+        return Ok(None);
+    };
+    secret
+        .data
+        .and_then(|mut d| d.remove(".dockerconfigjson"))
+        .map(Some)
+        .ok_or_else(|| Error::Invalid(format!("Secret `{name}` has no .dockerconfigjson")))
+}
+
+/// The run's copy of the push credentials, owned by the `BuildRun` and deleted when it finishes.
+async fn ensure_registry_secret(
+    ctx: &Context,
+    run: &BuildRun,
+    name: &str,
+    config: ByteString,
+) -> Result<(), Error> {
+    let namespace = run.namespace().unwrap_or_default();
     let secret = Secret {
         metadata: ObjectMeta {
             name: Some(name.to_owned()),

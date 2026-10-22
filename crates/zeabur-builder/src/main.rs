@@ -1,14 +1,18 @@
 //! `zeabur-builder`: the controller binary.
 
 mod controller;
+mod daemon;
 mod decide;
 mod output;
 mod remote;
 mod tls;
 
 use std::process::ExitCode;
+use std::sync::Arc;
+use std::time::Duration;
 
 use clap::{Args, Parser, Subcommand};
+use zeabur_builder_jobspec::buildkitd::Resources;
 
 /// Zeabur Builder: turns Git commits into container images with `BuildKit`.
 #[derive(Debug, Parser)]
@@ -29,36 +33,58 @@ enum Command {
 
 #[derive(Debug, Args)]
 struct ControllerArgs {
-    /// The controller's namespace, where it keeps the client certificate and registry credentials.
+    /// The controller's namespace, where it keeps push credentials.
     #[arg(long, env = "POD_NAMESPACE")]
     namespace: String,
     /// The registry for `Build`s without `spec.output.image`, such as `registry.internal:5000`.
     #[arg(long, env = "ZEABUR_BUILDER_DEFAULT_REGISTRY")]
     default_registry: String,
-    /// A `kubernetes.io/dockerconfigjson` Secret in the controller's namespace to push with.
-    #[arg(long, env = "ZEABUR_BUILDER_REGISTRY_AUTH_SECRET")]
-    registry_auth_secret: Option<String>,
+    /// Each namespace pushes with the `kubernetes.io/dockerconfigjson` Secret
+    /// `<prefix><namespace>` in the controller's namespace, and waits while it is missing. Unset:
+    /// anonymous pushes.
+    #[arg(long, env = "ZEABUR_BUILDER_REGISTRY_AUTH_PREFIX")]
+    registry_auth_prefix: Option<String>,
     /// The image of the Job's `fetch` and `build` containers.
     #[arg(long, env = "ZEABUR_BUILDER_JOB_IMAGE")]
     job_image: String,
-    /// The headless Service of the buildkitd `StatefulSet`.
-    #[arg(long, default_value = "buildkitd")]
-    buildkitd_service: String,
-    /// buildkitd's namespace. Default: the controller's.
+    /// Builds a namespace runs at once; the Namespace annotation
+    /// `builder.zeabur.com/max-concurrent-builds` overrides it.
+    #[arg(long, default_value_t = decide::DEFAULT_MAX_CONCURRENT)]
+    max_concurrent_builds: u32,
+    /// Where the buildkitd of each namespace runs. Default: the controller's namespace.
     #[arg(long)]
     buildkitd_namespace: Option<String>,
-    /// Selects the buildkitd Pods.
-    #[arg(long, default_value = "app.kubernetes.io/name=buildkitd")]
-    buildkitd_selector: String,
-    /// Builds one buildkitd instance runs at once.
-    #[arg(long, default_value_t = 4)]
-    buildkitd_slots: u32,
-    /// The Secret with buildkitd's server certificate, created on first start.
-    #[arg(long, default_value = "buildkitd-tls")]
-    buildkitd_tls_secret: String,
-    /// The Secret with the build Jobs' client certificate, created on first start.
-    #[arg(long, default_value = "buildkitd-client-tls")]
-    buildkitd_client_secret: String,
+    /// The buildkitd image, rootful.
+    #[arg(long, default_value = "docker.io/moby/buildkit:v0.34.1")]
+    buildkitd_image: String,
+    /// The `ConfigMap` with `buildkitd.toml`, in buildkitd's namespace.
+    #[arg(long, default_value = "buildkitd")]
+    buildkitd_config: String,
+    /// Each namespace's cache volume.
+    #[arg(long, default_value = "20Gi")]
+    buildkitd_cache_size: String,
+    /// The cache volumes' storage class. Default: the cluster's.
+    #[arg(long)]
+    buildkitd_storage_class: Option<String>,
+    /// A `RuntimeClass` to run buildkitd in, such as a Kata or gVisor sandbox. Default: none.
+    #[arg(long)]
+    buildkitd_runtime_class: Option<String>,
+    /// `true` shares the node's user namespace instead of a Pod user namespace; only for
+    /// Kubernetes older than 1.33.
+    #[arg(long, default_value_t = false, action = clap::ArgAction::Set)]
+    buildkitd_host_users: bool,
+    /// buildkitd's CPU request.
+    #[arg(long, default_value = "100m")]
+    buildkitd_cpu_request: String,
+    /// buildkitd's memory request.
+    #[arg(long, default_value = "256Mi")]
+    buildkitd_memory_request: String,
+    /// buildkitd's memory limit. Default: none.
+    #[arg(long)]
+    buildkitd_memory_limit: Option<String>,
+    /// Seconds a namespace goes without builds before its buildkitd scales to zero.
+    #[arg(long, default_value_t = 600)]
+    buildkitd_idle: u64,
     /// How long a build may run, in seconds.
     #[arg(long, default_value_t = 3600)]
     job_deadline: i64,
@@ -69,21 +95,29 @@ struct ControllerArgs {
 
 impl ControllerArgs {
     fn settings(self) -> controller::Settings {
-        let buildkitd_namespace = self
-            .buildkitd_namespace
-            .unwrap_or_else(|| self.namespace.clone());
-        controller::Settings {
-            tls: tls::Locations {
-                service: self.buildkitd_service,
-                buildkitd_namespace,
-                server_secret: self.buildkitd_tls_secret,
-                controller_namespace: self.namespace,
-                client_secret: self.buildkitd_client_secret,
+        let daemon = daemon::Settings {
+            namespace: self
+                .buildkitd_namespace
+                .unwrap_or_else(|| self.namespace.clone()),
+            image: self.buildkitd_image,
+            config_map: self.buildkitd_config,
+            cache_size: self.buildkitd_cache_size,
+            storage_class: self.buildkitd_storage_class,
+            runtime_class: self.buildkitd_runtime_class,
+            host_users: self.buildkitd_host_users,
+            resources: Resources {
+                cpu_request: Some(self.buildkitd_cpu_request),
+                memory_request: Some(self.buildkitd_memory_request),
+                memory_limit: self.buildkitd_memory_limit,
             },
-            buildkitd_selector: self.buildkitd_selector,
-            buildkitd_slots: self.buildkitd_slots,
+            idle_after: Duration::from_secs(self.buildkitd_idle),
+        };
+        controller::Settings {
+            namespace: self.namespace,
+            daemon: Arc::new(daemon),
+            max_concurrent: self.max_concurrent_builds,
             default_registry: self.default_registry,
-            registry_auth_secret: self.registry_auth_secret,
+            registry_auth_prefix: self.registry_auth_prefix,
             job_image: self.job_image,
             job_deadline_seconds: self.job_deadline,
             job_ttl_seconds: self.job_ttl,

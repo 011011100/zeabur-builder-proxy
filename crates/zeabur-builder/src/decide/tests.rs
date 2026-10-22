@@ -198,6 +198,45 @@ fn pruning_keeps_the_newest_success() {
 }
 
 #[test]
+fn concurrency_follows_the_namespace() {
+    assert_eq!(concurrency_limit(None, 3), 3);
+    assert_eq!(concurrency_limit(Some("5"), 3), 5);
+    assert_eq!(concurrency_limit(Some(" 1 "), 3), 1);
+    for bad in ["0", "-1", "many", ""] {
+        assert_eq!(concurrency_limit(Some(bad), 3), 3, "{bad}");
+    }
+    let mut started = run("api-c", A, Some(Phase::Pending), "2026-10-22T07:59:00Z");
+    if let Some(status) = started.status.as_mut() {
+        status.job_ref = Some("api-c".to_owned());
+    }
+    let runs = [
+        run("api-a", A, Some(Phase::Succeeded), "2026-10-22T07:00:00Z"),
+        run("api-b", B, Some(Phase::Pending), "2026-10-22T07:59:00Z"),
+        started,
+    ];
+    assert_eq!(
+        slots_taken(&runs),
+        1,
+        "a run waiting for its Job holds no slot"
+    );
+}
+
+#[test]
+fn buildkitd_idles_after_the_last_run() {
+    let ten = Duration::from_mins(10);
+    assert!(idle(&[], now(), ten));
+    let old = run("api-a", A, Some(Phase::Succeeded), "2026-10-22T07:40:00Z");
+    assert!(idle(std::slice::from_ref(&old), now(), ten));
+    let recent = run("api-b", B, Some(Phase::Failed), "2026-10-22T07:55:00Z");
+    assert!(!idle(&[old.clone(), recent], now(), ten));
+    let waiting = run("api-c", B, Some(Phase::Pending), "2026-10-22T06:00:00Z");
+    assert!(!idle(&[old.clone(), waiting], now(), ten));
+    let mut new = run("api-d", B, None, "2026-10-22T07:59:59Z");
+    new.status = None;
+    assert!(!idle(&[old, new], now(), ten));
+}
+
+#[test]
 fn image_and_tags() {
     let mut build = build();
     let run = run("api-x7k2p", A, None, "2025-10-21T15:00:00Z");

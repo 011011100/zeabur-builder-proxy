@@ -105,7 +105,7 @@ pub struct BuildRunStatus {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schemars(length(max = MAX_NAME))]
     pub job_ref: Option<String>,
-    /// The buildkitd instance, such as `buildkitd-2`.
+    /// The namespace's buildkitd Pod, such as `buildkitd-team-a-0`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schemars(length(max = MAX_NAME))]
     pub buildkitd_instance: Option<String>,
@@ -178,8 +178,10 @@ pub enum Phase {
 pub enum Reason {
     /// The namespace runs as many builds as it may.
     QuotaExceeded,
-    /// Every buildkitd instance is unready or full.
-    NoBuildkitdCapacity,
+    /// The namespace's buildkitd is starting, from zero replicas or after a restart.
+    BuildkitdStarting,
+    /// The namespace has no push credentials for the default registry.
+    RegistryCredentialsMissing,
     /// Clone or checkout failed.
     SourceFailed,
     /// The planner failed.

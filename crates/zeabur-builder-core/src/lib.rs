@@ -4,7 +4,6 @@
 //! - [`repo`]: one key per Git repository, however its URL is written, so a webhook, a poll and a
 //!   `Build` agree on which repository they mean.
 //! - [`tag`]: the immutable, sortable image tag of a build.
-//! - [`route`]: which buildkitd instance builds a repository, so its cache mounts stay warm.
 //! - [`daemon`]: the name and address of a build namespace's own buildkitd.
 //! - [`result`]: the build result a Job reports in its termination message.
 //! - [`progress`]: counting cached steps in `buildctl --progress rawjson` output.
@@ -17,7 +16,6 @@ pub mod git;
 pub mod progress;
 pub mod repo;
 pub mod result;
-pub mod route;
 pub mod tag;
 
 /// A full Git commit SHA: 40 lowercase hexadecimal digits.

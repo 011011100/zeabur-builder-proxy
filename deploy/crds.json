@@ -853,7 +853,7 @@
                         "type": "array"
                       },
                       "buildkitdInstance": {
-                        "description": "The buildkitd instance, such as `buildkitd-2`.",
+                        "description": "The namespace's buildkitd Pod, such as `buildkitd-team-a-0`.",
                         "maxLength": 253,
                         "nullable": true,
                         "type": "string"
@@ -1010,7 +1010,8 @@
                         "description": "Why a `BuildRun` waits or failed.",
                         "enum": [
                           "QuotaExceeded",
-                          "NoBuildkitdCapacity",
+                          "BuildkitdStarting",
+                          "RegistryCredentialsMissing",
                           "SourceFailed",
                           "PlanFailed",
                           "BuildFailed",

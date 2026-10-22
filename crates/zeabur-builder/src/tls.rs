@@ -1,11 +1,18 @@
-//! mTLS between build Jobs and buildkitd (plan §7.1): the controller makes a CA, a server
-//! certificate for every buildkitd Pod and one client certificate, on first start.
+//! mTLS between build Jobs and buildkitd (plan §7.3): one CA per build namespace, made the first
+//! time the namespace builds, with a server certificate for its buildkitd and a client
+//! certificate for its Jobs.
 //!
-//! Each Secret holds `ca.pem`, `cert.pem` and `key.pem`, the names `buildctl --tlsdir` and
-//! buildkitd's `--tlscacert`/`--tlscert`/`--tlskey` read. The server certificate names
-//! `*.<service>.<namespace>.svc` and its `cluster.local` form, so it covers every `StatefulSet` Pod
-//! behind the headless Service. The CA key is not kept: nothing is signed after the first start.
-//! Rotation is not implemented; the certificates are valid until rcgen's default end date.
+//! buildkitd asks for a client certificate that chains to `--tlscacert` and checks nothing else
+//! (`RequireAndVerifyClientCert` in [main.go]), so the CA is the boundary: a namespace's client
+//! certificate, which its members can read, opens no other namespace's daemon.
+//!
+//! Both pairs live in one Secret in the builder's namespace, created in one request: two runs that
+//! start together in a new namespace cannot end up with a server and a client from different CAs.
+//! buildkitd mounts the server files; the Jobs get a copy of the client files in their namespace,
+//! under the names `buildctl --tlsdir` reads (`ca.pem`, `cert.pem`, `key.pem`). The CA key is not
+//! kept. Rotation is not implemented; the certificates are valid until rcgen's default end date.
+//!
+//! [main.go]: https://github.com/moby/buildkit/blob/v0.34.1/cmd/buildkitd/main.go
 
 use std::collections::BTreeMap;
 
@@ -22,12 +29,18 @@ use zeabur_builder_api::labels;
 /// The PEM files of one side.
 pub(crate) type Pems = BTreeMap<String, String>;
 
-/// Generates the CA, the server certificate and the client certificate.
+/// The keys of the client pair in the namespace's Secret, next to the server's `cert.pem` and
+/// `key.pem`.
+const CLIENT_CERT: &str = "client-cert.pem";
+const CLIENT_KEY: &str = "client-key.pem";
+
+/// Generates a CA and the server and client certificates it signs, for the `StatefulSet` Pods
+/// behind the headless Service `service` in `namespace`.
 pub(crate) fn generate(service: &str, namespace: &str) -> Result<(Pems, Pems), rcgen::Error> {
     let ca_key = KeyPair::generate()?;
     let mut ca = CertificateParams::new(Vec::<String>::new())?;
     ca.distinguished_name
-        .push(DnType::CommonName, "zeabur-builder buildkitd CA");
+        .push(DnType::CommonName, format!("zeabur-builder {service} CA"));
     ca.is_ca = IsCa::Ca(BasicConstraints::Constrained(0));
     ca.key_usages = vec![KeyUsagePurpose::KeyCertSign, KeyUsagePurpose::CrlSign];
     let ca_pem = ca.self_signed(&ca_key)?.pem();
@@ -62,8 +75,83 @@ pub(crate) fn generate(service: &str, namespace: &str) -> Result<(Pems, Pems), r
     Ok((server, client))
 }
 
-fn secret(name: &str, namespace: &str, pems: &Pems) -> Secret {
-    Secret {
+fn data(pems: &Pems) -> BTreeMap<String, ByteString> {
+    pems.iter()
+        .map(|(k, v)| (k.clone(), ByteString(v.clone().into_bytes())))
+        .collect()
+}
+
+fn client_pems(secret: &Secret) -> Option<Pems> {
+    let data = secret.data.as_ref()?;
+    let text = |key: &str| {
+        data.get(key)
+            .and_then(|b| String::from_utf8(b.0.clone()).ok())
+    };
+    Some(Pems::from([
+        ("ca.pem".to_owned(), text("ca.pem")?),
+        ("cert.pem".to_owned(), text(CLIENT_CERT)?),
+        ("key.pem".to_owned(), text(CLIENT_KEY)?),
+    ]))
+}
+
+/// Makes the namespace's certificates unless its Secret `secret` exists in `daemon_namespace`,
+/// and returns the client files.
+pub(crate) async fn ensure(
+    client: &Client,
+    daemon_namespace: &str,
+    secret: &str,
+    service: &str,
+    namespace: &str,
+) -> Result<Pems, kube::Error> {
+    let api: Api<Secret> = Api::namespaced(client.clone(), daemon_namespace);
+    let invalid = || kube::Error::Service(format!("Secret `{secret}` lacks a client pair").into());
+    if let Some(existing) = api.get_opt(secret).await? {
+        return client_pems(&existing).ok_or_else(invalid);
+    }
+    let (server, client_pair) = generate(service, daemon_namespace)
+        .map_err(|e| kube::Error::Service(e.to_string().into()))?;
+    let mut pems = server;
+    for (from, to) in [("cert.pem", CLIENT_CERT), ("key.pem", CLIENT_KEY)] {
+        if let Some(pem) = client_pair.get(from) {
+            pems.insert(to.to_owned(), pem.clone());
+        }
+    }
+    let wanted = Secret {
+        metadata: ObjectMeta {
+            name: Some(secret.to_owned()),
+            namespace: Some(daemon_namespace.to_owned()),
+            labels: Some(BTreeMap::from([
+                (labels::MANAGED_BY.to_owned(), labels::MANAGER.to_owned()),
+                (labels::NAMESPACE.to_owned(), namespace.to_owned()),
+            ])),
+            ..ObjectMeta::default()
+        },
+        data: Some(data(&pems)),
+        ..Secret::default()
+    };
+    match api.create(&PostParams::default(), &wanted).await {
+        Ok(created) => {
+            tracing::info!(%namespace, %secret, "created buildkitd certificates");
+            client_pems(&created).ok_or_else(invalid)
+        }
+        // Another run in the namespace made them first; theirs are the ones buildkitd mounts.
+        Err(kube::Error::Api(status)) if status.is_already_exists() => {
+            client_pems(&api.get(secret).await?).ok_or_else(invalid)
+        }
+        Err(e) => Err(e),
+    }
+}
+
+/// Writes `data` to the Secret `name` in `namespace`, when missing or different.
+pub(crate) async fn put_secret(
+    client: &Client,
+    namespace: &str,
+    name: &str,
+    type_: Option<String>,
+    data: BTreeMap<String, ByteString>,
+) -> Result<(), kube::Error> {
+    let api: Api<Secret> = Api::namespaced(client.clone(), namespace);
+    let mut wanted = Secret {
         metadata: ObjectMeta {
             name: Some(name.to_owned()),
             namespace: Some(namespace.to_owned()),
@@ -73,98 +161,15 @@ fn secret(name: &str, namespace: &str, pems: &Pems) -> Secret {
             )])),
             ..ObjectMeta::default()
         },
-        data: Some(
-            pems.iter()
-                .map(|(k, v)| (k.clone(), ByteString(v.clone().into_bytes())))
-                .collect(),
-        ),
-        ..Secret::default()
-    }
-}
-
-/// Where the certificates live.
-#[derive(Debug, Clone)]
-pub(crate) struct Locations {
-    /// The headless Service of the buildkitd `StatefulSet`.
-    pub(crate) service: String,
-    /// buildkitd's namespace, where the server Secret goes.
-    pub(crate) buildkitd_namespace: String,
-    /// The server Secret, mounted by buildkitd.
-    pub(crate) server_secret: String,
-    /// The controller's namespace, where the client Secret is kept.
-    pub(crate) controller_namespace: String,
-    /// The client Secret, copied into every namespace that runs builds.
-    pub(crate) client_secret: String,
-}
-
-/// Creates the certificates unless both Secrets exist.
-pub(crate) async fn ensure(client: &Client, at: &Locations) -> Result<(), kube::Error> {
-    let servers: Api<Secret> = Api::namespaced(client.clone(), &at.buildkitd_namespace);
-    let clients: Api<Secret> = Api::namespaced(client.clone(), &at.controller_namespace);
-    if servers.get_opt(&at.server_secret).await?.is_some()
-        && clients.get_opt(&at.client_secret).await?.is_some()
-    {
-        return Ok(());
-    }
-    let (server, client_pems) = generate(&at.service, &at.buildkitd_namespace)
-        .map_err(|e| kube::Error::Service(e.to_string().into()))?;
-    for (api, name, namespace, pems) in [
-        (
-            &servers,
-            &at.server_secret,
-            &at.buildkitd_namespace,
-            &server,
-        ),
-        (
-            &clients,
-            &at.client_secret,
-            &at.controller_namespace,
-            &client_pems,
-        ),
-    ] {
-        let wanted = secret(name, namespace, pems);
-        if api.get_opt(name).await?.is_some() {
-            api.replace(name, &PostParams::default(), &wanted).await?;
-        } else {
-            api.create(&PostParams::default(), &wanted).await?;
-        }
-    }
-    tracing::info!(secret = %at.server_secret, "created buildkitd certificates");
-    Ok(())
-}
-
-/// Copies the controller's Secret `name` into `namespace` under `target`, when missing or
-/// different.
-pub(crate) async fn copy_secret(
-    client: &Client,
-    from_namespace: &str,
-    name: &str,
-    namespace: &str,
-    target: &str,
-) -> Result<(), kube::Error> {
-    let source = Api::<Secret>::namespaced(client.clone(), from_namespace)
-        .get(name)
-        .await?;
-    let api: Api<Secret> = Api::namespaced(client.clone(), namespace);
-    let mut wanted = Secret {
-        metadata: ObjectMeta {
-            name: Some(target.to_owned()),
-            namespace: Some(namespace.to_owned()),
-            labels: Some(BTreeMap::from([(
-                labels::MANAGED_BY.to_owned(),
-                labels::MANAGER.to_owned(),
-            )])),
-            ..ObjectMeta::default()
-        },
-        data: source.data,
-        type_: source.type_,
+        data: Some(data),
+        type_,
         ..Secret::default()
     };
-    match api.get_opt(target).await? {
+    match api.get_opt(name).await? {
         Some(existing) if existing.data == wanted.data => Ok(()),
         Some(existing) => {
             wanted.metadata.resource_version = existing.metadata.resource_version;
-            api.replace(target, &PostParams::default(), &wanted)
+            api.replace(name, &PostParams::default(), &wanted)
                 .await
                 .map(drop)
         }
@@ -176,13 +181,23 @@ pub(crate) async fn copy_secret(
     }
 }
 
+/// Copies the client files into the build namespace as `name`.
+pub(crate) async fn put_client(
+    client: &Client,
+    namespace: &str,
+    name: &str,
+    pems: &Pems,
+) -> Result<(), kube::Error> {
+    put_secret(client, namespace, name, None, data(pems)).await
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
-    fn server_certificate_covers_every_pod() {
-        let (server, client) = generate("buildkitd", "builder-system").unwrap();
+    fn server_certificate_covers_the_pod() {
+        let (server, client) = generate("buildkitd-team-a", "builder-system").unwrap();
         assert_eq!(server["ca.pem"], client["ca.pem"]);
         for pems in [&server, &client] {
             assert!(pems["cert.pem"].starts_with("-----BEGIN CERTIFICATE-----"));
@@ -190,7 +205,28 @@ mod tests {
         }
         let der = der_of(&server["cert.pem"]);
         let text = String::from_utf8_lossy(&der);
-        assert!(text.contains("*.buildkitd.builder-system.svc.cluster.local"));
+        assert!(text.contains("*.buildkitd-team-a.builder-system.svc.cluster.local"));
+    }
+
+    #[test]
+    fn each_namespace_has_its_own_ca() {
+        let (a, _) = generate("buildkitd-team-a", "builder-system").unwrap();
+        let (b, _) = generate("buildkitd-team-b", "builder-system").unwrap();
+        assert_ne!(a["ca.pem"], b["ca.pem"]);
+    }
+
+    #[test]
+    fn client_files_come_from_the_client_keys() {
+        let (server, client) = generate("buildkitd-team-a", "builder-system").unwrap();
+        let mut pems = server;
+        pems.insert(CLIENT_CERT.to_owned(), client["cert.pem"].clone());
+        pems.insert(CLIENT_KEY.to_owned(), client["key.pem"].clone());
+        let secret = Secret {
+            data: Some(data(&pems)),
+            ..Secret::default()
+        };
+        assert_eq!(client_pems(&secret), Some(client));
+        assert_eq!(client_pems(&Secret::default()), None);
     }
 
     /// The DER of the first PEM block, enough to search for a SAN.
