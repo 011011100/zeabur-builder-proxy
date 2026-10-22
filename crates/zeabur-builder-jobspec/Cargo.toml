@@ -1,6 +1,6 @@
 [package]
 name = "zeabur-builder-jobspec"
-description = "Zeabur Builder: the build Job, as a pure function of a BuildRun and its inputs"
+description = "Zeabur Builder: the build Job and the buildkitd it runs on, as pure functions"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

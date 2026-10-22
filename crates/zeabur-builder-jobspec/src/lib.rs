@@ -1,4 +1,5 @@
-//! The build Job, as a pure function of a `BuildRun` and what the controller resolved for it.
+//! The build Job, as a pure function of a `BuildRun` and what the controller resolved for it, and
+//! in [`buildkitd`] the daemon it builds on.
 //!
 //! One Job per `BuildRun`, `backoffLimit: 0`: retrying is the controller's decision. Its Pod:
 //!
@@ -21,6 +22,8 @@
 //! The Pod runs as a non-root user with a read-only root filesystem, no capabilities and no
 //! service account token: `RUN` steps execute in buildkitd, not here, so the Job needs no
 //! privileges.
+
+pub mod buildkitd;
 
 use std::collections::BTreeMap;
 
@@ -86,7 +89,7 @@ pub struct JobInputs<'a> {
     pub image: &'a str,
     /// The rendered tags, the first one from the template.
     pub tags: &'a [String],
-    /// The routed buildkitd, `tcp://buildkitd-2.buildkitd.<ns>.svc:1234`.
+    /// The namespace's buildkitd, `tcp://buildkitd-<ns>-0.buildkitd-<ns>.<builder ns>.svc:1234`.
     pub buildkitd_addr: &'a str,
     /// The job image.
     pub job_image: &'a str,

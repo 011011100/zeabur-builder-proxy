@@ -43,6 +43,8 @@ pub mod labels {
     /// Marks a Secret the controller may read as Git credentials. Its informer watches only
     /// Secrets with this label set to `"true"`.
     pub const GIT_CREDENTIALS: &str = "builder.zeabur.com/git-credentials";
+    /// On a buildkitd and its objects: the build namespace it serves.
+    pub const NAMESPACE: &str = "builder.zeabur.com/namespace";
     /// `app.kubernetes.io/managed-by`.
     pub const MANAGED_BY: &str = "app.kubernetes.io/managed-by";
     /// The value of [`MANAGED_BY`].
@@ -57,7 +59,8 @@ pub mod annotations {
     pub const REPLAN: &str = "builder.zeabur.com/replan";
     /// On a `Build`: the digest of the plan to approve.
     pub const APPROVE_PLAN: &str = "builder.zeabur.com/approve-plan";
-    /// On a Namespace: overrides the controller's limit of concurrent builds.
+    /// On a Namespace: overrides the controller's limit of concurrent builds, and with it how many
+    /// builds its buildkitd runs at once.
     pub const MAX_CONCURRENT_BUILDS: &str = "builder.zeabur.com/max-concurrent-builds";
     /// On a Job and Pod: the commit built.
     pub const REVISION: &str = "builder.zeabur.com/revision";

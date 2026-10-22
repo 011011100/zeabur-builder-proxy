@@ -48,7 +48,7 @@
               "--",
               "buildctl",
               "--addr",
-              "tcp://buildkitd-2.buildkitd.zeabur-builder.svc:1234",
+              "tcp://buildkitd-team-a-0.buildkitd-team-a.builder-system.svc:1234",
               "--tlsdir",
               "/etc/zeabur-builder/buildkit",
               "build",
@@ -195,7 +195,7 @@
             "secret": {
               "defaultMode": 288,
               "optional": false,
-              "secretName": "buildkitd-client-tls"
+              "secretName": "zeabur-builder-buildkit-client"
             }
           },
           {
