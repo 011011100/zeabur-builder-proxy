@@ -5,12 +5,14 @@
 //!   `Build` agree on which repository they mean.
 //! - [`tag`]: the immutable, sortable image tag of a build.
 //! - [`route`]: which buildkitd instance builds a repository, so its cache mounts stay warm.
+//! - [`daemon`]: the name and address of a build namespace's own buildkitd.
 //! - [`result`]: the build result a Job reports in its termination message.
 //! - [`progress`]: counting cached steps in `buildctl --progress rawjson` output.
 //!
 //! The controller and the Job image both depend on this crate, which is why it stays free of I/O,
 //! clocks and randomness: the same inputs always give the same decision.
 
+pub mod daemon;
 pub mod git;
 pub mod progress;
 pub mod repo;
