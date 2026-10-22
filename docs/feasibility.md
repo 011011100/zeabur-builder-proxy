@@ -144,6 +144,9 @@ Both upstream changes are small and zbplan is a Zeabur project; they gate M4 onl
 
 ### §7 buildkitd pool (resolves §16 items 7 and 10)
 
+> Superseded in part: the shared pool and its routing were replaced by one buildkitd per
+> namespace (plan §7, ADR-8). The probe, GC and user-namespace findings still hold.
+
 - **Readiness probe:** an exec probe running `buildctl --addr unix:///run/buildkit/buildkitd.sock
   debug workers` works with mTLS enabled on TCP, because it uses the local socket. A gRPC
   health probe cannot present a client certificate. The upstream Kubernetes examples

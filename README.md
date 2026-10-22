@@ -3,9 +3,10 @@
 **Push a commit, get an image digest.** A Kubernetes operator that builds container images from
 Git with BuildKit, and hands the result to Flux, Keel or Argo CD for rollout.
 
-> **Status: design and M0 skeleton.** Nothing here builds an image yet. The custom resources,
-> the build Job and the routing logic exist and are tested; the controller does not. See the
-> [plan](docs/plan.md) (Traditional Chinese) and the [feasibility study](docs/feasibility.md).
+> **Status: proof of concept.** The controller builds Dockerfile and Railpack images from polled
+> public Git repositories on a test cluster ([proof of concept](docs/poc.md)); webhooks, zbplan and
+> rollout integrations are not built yet. See the [plan](docs/plan.md) (Traditional Chinese) and
+> the [feasibility study](docs/feasibility.md).
 
 ## What it does
 
@@ -25,10 +26,11 @@ spec:
   repositories are polled.
 - **Tags rollout tools can sort.** `main-1761058800-3e1a9c2`: one per build, newest last, plus the
   digest in `status.latestImage`.
-- **Warm caches.** A shared pool of buildkitd instances, and builds of one repository keep landing
-  on the same one, so `RUN --mount=type=cache` survives between builds.
-- **Small.** One controller, one buildkitd StatefulSet, one Job per build. No Tekton, no admission
-  webhook server.
+- **One buildkitd per namespace.** Its own cache, certificate authority and registry path, so
+  teams sharing a cluster don't share builds. It keeps its cache between builds, so
+  `RUN --mount=type=cache` survives, and scales to zero when idle.
+- **Small.** One controller, a buildkitd per building namespace, one Job per build. No Tekton, no
+  admission webhook server.
 
 It does not run tests, deploy, or keep build logs; your pipeline, rollout tool and log collector
 already do those.
@@ -37,9 +39,9 @@ already do those.
 
 1. A push (or a poll) wakes the `Build`. The controller resolves the ref to a commit itself.
 2. It creates a `BuildRun` for that commit and a Job for the run.
-3. The Job fetches the commit, plans if the builder needs it, and runs `buildctl` against the
-   buildkitd chosen for the repository. Your `RUN` steps execute in buildkitd; the Job needs no
-   privileges.
+3. The Job fetches the commit, plans if the builder needs it, and runs `buildctl` against its
+   namespace's buildkitd, started on demand. Your `RUN` steps execute in buildkitd, cut off from
+   the cluster network; the Job needs no privileges.
 4. The image is pushed; its digest and tags land in the `BuildRun` and the `Build`.
 
 ```sh

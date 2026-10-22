@@ -32,11 +32,20 @@
 | PR 建置與 preview image | v1 不做；未來以新的 provider 事件加上動態 BuildRun 擴充 |
 | Log 收集與保存 | 交給使用者既有的 log collector；我們只負責讓 log 收得到、找得到 |
 | 依賴 Tekton 或 Shipwright | 太重，見 §17 ADR-1 |
-| 不受信任的多租戶隔離（gVisor、Kata、按租戶分池） | 使用者是公司內部團隊 |
+| 預設使用 sandbox runtime（gVisor、Kata） | **〔變更〕** 隔離單位是 namespace（§1.3）；要替不受信任的客戶建置，管理員須另外指定 runtime class（§7.2） |
 
 ### 1.3 使用者與信任模型
 
-使用者是公司內部團隊，視為可信任。安全措施的目的是**防止意外**（誤寫主機路徑、誤用 node 憑證），而不是防範惡意攻擊。
+~~使用者是公司內部團隊，視為可信任。安全措施的目的是防止意外，而不是防範惡意攻擊。~~
+
+**〔變更〕** 不同 namespace 可能屬於不同團隊，彼此不該讀到對方的程式碼、secret 與 cache，也不該推到對方的 image 路徑。隔離的單位是 **namespace**：
+
+- 每個 build namespace 有自己的 buildkitd 與 cache（§7.1）、自己的 CA 與 client 憑證（§7.3），以及只能推到 `<defaultRegistry>/<namespace>/**` 的 registry 帳號（§8）。
+- 同一個 namespace 內的建置彼此信任：它們共用 buildkitd 與 cache，一個建置的 `RUN` 讀得到同一個 namespace 其他建置的 cache mount。
+- `RUN` 有自己的網路 namespace，連得到外網與 registry，連不到 Pod、Service、node 與 cloud metadata endpoint（§7.2）。
+- buildkitd 仍是 rootful 加 `privileged`，靠 user namespace（`hostUsers: false`）讓容器內的 root 對應到 host 上沒有權限的 UID。這擋得住意外，也擋得住一般的跨團隊存取，但**擋不住刻意利用核心漏洞逃出容器的攻擊**。
+
+所以不同團隊可以共用一個叢集；但若任何人都能推程式碼進來（不受信任的客戶），這樣還不夠：buildkitd 要跑在 sandbox runtime（gVisor、Kata 等，以 `--buildkitd-runtime-class` 指定），最好再搭配專用的 node pool。這個選項預設關閉：sandbox runtime 會讓建置變慢，也不是每個叢集都有。
 
 ---
 
@@ -48,12 +57,12 @@
                  ▼                                 │
 ┌─────────────────────────── controller (1 Deployment, leader election) ───────────────────────────┐
 │  webhook receiver ──wake──▶ Build reconciler ──create──▶ BuildRun reconciler ──create──▶ Job     │
-│  poller (repo-dedupe)  ──▶   (resolve ref→SHA)          (fairness, pick buildkitd)              │
+│  poller (repo-dedupe)  ──▶   (resolve ref→SHA)          (quota, wake buildkitd)                 │
 │  source providers: githubApp | plainGit        metrics /metrics        GitHub Checks reporter   │
 └───────────────────────────────────────────────────────────────────────────────────────────────────┘
                                                               │
-         Job Pod: init fetch → init plan → main build ────────┼── gRPC + mTLS ──▶ buildkitd-N
-                                                              │                  (StatefulSet + PVC cache)
+         Job Pod: init fetch → init plan → main build ────────┼── gRPC + mTLS ──▶ buildkitd-<namespace>
+                                                              │                  (one per namespace, PVC cache)
                                                               ▼                          │
                                                     termination message (JSON)          push
                                                                                          ▼
@@ -67,12 +76,12 @@
 | 元件 | 形式 | 職責 |
 |---|---|---|
 | controller | 1 個 Deployment（leader election） | 兩個 reconciler、webhook 接收、polling、公平排程、Checks 回報、指標 |
-| buildkitd | 1 個 StatefulSet，每台各自有 PVC | 實際執行建置與推送，同時保存 cache |
+| buildkitd | **〔變更〕** 每個 build namespace 1 個 StatefulSet（1 個 replica、1 個 PVC），由 controller 建立，閒置時縮到 0 | 執行該 namespace 的建置與推送，保存它的 cache |
 | 每次建置 | 1 個 `batch/v1` Job | clone、規劃、作為 BuildKit client 送出建置 |
 | 驗證 | CRD CEL 規則加上 ValidatingAdmissionPolicy | **不跑 admission webhook server** |
-| 憑證 | 由 controller 持有 | GitHub App key、registry robot 帳號、LLM API key |
+| 憑證 | 由 controller 持有 | GitHub App key、**〔變更〕** 每個 namespace 的 registry 帳號、LLM API key；buildkitd 的 CA 與憑證由 controller 產生 |
 
-**關鍵觀念**：使用者程式碼的 `RUN` 是在 **buildkitd 的 worker** 裡執行，Job Pod 只是一個薄 client。所以安全邊界與 cache 都集中在 buildkitd 池；Job Pod 不需要任何特權。
+**關鍵觀念**：使用者程式碼的 `RUN` 是在 **buildkitd 的 worker** 裡執行，Job Pod 只是一個薄 client。所以安全邊界與 cache 都在 buildkitd；Job Pod 不需要任何特權。**〔變更〕** 每個 namespace 一個 buildkitd，安全邊界也就落在 namespace 之間。
 
 ---
 
@@ -337,9 +346,11 @@ BuildRun 的 ownerReference 指向 Build，Job 的 ownerReference 指向 BuildRu
 狀態機：`Pending → Planning → Building → Succeeded | Failed | Cancelled`
 
 1. **Pending**
-   - 公平排程：若該 namespace 執行中的 BuildRun 數量 ≥ 上限，維持 Pending（`reason=QuotaExceeded`）。上限預設值由 controller 設定，可用 Namespace annotation `builder.zeabur.com/max-concurrent-builds` 覆寫。
-   - 全域上限：所有 buildkitd 的總 slot 數。
-   - 選擇 buildkitd：使用 rendezvous hashing（§7.3），結果寫進 `status.buildkitdInstance`。
+   - 公平排程：若該 namespace 執行中的 BuildRun 數量 ≥ 上限，維持 Pending（`reason=QuotaExceeded`）。上限預設值由 controller 設定（`--max-concurrent-builds`，預設 3），可用 Namespace annotation `builder.zeabur.com/max-concurrent-builds` 覆寫。
+   - ~~全域上限：所有 buildkitd 的總 slot 數。~~ **〔變更〕** 沒有全域上限：每個 namespace 有自己的 buildkitd，總容量由叢集的排程決定。
+   - **〔變更〕** registry 帳號：找不到該 namespace 的推送 Secret（§8）就維持 Pending（`reason=RegistryCredentialsMissing`），也不啟動 buildkitd。
+   - ~~選擇 buildkitd：使用 rendezvous hashing~~ **〔變更〕** 喚醒 buildkitd（§7.1）：確保該 namespace 的憑證、StatefulSet（replicas 1）、Service 與 NetworkPolicy 存在。Pod 還沒 Ready 就維持 Pending（`reason=BuildkitdStarting`，message 寫出等待的 Pod），每 2 秒重試。Pod 名稱寫進 `status.buildkitdInstance`。
+   - **〔變更〕** 把該 namespace 的 client 憑證寫進 build namespace 的 `zeabur-builder-buildkit-client` Secret（§7.3）。
    - 若需要短期憑證（GitHub token、LLM key 副本），建立 BuildRun 擁有的 Secret。
    - 建立 Job（§6.1）。
    - GitHub App 模式下建立 check run，狀態為 `in_progress`。
@@ -460,6 +471,8 @@ volumes:
 - `ttlSecondsAfterFinished`：預設 600。
 - `terminationMessagePolicy: File`，路徑為預設的 `/dev/termination-log`。
 
+**〔變更〕** `buildkit-client-tls` 是該 namespace 自己的 client 憑證，只有該 namespace 的 buildkitd 接受；`BUILDKIT_HOST` 指向 `buildkitd-<namespace>-0`。
+
 **Pod 安全設定**：`runAsNonRoot: true`、`readOnlyRootFilesystem: true`（`/workspace` 與 `/tmp` 使用 emptyDir）、drop 所有 capabilities、`seccompProfile: RuntimeDefault`、`automountServiceAccountToken: false`。
 
 **〔變更〕** 補充：
@@ -561,44 +574,84 @@ zbplan 在規劃時就已經在同一台 buildkitd 上試建過，所以接下�
 
 ---
 
-## 7. buildkitd 池
+## 7. buildkitd：每個 namespace 一個
+
+**〔變更〕** 原本是全叢集共用一個 buildkitd 池，以 rendezvous hashing 依 repo 分配（見 ADR-8）。現在每個 build namespace 有自己的 buildkitd，由 controller 建立與縮放；不再有路由，也不再跨 namespace 共用 cache。
 
 ### 7.1 部署
 
-- 使用 StatefulSet，`moby/buildkit`（**rootful**）image，pin 版本。
-- 每個 Pod 有自己的 PVC（`volumeClaimTemplates`），掛在 `/var/lib/buildkit`；大小可設定，預設 100Gi。
-- 透過 headless Service 提供穩定 DNS：`buildkitd-N.buildkitd.<ns>.svc:1234`。
-- client 與 daemon 之間使用 **mTLS**。v1 由 controller 啟動時自行產生 CA 與憑證並存成 Secret（自動輪替留到之後）；cert-manager 為選用。
-- buildkitd 設定（`buildkitd.toml`）：
-  - GC 政策：~~`keepBytes` 設為 PVC 大小的 80% 左右~~ **〔變更〕** BuildKit v0.34 以 `reservedSpace`、`maxUsedSpace`、`minFreeSpace`、`keepDuration` 設定；`keepBytes` 是舊名稱。設 `maxUsedSpace = "80%"`
+- 某個 namespace 第一次有 BuildRun 要開始時，controller 在 builder 自己的 namespace（PoC 是 `builder-system`）以 server-side apply 建立：
+  - StatefulSet `buildkitd-<namespace>`：1 個 replica，`moby/buildkit:v0.34.1`（**rootful**），pin 版本
+  - headless Service `buildkitd-<namespace>`；Job 連 `buildkitd-<namespace>-0.buildkitd-<namespace>.<builder namespace>.svc:1234`
+  - ingress NetworkPolicy（§7.2）與憑證 Secret `buildkitd-<namespace>-tls`（§7.3）
+  - namespace 名稱太長時（StatefulSet 名稱上限 52 字元，因為 `controller-revision-hash` label），改用前 33 個字元加 SHA-256 的前 8 個 hex 字元。
+- cache 是 `volumeClaimTemplates` 建立的 PVC，掛在 `/var/lib/buildkit`，大小預設 20Gi（`--buildkitd-cache-size`），storage class 可設定。`persistentVolumeClaimRetentionPolicy` 是 `whenScaled: Retain`、`whenDeleted: Delete`：縮到 0 時 cache 留著，StatefulSet 刪除時一起刪。
+- **閒置縮到 0**：controller 每 30 秒檢查一次。namespace 沒有未完成的 BuildRun，且最近一次 BuildRun 建立或完成已超過 `--buildkitd-idle`（預設 600 秒），就經由 `scale` subresource 把 replicas 設為 0；下一個 BuildRun 再 apply 回 1。冷啟動在測試叢集上約 5 到 8 秒（§16）。
+- **namespace 刪除**：同一個檢查發現 namespace 已不存在時，刪除它的 StatefulSet、Service、NetworkPolicy 與憑證 Secret；PVC 依保留政策一起刪除。
+- 所有 buildkitd 共用一個 ConfigMap 裡的 `buildkitd.toml`（`--buildkitd-config`）：
+  - GC 政策：~~`keepBytes` 設為 PVC 大小的 80% 左右~~ **〔變更〕** BuildKit v0.34 以 `reservedSpace`、`maxUsedSpace`、`minFreeSpace`、`keepDuration` 設定；`keepBytes` 是舊名稱。設 `maxUsedSpace = "80%"`、`minFreeSpace = "20%"`，在 kubelet 的驅逐門檻之前先清
+  - **〔新增〕** `insecure-entitlements = []`：`RUN --network=host` 與 `--security=insecure` 一律拒絕
+  - **〔新增〕** `[worker.oci] networkMode = "bridge"`（§7.2）
+  - **〔新增〕** `[frontend."gateway.v0"] allowedRepositories`：只允許列出的 gateway frontend（`docker.io/docker/dockerfile`、`docker.io/docker/dockerfile-upstream`、Railpack 的 frontend）。Dockerfile 開頭的 `# syntax=` 也受這個限制；新增 ClusterBuilder 時要把它的 frontend 加進來
   - `max-parallelism`：可設定
+  - 設定改了以後，要等各 namespace 的 buildkitd 下次啟動才生效（例如閒置縮到 0 之後）
+- 資源：requests 預設 100m CPU、256Mi 記憶體（`--buildkitd-cpu-request`、`--buildkitd-memory-request`），limit 選用。閒置時實際約用 22 MiB anonymous memory（§16）。
 - readiness probe：**〔已驗證〕** 使用 exec probe `buildctl --addr unix:///run/buildkit/buildkitd.sock debug workers`。它走本機 socket，不受 TCP 的 mTLS 影響；gRPC health probe 無法出示 client 憑證。上游 Kubernetes 範例也這樣做。
 
 ### 7.2 隔離
 
-- Kubernetes 1.33 以上：設定 `hostUsers: false`（user namespace），搭配 rootful buildkitd。注意 **rootless buildkitd 不能與 user namespace 併用**。低於 1.33 時，chart 提供 `privileged` 的退回選項，並在文件中說明風險。
+- Kubernetes 1.33 以上：設定 `hostUsers: false`（user namespace），搭配 rootful buildkitd。注意 **rootless buildkitd 不能與 user namespace 併用**。低於 1.33 時，以 `--buildkitd-host-users=true` 退回單純的 `privileged`，並在文件中說明風險。
   - **〔已驗證〕** 1.33 起為 beta 且預設開啟，1.36 GA。需要 Linux ≥ 6.3、containerd ≥ 2.0、runc ≥ 1.2，以及支援 idmapped mount 的檔案系統（NFS 不行）。上游有 `statefulset.userns.yaml` 範例。
+- **〔新增〕** sandbox runtime：`--buildkitd-runtime-class` 設定 buildkitd Pod 的 `runtimeClassName`，預設不設。替不受信任的客戶建置時，指定 gVisor 或 Kata 的 RuntimeClass（§1.3）。`privileged` 的 buildkitd 在這些 runtime 下能否運作、要多少額外資源，尚未驗證（§16）。
 - 獨立 node pool：用 taint 與 toleration 區隔（chart 中為選用設定）。
+- **〔新增〕** `RUN` 的網路：`networkMode = "bridge"` 讓每個 `RUN` 有自己的網路 namespace，經 BuildKit 內建的 CNI bridge 外出，來源位址被 masquerade 成 buildkitd Pod 的 IP，所以 buildkitd Pod 的 egress NetworkPolicy 同樣管得到 `RUN`。不用 host network：那樣的 `RUN` 與 buildkitd 共用網路，Pod 連得到的它都連得到，包括 buildkitd 自己的 gRPC port。**〔已驗證〕** 在 `hostUsers: false` 的 Pod 中可用：`RUN` 拿到 `10.10.0.0/16` 的位址，worker 標籤為 `network:cni`。
 - NetworkPolicy：
-  - ingress：只允許 controller namespace 中帶 build Job label 的 Pod 連 1234 port
-  - egress：允許所有外部連線，但**封鎖 cloud metadata endpoint `169.254.169.254/32`**（以及 `fd00:ec2::254`）；是否封鎖叢集內部網段由管理員設定
+  - ingress：~~只允許 controller namespace 中帶 build Job label 的 Pod 連 1234 port~~ **〔變更〕** 每個 namespace 一份，由 controller 建立：只允許該 build namespace 的 Pod 連 1234 port。其他 namespace 的 Pod 連不上；連得上的還要有該 namespace 的 client 憑證（§7.3）。
+  - egress：~~允許所有外部連線，但封鎖 cloud metadata endpoint~~ **〔變更〕** 所有 buildkitd 共用一份，由部署提供：允許 kube-dns 的 53 port、registry 的 Pod，以及 `0.0.0.0/0` 中除了 `10.0.0.0/8`、`100.64.0.0/10`、`127.0.0.0/8`、`169.254.0.0/16`、`172.16.0.0/12`、`192.168.0.0/16` 以外的位址。私有網段涵蓋常見的 Pod、Service、node 網段與 cloud metadata endpoint；叢集若用公有網段，要自己加進 `except`。目前只處理 IPv4（`fd00:ec2::254` 等 IPv6 位址待補）。
+  - `RUN` 仍可經 kube-dns 解析叢集內的名稱，只是連不上。
+  - 需要叢集的 CNI 執行 NetworkPolicy（k3s 內建；Flannel 單獨使用時不會執行）。
 
-### 7.3 路由：rendezvous hashing
+### 7.3 mTLS
 
-- hash key：`<正規化 repo URL>#<contextDir 的第一層目錄>`，讓同一個 monorepo 的多個服務落在同一台，共用依賴 cache。
-- 候選清單：所有 Ready 的 buildkitd Pod（以 ordinal 識別）。
-- 選分數最高的；若該台不 Ready，選次高的，並增加 `buildrun_route_fallback_total`。
-- 每台的負載上限：可設定的 slot 數；滿了就排下一台（同樣計入 fallback）；全部滿了就讓 BuildRun 維持 Pending（`reason=NoBuildkitdCapacity`）。
-- 擴縮 replicas 時只會影響少部分 key 的落點（rendezvous hashing 的特性）。
+- ~~v1 由 controller 啟動時自行產生 CA 與憑證並存成 Secret~~ **〔變更〕** 每個 namespace 有自己的 CA。controller 第一次喚醒該 namespace 的 buildkitd 時產生 CA、server 憑證（SAN 為該 namespace 的 Service 與 Pod 名稱）與 client 憑證，以一次 create 寫進 `buildkitd-<namespace>-tls`。兩個 BuildRun 同時開始時，憑證也一定出自同一個 CA。CA 金鑰不保存。
+- buildkitd 以 `--tlscacert` 驗證 client 憑證（`RequireAndVerifyClientCert`），不檢查名稱，所以 CA 就是邊界：A 的 client 憑證連 B 的 buildkitd，會在 TLS 握手時被拒絕。
+- client 憑證複製到 build namespace 的 `zeabur-builder-buildkit-client`，由 Job 掛載。能讀這個 Secret 的人可以直接用 `buildctl` 連自己 namespace 的 buildkitd；這沒有越過 namespace 的邊界。
+- 自動輪替尚未實作；cert-manager 為選用。
+
+### 7.4 ~~路由：rendezvous hashing~~
+
+**〔變更〕** 刪除。每個 namespace 只有一個 buildkitd，不需要路由；`NoBuildkitdCapacity` 改為 `BuildkitdStarting`。
 
 ---
 
 ## 8. Registry 與憑證
 
-- 預設 registry 由 controller 設定（`defaultRegistry`），推送使用 controller 持有的 robot 帳號（docker config.json Secret）。
-- 每次建置時，controller 把需要的 registry 憑證複製成 BuildRun 擁有的短期 Secret 掛給 build 容器（只放這次需要的 registry）。
+- 預設 registry 由 controller 設定（`defaultRegistry`）。~~推送使用 controller 持有的 robot 帳號~~ **〔變更〕** 每個 build namespace 有自己的推送帳號，只能推到 `<defaultRegistry>/<namespace>/**`：
+  - 管理員在 controller 的 namespace 建立 docker config.json Secret `<prefix><namespace>`（`--registry-auth-prefix`，PoC 為 `registry-push-`）。
+  - 找不到就讓 BuildRun 維持 Pending（`RegistryCredentialsMissing`）。沒設定 prefix 時以匿名推送，只適合不需驗證的 registry。
+  - controller 不產生帳號，也不呼叫 registry 的 API；帳號的範圍由 registry 自己的 ACL 決定。之後可以由 controller 自動產生（例如寫 Zot 的 htpasswd），但目前不做。
+- 每次建置時，controller 把該 namespace 的帳號複製成 BuildRun 擁有的短期 Secret 掛給 build 容器。
 - Build 可以用 `pushSecretRef` 改用自己的憑證（例如推到外部 registry）。
-- 內部 registry 建議使用 Zot 或 distribution；Harbor 也可以，但比較重。
+- 內部 registry 建議使用 Zot 或 distribution；Harbor 也可以，但比較重。**〔新增〕** 以 Zot（v2.1.22 驗證過）為例，每個 namespace 一個 htpasswd 使用者，ACL 如下；任何人可以讀，只有同名使用者能寫：
+
+  ```json
+  {
+    "http": {
+      "auth": {"htpasswd": {"path": "/etc/zot/auth/htpasswd"}},
+      "accessControl": {
+        "repositories": {
+          "**": {"anonymousPolicy": ["read"]},
+          "team-a/**": {
+            "policies": [{"users": ["team-a"], "actions": ["read", "create", "update", "delete"]}],
+            "anonymousPolicy": ["read"]
+          }
+        }
+      }
+    }
+  }
+  ```
+
+  htpasswd 掛成 Secret volume（不要用 `subPath`），Zot 偵測到檔案變更會自己重新載入，新增帳號不必重啟；kubelet 同步 Secret 約需一分鐘。新增 namespace 時 ACL 要加一筆，這需要重新載入設定。匿名讀取讓 node 拉 image 不需要 pull secret；若 image 本身也要保密，改成只允許同名使用者讀。
 - 維運文件需要涵蓋：
   - node 上的 containerd 要信任內部 registry 的 TLS（`/etc/containerd/certs.d/<host>/hosts.toml`）
   - 每次 commit 都會產生一個 tag，需要設定 registry GC 與保留政策
@@ -662,7 +715,7 @@ type NotifyTarget struct {
 | `buildruns_active` | gauge | namespace |
 | `buildruns_pending` | gauge | namespace, reason |
 | `buildrun_vertices_total` | counter | builder, cached（true／false） |
-| `buildrun_route_fallback_total` | counter | — |
+| ~~`buildrun_route_fallback_total`~~ **〔變更〕** `buildkitd_start_seconds` | histogram | — |
 | `plan_total` | counter | builder, source（pinned／generated）, result |
 | `plan_duration_seconds` | histogram | builder |
 | `webhook_received_total` | counter | event, result（accepted／ignored／bad_signature／duplicate） |
@@ -690,18 +743,22 @@ type NotifyTarget struct {
 
 ```yaml
 defaultRegistry: registry.internal
-registryAuthSecret: registry-robot          # docker config.json
 github:
   apps:
     - name: github-com
       baseURL: https://api.github.com
       appID: 12345
       secretRef: github-app-github-com      # privateKey、webhookSecret
-buildkitd:
-  service: buildkitd
-  replicas: 3
-  slotsPerInstance: 4
-  tlsSecret: buildkitd-tls
+buildkitd:                                  # 〔變更〕 每個 namespace 一個
+  image: docker.io/moby/buildkit:v0.34.1
+  config: buildkitd                         # ConfigMap，內含 buildkitd.toml
+  cacheSize: 20Gi
+  storageClass: ""
+  runtimeClass: ""                          # 選用，例如 gvisor
+  hostUsers: false
+  resources: {cpuRequest: 100m, memoryRequest: 256Mi, memoryLimit: ""}
+  idleAfter: 600s
+registryAuthPrefix: registry-push-          # 〔變更〕 每個 namespace 的推送帳號 Secret
 fairness:
   defaultMaxConcurrentPerNamespace: 3
 job:
@@ -725,6 +782,8 @@ metrics:
   - 叢集範圍 get、list、watch（informer 只快取帶 `builder.zeabur.com/git-credentials` label 的 Secret）
   - 在 build namespace 中 create、delete（短期 Secret）
 - `events`：create、patch。
+- **〔新增〕** `namespaces`：get（清掉已刪除 namespace 的 buildkitd）。
+- **〔新增〕** 只在 builder 的 namespace：`statefulsets` get、list、watch、create、patch、delete；`statefulsets/scale` patch；`services`、`networkpolicies` get、create、patch、delete。
 - `coordination.k8s.io/leases`：leader election。
 - 不需要 admissionregistration 權限（VAP 由 chart 安裝）。
 
@@ -737,9 +796,9 @@ Job Pod 使用的 ServiceAccount 不需要任何權限（`automountServiceAccoun
 **〔變更〕** 沿用 Zeabur Identity 的 Cargo workspace；crate 分層（`scripts/check-levels.sh` 檢查）：
 
 ```
-crates/zeabur-builder-core/     （第 0 層，純函式）URL 正規化、tag 渲染、rendezvous hashing、termination message、progress 統計
+crates/zeabur-builder-core/     （第 0 層，純函式）URL 正規化、tag 渲染、buildkitd 命名、termination message、progress 統計
 crates/zeabur-builder-api/      （第 1 層，純函式）CRD 型別、CEL 規則、deploy/crds.json
-crates/zeabur-builder-jobspec/  （第 2 層，純函式）Job 組裝、golden test
+crates/zeabur-builder-jobspec/  （第 2 層，純函式）Job 與 buildkitd 物件組裝、golden test
 crates/zeabur-builder/          （第 3 層）controller binary；之後加入 reconciler、source、webhook、notify、metrics
 crates/zeabur-builder-job/      （之後）Job 內的包裝程式
 deploy/                         CRD、RBAC、VAP、buildkitd StatefulSet、NetworkPolicy
@@ -773,7 +832,7 @@ test/e2e/
 
 ## 14. 測試策略
 
-- **單元測試**：URL 正規化、tag 渲染、rendezvous hashing、Job 組裝（golden file）、termination message 解析、webhook 簽章驗證。
+- **單元測試**：URL 正規化、tag 渲染、buildkitd 命名、Job 與 buildkitd 組裝（golden file）、termination message 解析、webhook 簽章驗證。
 - **Controller 測試**：~~使用 envtest~~ **〔變更〕** Rust 沒有 envtest。狀態機的決策寫成純函式（輸入：物件與觀察到的 Job／Pod；輸出：要做的動作），以單元測試涵蓋 Replace／Queue、歷史清理、自動 replan 只發生一次、Pending 排程。API server 的行為則在 k3d 或 kind 上以 `#[ignore]` 測試驗證，做法同 Zeabur Identity。
 - **整合測試**（kind）：
   - 部署 buildkitd、Zot registry、controller
@@ -795,7 +854,7 @@ test/e2e/
 - `zeabur-builder-job` 的 `fetch` 與 `build`（Dockerfile frontend、推送、termination message）**〔Job 組裝與解析邏輯已完成；包裝程式與 image 未完成〕**
 - BuildRun reconciler：手動建立 BuildRun（Revision 填 SHA）→ Job → status 寫入 digest
 - 只支援匿名 Git 與預設 registry
-- rendezvous hashing 路由 **〔已完成，純函式〕**
+- ~~rendezvous hashing 路由~~ **〔變更〕** 每個 namespace 一個 buildkitd，閒置縮到 0 **〔已完成〕**
 - 基本指標：`buildrun_total`、`buildrun_phase_duration_seconds`
 
 **驗收**：在 kind 上手動建立 BuildRun，image 成功推到 Zot，`kubectl get buildrun` 顯示 Succeeded 與 digest；第二次建置相同 SHA 時，cache 命中率顯著提高。
@@ -860,6 +919,9 @@ test/e2e/
 | 9 | BuildKit Go client 中 attestation 與 session auth 的 API | §6.4 | 不適用：改用 `buildctl` 的 `--opt attest:*` 與 `DOCKER_CONFIG` |
 | 10 | 目標叢集的 Kubernetes 與 containerd 版本（是否支援 `hostUsers: false`） | §7.2 | 需求已確認（K8s ≥ 1.33、containerd ≥ 2.0、Linux ≥ 6.3）；目標叢集版本仍待確認 |
 | 11 | **〔新增〕** zbplan 連 buildkitd 的 mTLS | §6.3 | 已驗證：不支援，需上游支援 |
+| 12 | **〔新增〕** 每個 namespace 一個 buildkitd 的隔離 | §1.3、§7 | 已驗證（k3s v1.36，見 [poc.md](poc.md)）：兩個 namespace 同時在各自的 buildkitd 建置；A 的 client 憑證被 B 拒絕；A 的帳號推不進 B 的路徑；`RUN` 連不到其他 namespace 的 Service、Kubernetes API 與 `169.254.169.254`，連得到外網與 registry；`RUN --network=host` 與名單外的 frontend 被拒絕 |
+| 13 | **〔新增〕** 冷啟動與閒置成本 | §7.1 | 已驗證：新 PVC 約 8 秒、既有 PVC 約 5 秒進入建置；閒置 buildkitd 約 22 MiB anonymous memory、45 MiB working set |
+| 14 | **〔新增〕** `privileged` buildkitd 在 gVisor、Kata 下能否運作 | §7.2 | 未驗證 |
 
 ---
 
@@ -886,8 +948,20 @@ AI 規劃的結果不具確定性，若每次建置都重新規劃，等於讓 L
 **ADR-7：不負責 log 保存**
 交給使用者既有的 log collector。我們只確保 Pod 保留時間足夠、label 齊全，並提供 log URL 樣板。
 
-**ADR-8：buildkitd 共用池加上 rendezvous hashing**
-`RUN --mount=type=cache` 的內容不會隨 `--cache-to type=registry` 匯出，而 Railpack 和 zbplan 都大量依賴 cache mount。若每次建置都使用新的 buildkitd，就幾乎無法利用這些 cache。共用池搭配依 repo 的親和路由可以解決這個問題；由於使用者是內部團隊，跨團隊共用 cache 是可以接受的（甚至是優點）。
+**ADR-8：~~buildkitd 共用池加上 rendezvous hashing~~ 〔變更〕每個 namespace 一個 buildkitd**
+`RUN --mount=type=cache` 的內容不會隨 `--cache-to type=registry` 匯出，而 Railpack 和 zbplan 都大量依賴 cache mount。若每次建置都使用新的 buildkitd，就幾乎無法利用這些 cache，所以 buildkitd 仍是長期存在、有 PVC 的 StatefulSet。
+
+原本的設計是全叢集共用一個池，依 repo 以 rendezvous hashing 分配，並假設使用者都是互相信任的內部團隊。現在不同 namespace 可能是不同團隊，而在共用的 buildkitd 中，一個建置的 `RUN` 只要用相同的 id 就能掛上別人的 cache mount，逃出容器後還讀得到別人的原始程式碼與 secret，所以改成每個 namespace 一個 buildkitd，各自有 CA、registry 帳號與 cache。代價：
+
+- 不再跨 namespace 共用 cache；同一個 namespace 內仍然共用。
+- 每個 namespace 多一個 Pod 與一個 PVC。閒置時縮到 0（PVC 保留），所以常駐成本只有 PVC；下一次建置多等 5 到 8 秒的冷啟動。
+- controller 要管理 StatefulSet、Service、NetworkPolicy 與憑證，RBAC 也多了這些權限（§12）。
+
+考慮過但沒採用：
+
+- **每次建置一個 buildkitd**：隔離最好，但 cache mount 每次都是空的。
+- **維持共用池，只加 mTLS 與 registry 隔離**：`RUN` 仍在同一個 daemon 中執行，跨 namespace 讀取 cache mount 的問題還在。
+- **預設使用 gVisor**：sandbox 才擋得住刻意的逃逸，但會讓建置變慢，也不是每個叢集都有；改成選用的 `runtimeClassName`（§7.2）。
 
 ---
 
@@ -908,4 +982,5 @@ AI 規劃的結果不具確定性，若每次建置都重新規劃，等於讓 L
 - Mokhov et al., *Build Systems à la Carte*（ICFP 2018）
 - **〔新增〕** BuildKit `buildctl build`：<https://github.com/moby/buildkit/blob/v0.34.1/cmd/buildctl/build.go>
 - **〔新增〕** Kubernetes user namespaces：<https://kubernetes.io/docs/concepts/workloads/pods/user-namespaces/>
-- **〔新增〕** D. G. Thaler and C. V. Ravishankar, "Using name-based mappings to increase hit rates," IEEE/ACM ToN, 1998（rendezvous hashing）
+- **〔新增〕** BuildKit `buildkitd.toml`（`networkMode`、`insecure-entitlements`、`allowedRepositories`）：<https://github.com/moby/buildkit/blob/v0.34.1/docs/buildkitd.toml.md>
+- **〔新增〕** Zot：<https://zotregistry.dev>
