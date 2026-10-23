@@ -27,9 +27,9 @@ pub const IMAGE_UID: u32 = 1000;
 /// The directories the user owns: the app, and `HOME`.
 const OWNED: &str = "/app /root";
 
-/// Gives `/app` and `/root` to [`IMAGE_UID`] at the end of a step. `-xdev` leaves the step's cache mounts
-/// alone; a step image without `find` keeps root's files, and the [`dockerfile`] build hands them
-/// over instead.
+/// Gives `/app` and `/root` to [`IMAGE_UID`] at the end of a step. `-xdev` leaves the step's cache
+/// mounts alone; a step image without `find` keeps root's files, and the [`dockerfile`] build hands
+/// them over instead.
 pub const OWN_COMMAND: &str = "sh -c 'command -v find >/dev/null || exit 0; for d in /app /root; do if [ -e \"$d\" ]; then find \"$d\" -xdev -exec chown -h 1000:1000 {} +; fi; done'";
 
 const OWN_NAME: &str = "give /app and /root to uid 1000";
