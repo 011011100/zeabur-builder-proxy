@@ -339,7 +339,8 @@ pub struct BuildStatus {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schemars(extend("format" = "date-time"))]
     pub last_resolved_at: Option<String>,
-    /// When a webhook last woke this `Build`.
+    /// When a webhook last woke this `Build`; written by the receiver only. Later than
+    /// `lastResolvedAt`: the ref is asked again.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schemars(extend("format" = "date-time"))]
     pub last_webhook_at: Option<String>,

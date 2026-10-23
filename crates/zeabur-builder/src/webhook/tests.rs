@@ -96,7 +96,6 @@ fn settings(max_body: usize, burst: u32) -> Settings {
 
 struct World {
     receiver: Receiver,
-    wakes: Arc<Wakes>,
     touched: Arc<Mutex<Vec<String>>>,
 }
 
@@ -173,7 +172,6 @@ fn world_with(max_body: usize, burst: u32) -> World {
             value.to_vec(),
         );
     }
-    let wakes = Arc::new(Wakes::default());
     let touched = Arc::new(Mutex::new(Vec::new()));
     World {
         receiver: Receiver::new(
@@ -183,10 +181,8 @@ fn world_with(max_body: usize, burst: u32) -> World {
                 app: Some(APP.to_vec()),
                 touched: Arc::clone(&touched),
             }),
-            Arc::clone(&wakes),
             settings(max_body, burst),
         ),
-        wakes,
         touched,
     }
 }
@@ -199,17 +195,7 @@ impl World {
     fn woken(&self) -> Vec<String> {
         let mut touched: Vec<String> = self.touched.lock().unwrap().drain(..).collect();
         touched.sort();
-        let mut out: Vec<String> = self
-            .wakes
-            .pending
-            .lock()
-            .unwrap()
-            .drain()
-            .map(|(n, b)| format!("{n}/{b}"))
-            .collect();
-        out.sort();
-        assert_eq!(out, touched, "every marked Build is touched once");
-        out
+        touched
     }
 }
 
@@ -564,11 +550,7 @@ async fn gitlab_tokens_and_signing_tokens() {
         app: None,
         touched: Arc::new(Mutex::new(Vec::new())),
     };
-    let signed = Receiver::new(
-        Box::new(fake),
-        Arc::new(Wakes::default()),
-        settings(1024, 10),
-    );
+    let signed = Receiver::new(Box::new(fake), settings(1024, 10));
     let mut h = standard_headers(key, "msg_1", now().as_second(), &body);
     h.insert("x-gitlab-event", HeaderValue::from_static("Push Hook"));
     assert_eq!(
@@ -771,17 +753,8 @@ fn seen_forgets_the_oldest() {
     assert_eq!(seen.order.len(), SEEN);
 }
 
-#[test]
-fn wakes_coalesce() {
-    let wakes = Wakes::default();
-    assert!(wakes.wake("a", "api"));
-    assert!(!wakes.wake("a", "api"));
-    assert!(wakes.take("a", "api"));
-    assert!(!wakes.take("a", "api"));
-}
-
 #[tokio::test]
-async fn a_marked_build_is_touched_once() {
+async fn each_new_delivery_writes_the_wake_again() {
     let w = world();
     let body = github_push("refs/heads/main");
     post(
@@ -799,11 +772,10 @@ async fn a_marked_build_is_touched_once() {
     )
     .await;
     assert_eq!(
-        w.touched.lock().unwrap().len(),
-        2,
-        "two Builds, each touched once"
+        w.woken(),
+        ["team-a/api", "team-a/api", "team-a/head", "team-a/head"],
+        "the wake lives in status, not in this replica"
     );
-    w.woken();
 }
 
 #[test]

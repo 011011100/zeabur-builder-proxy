@@ -161,21 +161,52 @@ fn a_woken_build_records_the_webhook_as_its_trigger() {
 }
 
 #[test]
-fn webhooks_wait_out_the_gap_between_polls() {
-    let status = |at: &str| BuildStatus {
-        last_resolved_at: Some(at.to_owned()),
+fn webhooks_wake_from_status_and_wait_out_the_gap() {
+    let status = |hook: Option<&str>, resolved: Option<&str>| BuildStatus {
+        last_webhook_at: hook.map(str::to_owned),
+        last_resolved_at: resolved.map(str::to_owned),
         ..BuildStatus::default()
     };
-    assert_eq!(wake_wait(None, now()), None);
+    assert_eq!(wake(None, now()), Wake::Idle);
     assert_eq!(
-        wake_wait(Some(&status("2026-10-22T07:59:58Z")), now()),
-        Some(Duration::from_secs(3))
+        wake(Some(&status(None, Some("2026-10-22T07:00:00Z"))), now()),
+        Wake::Idle
     );
     assert_eq!(
-        wake_wait(Some(&status("2026-10-22T07:59:55Z")), now()),
-        None
+        wake(
+            Some(&status(
+                Some("2026-10-22T07:59:00Z"),
+                Some("2026-10-22T07:59:30Z")
+            )),
+            now()
+        ),
+        Wake::Idle,
+        "resolved after the delivery"
     );
-    assert_eq!(wake_wait(Some(&BuildStatus::default()), now()), None);
+    assert_eq!(
+        wake(
+            Some(&status(
+                Some("2026-10-22T07:59:59Z"),
+                Some("2026-10-22T07:59:55Z")
+            )),
+            now()
+        ),
+        Wake::Now
+    );
+    assert_eq!(
+        wake(
+            Some(&status(
+                Some("2026-10-22T07:59:59Z"),
+                Some("2026-10-22T07:59:58Z")
+            )),
+            now()
+        ),
+        Wake::After(Duration::from_secs(3))
+    );
+    assert_eq!(
+        wake(Some(&status(Some("2026-10-22T07:59:59Z"), None)), now()),
+        Wake::Now
+    );
 }
 
 #[test]

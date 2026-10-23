@@ -709,7 +709,7 @@
                         "type": "string"
                       },
                       "lastWebhookAt": {
-                        "description": "When a webhook last woke this `Build`.",
+                        "description": "When a webhook last woke this `Build`; written by the receiver only. Later than\n`lastResolvedAt`: the ref is asked again.",
                         "format": "date-time",
                         "nullable": true,
                         "type": "string"

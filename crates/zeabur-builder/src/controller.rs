@@ -12,8 +12,10 @@
 //! Decisions are in [`crate::decide`]; this module only reads and writes objects. Status is
 //! written with server-side apply, so a field the controller stops setting is removed.
 //!
-//! A webhook ([`crate::webhook`]) marks a `Build` and queues it; its reconcile then asks the Git
-//! server at once, unless it asked less than [`decide::WAKE_GAP`] ago. A `githubApp` source is
+//! A webhook ([`crate::webhook`]), received by any replica, writes `status.lastWebhookAt` with its
+//! own field manager; the reconcile asks the Git server when that is later than `lastResolvedAt`,
+//! at least [`decide::WAKE_GAP`] after the last answer ([`decide::wake`]). The reconcile never
+//! writes `lastWebhookAt`, so its apply cannot put back an older time. A `githubApp` source is
 //! resolved and fetched with installation tokens and gets commit statuses ([`crate::github`]).
 //!
 //! Not yet: leader election (run one replica), the repository-level poller (plan §4.4), and
@@ -50,14 +52,17 @@ use zeabur_builder_core::repo::RepoKey;
 use zeabur_builder_jobspec::{GitAuth, JobInputs};
 
 use crate::credentials::{GitCredentials, Refusal};
-use crate::decide::{self, Observed};
+use crate::decide::{self, Observed, Wake};
 use crate::github::{self, Access, GitHub, State};
 use crate::notify::{self, Credentials};
 use crate::remote::{self, HttpClient, Resolver};
-use crate::webhook::{self, Lookup, Receiver, Wakes};
+use crate::webhook::{self, Lookup, Receiver};
 use crate::{daemon, tls};
 
 const MANAGER: &str = "zeabur-builder";
+/// The field manager of `status.lastWebhookAt`, apart from [`MANAGER`] so neither removes the
+/// other's fields.
+const WEBHOOK_MANAGER: &str = "zeabur-builder-webhook";
 /// How often a waiting `BuildRun` is looked at again.
 const PENDING_RETRY: Duration = Duration::from_secs(15);
 /// How often a `BuildRun` waiting for its buildkitd to start is looked at again.
@@ -101,7 +106,6 @@ struct Context {
     recorder: Recorder,
     settings: Settings,
     github: Arc<GitHub>,
-    wakes: Arc<Wakes>,
 }
 
 /// What the receiver reads: `Build`s from the reconciler's cache, Secrets from the API server.
@@ -138,9 +142,17 @@ impl Lookup for ClusterLookup {
 
     fn touch<'a>(&'a self, namespace: &'a str, name: &'a str, at: Timestamp) -> BoxFuture<'a, ()> {
         Box::pin(async move {
-            let patch = serde_json::json!({"status": {"lastWebhookAt": at.to_string()}});
+            let patch = serde_json::json!({
+                "apiVersion": Build::api_version(&()),
+                "kind": Build::kind(&()),
+                "status": {"lastWebhookAt": at.to_string()},
+            });
             let patched = Api::<Build>::namespaced(self.client.clone(), namespace)
-                .patch_status(name, &PatchParams::default(), &Patch::Merge(&patch))
+                .patch_status(
+                    name,
+                    &PatchParams::apply(WEBHOOK_MANAGER).force(),
+                    &Patch::Apply(patch),
+                )
                 .await;
             if let Err(e) = patched {
                 tracing::warn!(%namespace, build = name, error = %e, "webhook wake not written");
@@ -204,11 +216,9 @@ pub(crate) async fn run(client: Client, settings: Settings) -> Result<(), String
         settings.github_app_secret.clone(),
         settings.github_app_grants.clone(),
     ));
-    let wakes = Arc::new(Wakes::default());
     let receiver_settings = settings.webhook.clone();
     let context = Arc::new(Context {
         github: Arc::clone(&github),
-        wakes: Arc::clone(&wakes),
         recorder: Recorder::new(
             client.clone(),
             Reporter {
@@ -235,7 +245,7 @@ pub(crate) async fn run(client: Client, settings: Settings) -> Result<(), String
             client: client.clone(),
             github,
         };
-        Arc::new(Receiver::new(Box::new(lookup), wakes, settings))
+        Arc::new(Receiver::new(Box::new(lookup), settings))
     });
     let builds = builds
         .shutdown_on_signal()
@@ -343,19 +353,16 @@ async fn reconcile_build(build: Arc<Build>, ctx: Arc<Context>) -> Result<Action,
         .and_then(decide::parse_duration)
         .unwrap_or_else(|| decide::default_poll(&build, ctx.settings.webhook.is_some()));
     let mut requeue = jitter(interval, &name);
-    let mut woken = false;
-    if ctx.wakes.take(&namespace, &name) {
-        match decide::wake_wait(build.status.as_ref(), at) {
-            None => {
-                woken = true;
-                status.last_webhook_at = Some(at.to_string());
-            }
-            Some(wait) => {
-                ctx.wakes.wake(&namespace, &name);
-                requeue = requeue.min(wait);
-            }
+    let woken = match decide::wake(build.status.as_ref(), at) {
+        Wake::Idle => false,
+        Wake::Now => true,
+        Wake::After(wait) => {
+            requeue = requeue.min(wait);
+            false
         }
-    }
+    };
+    // Owned by the receiver's field manager.
+    status.last_webhook_at = None;
 
     let builder = find_builder(&ctx, &build, &mut status, at).await?;
 
@@ -400,7 +407,13 @@ async fn reconcile_build(build: Arc<Build>, ctx: Arc<Context>) -> Result<Action,
     let image = decide::image(&build, &ctx.settings.default_registry);
     decide::summarise(&mut status, &runs, &image, at, generation);
     status.observed_generation = generation;
-    if build.status.as_ref() != Some(&status) {
+    let unchanged = build.status.as_ref().is_some_and(|old| {
+        BuildStatus {
+            last_webhook_at: None,
+            ..old.clone()
+        } == status
+    });
+    if !unchanged {
         apply_status(&builds, &name, &status).await?;
     }
     if let Some(run) = decide::notify_due(&build, &runs) {

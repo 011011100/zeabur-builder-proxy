@@ -262,6 +262,8 @@ type TokenKey = (i64, String, Access);
 
 /// The App, read from its Secret when needed, so an admin can set it up or rotate the key while
 /// the controller runs.
+///
+/// The App and its tokens are cached per replica; a replica that has no token mints its own.
 pub(crate) struct GitHub {
     http: HttpClient,
     secrets: Api<Secret>,

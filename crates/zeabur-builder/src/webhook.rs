@@ -19,10 +19,16 @@
 //!   names no tolerance, so the timestamp may be [`TOLERANCE`] away from the controller's clock.
 //! - The GitHub App: as GitHub, with the App's webhook secret instead of a `Build`'s.
 //!
-//! Replays: a delivery id seen for a `Build` in the last [`SEEN`] verified deliveries is dropped.
-//! An older replay only causes one more poll, which asks the Git server, so it can never build a
-//! commit the ref has moved away from. Bodies over the limit are refused before they are read in
-//! full, and a token bucket bounds deliveries per second for the whole receiver.
+//! A woken `Build` gets `status.lastWebhookAt`; the leader's reconcile acts on it
+//! ([`crate::decide::wake`]). Nothing else is shared, so any replica can receive, and what each
+//! keeps in memory is per replica on purpose:
+//!
+//! - Replays: a delivery id seen for a `Build` in the replica's last [`SEEN`] verified deliveries
+//!   is dropped. A replay that reaches another replica, or comes after a restart, only causes one
+//!   more poll, at least [`crate::decide::WAKE_GAP`] after the last, which asks the Git server; it
+//!   can never build a commit the ref has moved away from.
+//! - A token bucket bounds deliveries per second per replica, so the whole receiver admits the rate
+//!   times the replicas. Bodies over the limit are refused before they are read in full.
 //!
 //! [GitHub]: https://docs.github.com/en/webhooks/using-webhooks/validating-webhook-deliveries
 //! [Gitea]: https://docs.gitea.com/usage/webhooks
@@ -80,34 +86,6 @@ pub(crate) struct Settings {
     pub(crate) rate: u32,
     /// Deliveries at once, above the average.
     pub(crate) burst: u32,
-}
-
-/// `Build`s waiting to ask their Git server again.
-///
-/// The mark is what makes the reconcile ask; writing `status.lastWebhookAt` only wakes the
-/// reconciler, through its watch. So a reconcile that overwrites the timestamp with an older
-/// status loses nothing: the mark stays until a reconcile takes it.
-#[derive(Debug, Default)]
-pub(crate) struct Wakes {
-    pending: Mutex<HashSet<(String, String)>>,
-}
-
-impl Wakes {
-    /// Marks a `Build`; false when it was marked already.
-    pub(crate) fn wake(&self, namespace: &str, name: &str) -> bool {
-        self.pending
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .insert((namespace.to_owned(), name.to_owned()))
-    }
-
-    /// Whether the `Build` was marked, clearing the mark.
-    pub(crate) fn take(&self, namespace: &str, name: &str) -> bool {
-        self.pending
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .remove(&(namespace.to_owned(), name.to_owned()))
-    }
 }
 
 /// What the receiver reads from the cluster.
@@ -186,7 +164,6 @@ impl Seen {
 /// The receiver.
 pub(crate) struct Receiver {
     lookup: Box<dyn Lookup>,
-    wakes: Arc<Wakes>,
     settings: Settings,
     bucket: Mutex<Bucket>,
     seen: Mutex<Seen>,
@@ -344,13 +321,12 @@ pub(crate) fn pushed(build: &Build, refs: &[String]) -> bool {
 }
 
 impl Receiver {
-    /// A receiver that reads through `lookup` and wakes through `wakes`.
-    pub(crate) fn new(lookup: Box<dyn Lookup>, wakes: Arc<Wakes>, settings: Settings) -> Self {
+    /// A receiver that reads and wakes through `lookup`.
+    pub(crate) fn new(lookup: Box<dyn Lookup>, settings: Settings) -> Self {
         Self {
             bucket: Mutex::new(Bucket::new(settings.rate, settings.burst)),
             seen: Mutex::new(Seen::default()),
             lookup,
-            wakes,
             settings,
         }
     }
@@ -485,10 +461,7 @@ impl Receiver {
         for build in verified.iter().filter(|b| pushed(b, &delivery.refs)) {
             let namespace = build.namespace().unwrap_or_default();
             tracing::info!(build = %build.name_any(), %namespace, ?provider, "woken by a webhook");
-            let name = build.name_any();
-            if self.wakes.wake(&namespace, &name) {
-                self.lookup.touch(&namespace, &name, now).await;
-            }
+            self.lookup.touch(&namespace, &build.name_any(), now).await;
             woken += 1;
         }
         (StatusCode::ACCEPTED, format!("{woken} woken"))

@@ -329,7 +329,7 @@ BuildRun 的 ownerReference 指向 Build，Job 的 ownerReference 指向 BuildRu
 
 觸發來源：Build 本身的變更、owned BuildRun 的變更、webhook 喚醒、poller 喚醒（**〔變更〕** 透過 `Controller::reconcile_on` 的 channel，取代 `source.Channel`／`GenericEvent`）、annotation 變更。
 
-**〔變更〕** kube 4.2 的 `reconcile_on` 要開 unstable feature，所以不用。webhook 接收端把 Build 記進記憶體裡的待喚醒集合，再 patch `status.lastWebhookAt` 觸發 watch；reconcile 看到 Build 在集合裡就強制 resolve，這個 run 的 trigger 記為 `webhook`。距離上次 resolve 不到 5 秒的喚醒會延到 5 秒後，重送的 delivery 最多只多一次 `ls-remote`。
+**〔變更〕** kube 4.2 的 `reconcile_on` 要開 unstable feature，所以不用。喚醒只看叢集狀態：webhook 接收端（任何一個副本都可以）以自己的 field manager 寫 `status.lastWebhookAt`，觸發 watch；reconcile 看到 `lastWebhookAt` 晚於 `lastResolvedAt` 就強制 resolve，這個 run 的 trigger 記為 `webhook`。reconcile 自己不寫 `lastWebhookAt`，避免 apply 時蓋回舊的時間。距離上次 resolve 不到 5 秒的喚醒會延到 5 秒後，重送的 delivery 最多只多一次 `ls-remote`。接收端與 controller 不同 Pod 時，兩邊時鐘的誤差可能讓喚醒被當成已處理，由 polling 補上。
 
 流程：
 
@@ -389,7 +389,7 @@ Job 消失或 Pod 被驅逐時，標記 `InfraError`，**不自動重試**（v1�
 
 - 路徑 `<prefix>/<provider>`，provider 為 `github`、`github-app`、`gitlab`、`gitea`、`forgejo`、`bitbucket`、`generic`（Standard Webhooks）。prefix 預設 `/hooks`，接收端預設關閉（`--webhook-addr`）。chart 的 Service、Ingress、HTTPRoute 也預設關閉。
 - 簽章：plain Git 用 Build 的 `triggers.webhook.secretRef`，App 用 App Secret 的 `webhook-secret`。只拿 payload 裡的 repo 正規化後找候選 Build，再逐一試它們的 secret；repo 不認得與簽章錯誤回同樣的 401。
-- 去重以 provider、delivery id 與 Build 為 key（GitLab 同一事件送到多個 webhook 時 UUID 相同）。Standard Webhooks 另外檢查時間戳，容許 5 分鐘。
+- 去重以 provider、delivery id 與 Build 為 key（GitLab 同一事件送到多個 webhook 時 UUID 相同）。Standard Webhooks 另外檢查時間戳，容許 5 分鐘。去重集合與 token bucket 都是各副本自己的：重送到另一個副本最多多一次 poll，限流總量是每秒上限乘以副本數。
 - 限制：全域 token bucket（預設每秒 10、burst 50）、body 上限（預設 1 MiB）、讀取逾時 10 秒、同時 64 個連線。驗證完立即回 202。
 - 只取 repo 與 ref；不使用 payload 裡的 URL、SHA 或 ref 去 fetch。pull request 事件目前只回 202 並忽略，之後做 preview 時另外加一種 event。
 

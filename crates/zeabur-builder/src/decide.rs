@@ -35,16 +35,42 @@ pub(crate) const fn default_poll(build: &Build, receiving: bool) -> Duration {
     }
 }
 
-/// How long a woken `Build` waits before it asks the Git server: nothing when its last answer is
-/// at least [`WAKE_GAP`] old.
-pub(crate) fn wake_wait(status: Option<&BuildStatus>, now: Timestamp) -> Option<Duration> {
-    let last = status?
-        .last_resolved_at
-        .as_deref()
-        .and_then(|t| t.parse::<Timestamp>().ok())?;
+/// Whether a webhook asks a `Build` to resolve its ref.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Wake {
+    /// No delivery since the last answer.
+    Idle,
+    /// Ask the Git server now.
+    Now,
+    /// Ask once this has passed, [`WAKE_GAP`] after the last answer.
+    After(Duration),
+}
+
+/// Reads the wake from status alone: a `lastWebhookAt` later than `lastResolvedAt` is pending.
+///
+/// Any replica's receiver may write `lastWebhookAt`, and the reconcile that resolves writes
+/// `lastResolvedAt`, so nothing lives in one process's memory. A delivery that arrives while the
+/// ref is being resolved is stamped later than the reconcile's time and stays pending. A failed
+/// resolve leaves it pending, retried by later reconciles.
+pub(crate) fn wake(status: Option<&BuildStatus>, now: Timestamp) -> Wake {
+    let time = |t: Option<&str>| t.and_then(|t| t.parse::<Timestamp>().ok());
+    let Some(status) = status else {
+        return Wake::Idle;
+    };
+    let Some(hook) = time(status.last_webhook_at.as_deref()) else {
+        return Wake::Idle;
+    };
+    let Some(last) = time(status.last_resolved_at.as_deref()) else {
+        return Wake::Now;
+    };
+    if last >= hook {
+        return Wake::Idle;
+    }
     let age = now.duration_since(last);
-    let gap = jiff::SignedDuration::try_from(WAKE_GAP).ok()?;
-    (age < gap).then(|| (gap - age).unsigned_abs())
+    match jiff::SignedDuration::try_from(WAKE_GAP) {
+        Ok(gap) if age < gap => Wake::After((gap - age).unsigned_abs()),
+        _ => Wake::Now,
+    }
 }
 /// Finished `BuildRun`s kept when the `Build` sets no limit.
 pub(crate) const DEFAULT_HISTORY: usize = 10;
