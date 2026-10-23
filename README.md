@@ -4,9 +4,10 @@
 Git with BuildKit, and hands the result to Flux, Keel or Argo CD for rollout.
 
 > **Status: proof of concept.** The controller builds Dockerfile and Railpack images from polled
-> public Git repositories on a test cluster ([proof of concept](docs/poc.md)); webhooks, zbplan and
-> rollout integrations are not built yet. See the [plan](docs/plan.md) (Traditional Chinese) and
-> the [feasibility study](docs/feasibility.md).
+> Git repositories, public or private with a token or deploy key, on a test cluster
+> ([proof of concept](docs/poc.md)); webhooks, zbplan and rollout integrations are not built yet.
+> See the [plan](docs/plan.md) (Traditional Chinese) and the
+> [feasibility study](docs/feasibility.md).
 
 ## What it does
 

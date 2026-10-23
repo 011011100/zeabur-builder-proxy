@@ -238,6 +238,7 @@ type BuildStatus struct {
 
 **Conditions**
 - `SourceReady`：失敗時的 reason 為 `AppNotInstalled`、`AuthFailed`、`RefNotFound`、`CredentialsMissing`
+  - **〔新增〕** Plain Git 另有 `CredentialsUnreadable`、`CredentialsInvalid`、`HostKeyMismatch`、`UnsupportedURL`、`ResolveFailed`（§5.3）
 - `BuilderReady`：reason 為 `BuilderNotFound`
 - `Ready`：最近一次建置是否成功
 - `PlanApprovalPending`：當 `requireApproval=true` 且有新的 plan 等待核准時出現
@@ -431,11 +432,15 @@ type SourceProvider interface {
 
 ### 5.3 Plain Git provider
 
-- **〔變更〕** 使用 `gix` 0.89 的 `ls-refs`（等同 `ls-remote`），controller image 不需要 git binary；但 SSH remote 需要 `ssh`（gix 透過它連線）。
+- ~~使用 `gix` 0.89 的 `ls-refs`（等同 `ls-remote`），controller image 不需要 git binary；但 SSH remote 需要 `ssh`（gix 透過它連線）。~~
+- **〔變更〕** 不用 gix。HTTP(S) 用 smart HTTP 的兩個請求（`zeabur-builder-core::git`）；SSH 用 `russh` 0.64（aws-lc-rs，不開 RSA）在 controller 裡連線，執行 `git-upload-pack '<path>'`，讀到 v0 ref 清單的 flush 就斷線。controller image 不需要 `git` 也不需要 `ssh`。連線 15 秒、之後整體 30 秒逾時。
 - 憑證 Secret 格式（沿用 Kubernetes 慣用型別）：
   - `kubernetes.io/ssh-auth`：`ssh-privatekey`，加上**必填**的 `known_hosts`（不允許關閉 host key 檢查）
   - `kubernetes.io/basic-auth`：`username`、`password`（token）
+- **〔新增〕** basic-auth 只用在 `https://` URL（`Authorization: Basic`）；ssh-auth 只用在 `ssh://[user@]host[:port]/path` 與 `[user@]host:path`（沒寫 user 時為 `git`）。型別與 URL 不合時 `reason=CredentialsInvalid`；SSH URL 沒有 `credentialsRef` 時 `reason=CredentialsMissing`。
+- **〔新增〕** Host key 必須是 `known_hosts` 裡列給這個 host 的 key（port 22 寫 `host` 或 `[host]:22`，其他 port 寫 `[host]:port`），沒有 trust on first use；不符時 `reason=HostKeyMismatch`。不支援 hashed host name、萬用字元與 `@cert-authority`／`@revoked`（這些行不會符合）。host key 與 client key 只支援 Ed25519 與 ECDSA；private key 必須是未加密的 OpenSSH 格式。
 - **Secret 必須帶 label `builder.zeabur.com/git-credentials: "true"`**；controller 的 informer cache 用這個 label 篩選 Secret，降低記憶體用量與暴露面。沒有 label 時，設定 `SourceReady=False reason=CredentialsMissing`，訊息提示要加 label。
+  - **〔變更〕** 目前沒有 informer cache：每次要問 ref 時才 `get` 那個 Secret（Secret 不存在：`CredentialsMissing`；讀取失敗：`CredentialsUnreadable`；型別不對或缺欄位：`CredentialsInvalid`）。伺服器拒絕 key、token 或 repo 時為 `AuthFailed`。
 - Job 直接掛載使用者的 Secret（同 namespace），不另外複製。
 - 支援匿名存取（公開 repo，不提供 `credentialsRef`）。
 

@@ -196,7 +196,7 @@ registry-push-poc-c with push credentials in builder-system`），也沒有建�
 ## 已知缺口
 
 - Ready 在第一個 run 結束前都是 `Unknown`（`NotBuilt`）；ref 不存在只顯示在 `SourceReady`。
-- Git：只支援公開的 HTTPS repo；`credentialsRef` 回報 `CredentialsMissing`。
+- Git：`credentialsRef`（token 或 deploy key，plan §5.3）只有單元測試與本機 SSH server 的測試涵蓋，還沒在叢集上跑過。
 - 觸發：每個 Build 各自 polling 與 `rebuild` annotation；沒有 webhook、沒有 repo 層級的 poller。
   annotation 是在上面這些結果之後加的，只有單元測試涵蓋。
 - Controller：單一 replica，沒有 leader election。幾個 run 同時 reconcile 時，namespace 的並行數可能
