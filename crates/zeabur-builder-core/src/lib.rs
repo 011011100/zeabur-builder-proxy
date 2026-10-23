@@ -2,6 +2,7 @@
 //!
 //! - [`git`]: resolving a branch or tag to a commit from a Git server's answer.
 //! - [`ssh`]: SSH remotes and the `known_hosts` keys that vouch for them.
+//! - [`hook`]: the repository and refs a webhook delivery names.
 //! - [`repo`]: one key per Git repository, however its URL is written, so a webhook, a poll and a
 //!   `Build` agree on which repository they mean.
 //! - [`tag`]: the immutable, sortable image tag of a build.
@@ -15,6 +16,7 @@
 
 pub mod daemon;
 pub mod git;
+pub mod hook;
 pub mod progress;
 pub mod railpack;
 pub mod repo;
