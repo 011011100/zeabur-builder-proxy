@@ -1,0 +1,48 @@
+# Apply the CRDs first: kubectl apply --server-side -f deploy/crds.json
+
+image:
+  repository: ghcr.io/zeabur/builder
+  tag: ""
+  pullPolicy: IfNotPresent
+
+# The image each build Job runs; defaults to builder-job next to image.repository.
+jobImage: ""
+# Where images go when a Build names no image; required.
+defaultRegistry: ""
+# Prefix of the push-credential Secrets in this namespace.
+registryAuthPrefix: registry-push-
+# Extra controller flags, such as --buildkitd-cache-size=10Gi.
+extraArgs: []
+
+resources:
+  requests: {cpu: 10m, memory: 32Mi}
+  limits: {memory: 256Mi}
+
+githubApp:
+  # The App's Secret and the ConfigMap that grants installations to namespaces, both in this
+  # namespace. Create them with `zeabur-builder github-app create`.
+  secretName: github-app
+  grantsName: github-app-installations
+
+webhooks:
+  # Off by default: no listener, no Service, no route.
+  enabled: false
+  port: 8080
+  # Deliveries go to <path>/<provider>: github, github-app, gitlab, gitea, forgejo, bitbucket or
+  # generic.
+  path: /hooks
+  maxBodyBytes: 1048576
+  # Deliveries per second, and the burst, across all senders.
+  rate: 10
+  burst: 50
+  ingress:
+    enabled: false
+    className: ""
+    host: ""
+    annotations: {}
+    # Name of a TLS Secret for the host; none means plain HTTP at the Ingress.
+    tlsSecretName: ""
+  httpRoute:
+    enabled: false
+    parentRefs: []
+    hostnames: []

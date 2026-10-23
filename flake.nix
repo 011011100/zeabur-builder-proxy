@@ -60,6 +60,7 @@
               kind
               k3d
               kubectl
+              kubernetes-helm
               buildkit
 
               self.formatter.${system}

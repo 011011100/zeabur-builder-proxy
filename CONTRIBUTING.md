@@ -24,6 +24,7 @@ RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --document-private-it
 cargo nextest run --workspace
 cargo deny --locked check
 ./scripts/check-levels.sh
+./scripts/check-chart.sh
 ```
 
 Generated files are committed and checked by tests. Regenerate them with:

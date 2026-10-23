@@ -1,0 +1,58 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: zeabur-builder
+  labels: {{- include "builder.labels" . | nindent 4 }}
+spec:
+  # No leader election yet: exactly one replica.
+  replicas: 1
+  strategy: {type: Recreate}
+  selector:
+    matchLabels: {{- include "builder.selector" . | nindent 6 }}
+  template:
+    metadata:
+      labels: {{- include "builder.selector" . | nindent 8 }}
+    spec:
+      serviceAccountName: zeabur-builder
+      securityContext:
+        runAsNonRoot: true
+        seccompProfile: {type: RuntimeDefault}
+      containers:
+        - name: controller
+          image: "{{ .Values.image.repository }}:{{ include "builder.tag" . }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          args:
+            - controller
+            - --github-app-secret={{ .Values.githubApp.secretName }}
+            - --github-app-grants={{ .Values.githubApp.grantsName }}
+            {{- if .Values.webhooks.enabled }}
+            - --webhook-addr=0.0.0.0:{{ .Values.webhooks.port }}
+            - --webhook-path={{ include "builder.webhookPath" . }}
+            - --webhook-max-body={{ .Values.webhooks.maxBodyBytes | int }}
+            - --webhook-rate={{ .Values.webhooks.rate | int }}
+            - --webhook-burst={{ .Values.webhooks.burst | int }}
+            {{- end }}
+            {{- with .Values.extraArgs }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+          env:
+            - name: POD_NAMESPACE
+              valueFrom: {fieldRef: {fieldPath: metadata.namespace}}
+            - name: POD_NAME
+              valueFrom: {fieldRef: {fieldPath: metadata.name}}
+            - name: ZEABUR_BUILDER_DEFAULT_REGISTRY
+              value: {{ required "defaultRegistry is required" .Values.defaultRegistry | quote }}
+            - name: ZEABUR_BUILDER_JOB_IMAGE
+              value: {{ .Values.jobImage | default (printf "%s-job:%s" .Values.image.repository (include "builder.tag" .)) | quote }}
+            - {name: ZEABUR_BUILDER_REGISTRY_AUTH_PREFIX, value: {{ .Values.registryAuthPrefix | quote }}}
+            {{- if .Values.webhooks.enabled }}
+          ports:
+            - {name: webhooks, containerPort: {{ .Values.webhooks.port }}}
+          readinessProbe:
+            httpGet: {path: /healthz, port: webhooks}
+            {{- end }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: {drop: [ALL]}
+          resources: {{- toYaml .Values.resources | nindent 12 }}
