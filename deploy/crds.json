@@ -517,7 +517,8 @@
                                 "type": "string"
                               },
                               "ref": {
-                                "description": "A branch or tag; no wildcards.",
+                                "default": "HEAD",
+                                "description": "A branch or tag; no wildcards. Default `HEAD`: the repository's default branch, which is\nresolved again on every poll, so a renamed default branch is followed.",
                                 "maxLength": 255,
                                 "minLength": 1,
                                 "type": "string"
@@ -530,7 +531,6 @@
                               }
                             },
                             "required": [
-                              "ref",
                               "url"
                             ],
                             "type": "object"
@@ -694,6 +694,12 @@
                         "pattern": "^[0-9a-f]{40}$",
                         "type": "string"
                       },
+                      "resolvedRef": {
+                        "description": "The full name of the ref `remoteRevision` came from, such as `refs/heads/master` when\n`ref` is `HEAD`.",
+                        "maxLength": 1024,
+                        "nullable": true,
+                        "type": "string"
+                      },
                       "sourceMode": {
                         "description": "How the source is reached.",
                         "enum": [
@@ -806,6 +812,12 @@
                         "maxLength": 71,
                         "nullable": true,
                         "pattern": "^sha256:[0-9a-f]{64}$",
+                        "type": "string"
+                      },
+                      "ref": {
+                        "description": "The full name of the ref `revision` was resolved from, such as `refs/heads/master`.",
+                        "maxLength": 1024,
+                        "nullable": true,
                         "type": "string"
                       },
                       "revision": {

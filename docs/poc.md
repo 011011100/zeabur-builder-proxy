@@ -67,7 +67,7 @@ kubectl delete -f deploy/crds.json
 
 | Build | 來源 | 預期 |
 | --- | --- | --- |
-| `whoami` | `traefik/whoami@master`，用它的 Dockerfile | Succeeded |
+| `whoami` | `traefik/whoami` 的預設分支（`master`），用它的 Dockerfile | Succeeded，`status.resolvedRef` 為 `refs/heads/master` |
 | `hello-python` | `dockersamples/helloworld-demo-python@main`，沒有 Dockerfile | 經 Railpack Succeeded |
 | `no-such-ref` | 不存在的 branch | `SourceReady=False`、`RefNotFound`，沒有 BuildRun |
 | `no-such-dockerfile` | 不存在的 Dockerfile 路徑 | BuildRun Failed |

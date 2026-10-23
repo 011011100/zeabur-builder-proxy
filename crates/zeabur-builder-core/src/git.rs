@@ -19,9 +19,15 @@
 //! tags resolve to the commit they point at (the peeled object), since that is what `fetch`
 //! checks out.
 //!
+//! [`DEFAULT_BRANCH`] (`HEAD`) follows the remote's default branch, as `git clone` does. The
+//! server says which branch `HEAD` points at: `symref=HEAD:<name>` among the capabilities of a
+//! version 0 advertisement ([capabilities]), `symref-target:<name>` when `ls-refs` asks for
+//! `symrefs` in version 2. A server that does not say still gives `HEAD`'s commit.
+//!
 //! [http-protocol]: https://git-scm.com/docs/http-protocol
 //! [protocol-v2]: https://git-scm.com/docs/protocol-v2#_ls_refs
 //! [pkt-line]: https://git-scm.com/docs/protocol-common#_pkt_line_format
+//! [capabilities]: https://git-scm.com/docs/gitprotocol-capabilities#_symref
 
 use thiserror::Error;
 
@@ -29,6 +35,9 @@ use crate::is_commit_sha;
 
 /// The longest response read, to bound memory on a hostile or huge server.
 pub const MAX_RESPONSE_BYTES: usize = 16 << 20;
+
+/// The ref that follows the remote's default branch.
+pub const DEFAULT_BRANCH: &str = "HEAD";
 
 /// One ref as the server reports it.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -39,6 +48,8 @@ pub struct RemoteRef {
     pub oid: String,
     /// For an annotated tag, the commit the tag points at.
     pub peeled: Option<String>,
+    /// For a symbolic ref such as `HEAD`, the ref it points at.
+    pub symref_target: Option<String>,
 }
 
 impl RemoteRef {
@@ -47,6 +58,16 @@ impl RemoteRef {
     pub fn commit(&self) -> &str {
         self.peeled.as_deref().unwrap_or(&self.oid)
     }
+}
+
+/// A resolved ref.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Resolved {
+    /// The commit.
+    pub commit: String,
+    /// The full name of the ref the commit came from: the branch `HEAD` points at when the
+    /// server says, else the matching candidate.
+    pub name: String,
 }
 
 /// What the capability request returned.
@@ -76,6 +97,9 @@ pub enum GitError {
     /// No branch or tag has that name.
     #[error("no branch or tag `{0}`")]
     RefNotFound(String),
+    /// The repository has no default branch, as when it is empty.
+    #[error("the repository has no default branch")]
+    NoDefaultBranch,
 }
 
 /// One pkt-line.
@@ -149,10 +173,17 @@ pub fn parse_advertisement(body: &[u8]) -> Result<Advertisement, GitError> {
         return Ok(Advertisement::V2);
     }
     let mut refs: Vec<RemoteRef> = Vec::new();
+    let mut head_target = None;
     for line in first.into_iter().chain(data) {
         // The first ref carries the capabilities after a NUL.
-        let line = line.split(|&b| b == 0).next().unwrap_or_default();
-        let line = text(line);
+        let mut parts = line.splitn(2, |&b| b == 0);
+        let line = text(parts.next().unwrap_or_default());
+        if let Some(capabilities) = parts.next() {
+            head_target = text(capabilities)
+                .split(' ')
+                .find_map(|c| c.strip_prefix("symref=HEAD:"))
+                .map(str::to_owned);
+        }
         let (oid, name) = line
             .split_once(' ')
             .filter(|(oid, _)| is_commit_sha(oid))
@@ -171,6 +202,9 @@ pub fn parse_advertisement(body: &[u8]) -> Result<Advertisement, GitError> {
             name: name.to_owned(),
             oid: oid.to_owned(),
             peeled: None,
+            symref_target: (name == DEFAULT_BRANCH)
+                .then(|| head_target.clone())
+                .flatten(),
         });
     }
     Ok(Advertisement::Refs(refs))
@@ -216,7 +250,7 @@ pub fn advertisement_end(body: &[u8]) -> Result<Option<usize>, GitError> {
 /// The names a ref may stand for, in preference order.
 #[must_use]
 pub fn candidates(git_ref: &str) -> Vec<String> {
-    if git_ref.starts_with("refs/") {
+    if git_ref.starts_with("refs/") || git_ref == DEFAULT_BRANCH {
         vec![git_ref.to_owned()]
     } else {
         vec![
@@ -233,6 +267,7 @@ pub fn ls_refs_request(git_ref: &str) -> Vec<u8> {
     pkt(&mut out, "command=ls-refs\n");
     out.extend_from_slice(b"0001");
     pkt(&mut out, "peel\n");
+    pkt(&mut out, "symrefs\n");
     for name in candidates(git_ref) {
         pkt(&mut out, &format!("ref-prefix {name}\n"));
     }
@@ -257,30 +292,53 @@ pub fn parse_ls_refs(body: &[u8]) -> Result<Vec<RemoteRef>, GitError> {
         if !is_commit_sha(oid) {
             return Err(GitError::RefLine(line));
         }
-        let peeled = words
-            .filter_map(|attr| attr.strip_prefix("peeled:"))
-            .find(|oid| is_commit_sha(oid))
-            .map(str::to_owned);
+        let mut peeled = None;
+        let mut symref_target = None;
+        for attr in words {
+            if let Some(oid) = attr
+                .strip_prefix("peeled:")
+                .filter(|oid| is_commit_sha(oid))
+            {
+                peeled = Some(oid.to_owned());
+            } else if let Some(target) = attr.strip_prefix("symref-target:") {
+                symref_target = Some(target.to_owned());
+            }
+        }
         refs.push(RemoteRef {
             name: name.to_owned(),
             oid: oid.to_owned(),
             peeled,
+            symref_target,
         });
     }
     Ok(refs)
 }
 
-/// The commit `git_ref` points at.
+/// The commit `git_ref` points at, and the ref it came from.
 ///
 /// # Errors
 ///
-/// [`GitError::RefNotFound`] when no candidate name is among `refs`.
-pub fn resolve(git_ref: &str, refs: &[RemoteRef]) -> Result<String, GitError> {
-    candidates(git_ref)
+/// [`GitError::RefNotFound`] when no candidate name is among `refs`, or
+/// [`GitError::NoDefaultBranch`] when `git_ref` is [`DEFAULT_BRANCH`] and the server sent no
+/// `HEAD`.
+pub fn resolve(git_ref: &str, refs: &[RemoteRef]) -> Result<Resolved, GitError> {
+    let Some(found) = candidates(git_ref)
         .iter()
         .find_map(|name| refs.iter().find(|r| &r.name == name))
-        .map(|r| r.commit().to_owned())
-        .ok_or_else(|| GitError::RefNotFound(git_ref.to_owned()))
+    else {
+        return Err(if git_ref == DEFAULT_BRANCH {
+            GitError::NoDefaultBranch
+        } else {
+            GitError::RefNotFound(git_ref.to_owned())
+        });
+    };
+    Ok(Resolved {
+        commit: found.commit().to_owned(),
+        name: found
+            .symref_target
+            .clone()
+            .unwrap_or_else(|| found.name.clone()),
+    })
 }
 
 #[cfg(test)]
@@ -290,6 +348,10 @@ mod tests {
     const A: &str = "3e1a9c2d4f0b5a6c7d8e9f0a1b2c3d4e5f6a7b8c";
     const B: &str = "0123456789abcdef0123456789abcdef01234567";
     const C: &str = "89abcdef0123456789abcdef0123456789abcdef";
+
+    fn sha(git_ref: &str, refs: &[RemoteRef]) -> Result<String, GitError> {
+        resolve(git_ref, refs).map(|r| r.commit)
+    }
 
     fn pkts(lines: &[&str]) -> Vec<u8> {
         let mut out = Vec::new();
@@ -318,7 +380,7 @@ mod tests {
         let Ok(Advertisement::Refs(refs)) = parse_advertisement(&body[..end]) else {
             panic!("not refs");
         };
-        assert_eq!(resolve("main", &refs), Ok(A.to_owned()));
+        assert_eq!(sha("main", &refs), Ok(A.to_owned()));
 
         let denied = pkts(&["ERR access denied\n"]);
         assert_eq!(
@@ -359,11 +421,11 @@ mod tests {
             panic!("refs expected")
         };
         assert_eq!(refs.len(), 3);
-        assert_eq!(resolve("main", &refs), Ok(A.to_owned()));
-        assert_eq!(resolve("v1", &refs), Ok(C.to_owned()), "peeled");
-        assert_eq!(resolve("refs/tags/v1", &refs), Ok(C.to_owned()));
+        assert_eq!(sha("main", &refs), Ok(A.to_owned()));
+        assert_eq!(sha("v1", &refs), Ok(C.to_owned()), "peeled");
+        assert_eq!(sha("refs/tags/v1", &refs), Ok(C.to_owned()));
         assert_eq!(
-            resolve("dev", &refs),
+            sha("dev", &refs),
             Err(GitError::RefNotFound("dev".to_owned()))
         );
     }
@@ -380,7 +442,7 @@ mod tests {
         let request = ls_refs_request("main");
         assert_eq!(
             String::from_utf8(request).unwrap(),
-            "0014command=ls-refs\n00010009peel\n\
+            "0014command=ls-refs\n00010009peel\n000csymrefs\n\
              001fref-prefix refs/heads/main\n001eref-prefix refs/tags/main\n0000"
         );
         let body = pkts(&[
@@ -390,8 +452,8 @@ mod tests {
         ]);
         let refs = parse_ls_refs(&body).unwrap();
         assert_eq!(refs.len(), 2);
-        assert_eq!(resolve("main", &refs), Ok(A.to_owned()), "branch first");
-        assert_eq!(resolve("refs/tags/main", &refs), Ok(C.to_owned()));
+        assert_eq!(sha("main", &refs), Ok(A.to_owned()), "branch first");
+        assert_eq!(sha("refs/tags/main", &refs), Ok(C.to_owned()));
     }
 
     #[test]
@@ -414,6 +476,68 @@ mod tests {
         assert_eq!(
             parse_ls_refs(&vec![b'0'; MAX_RESPONSE_BYTES + 1]),
             Err(GitError::TooLarge)
+        );
+    }
+
+    #[test]
+    fn default_branch_over_version_0() {
+        let first = format!("{A} HEAD\0multi_ack symref=HEAD:refs/heads/master agent=git/2\n");
+        let body = pkts(&[
+            &first,
+            &format!("{A} refs/heads/master\n"),
+            &format!("{B} refs/heads/main\n"),
+            "0000",
+        ]);
+        let Ok(Advertisement::Refs(refs)) = parse_advertisement(&body) else {
+            panic!("refs expected")
+        };
+        assert_eq!(
+            resolve(DEFAULT_BRANCH, &refs),
+            Ok(Resolved {
+                commit: A.to_owned(),
+                name: "refs/heads/master".to_owned()
+            })
+        );
+        assert_eq!(
+            resolve("main", &refs),
+            Ok(Resolved {
+                commit: B.to_owned(),
+                name: "refs/heads/main".to_owned()
+            })
+        );
+
+        let detached = pkts(&[&format!("{C} HEAD\0multi_ack\n"), "0000"]);
+        let Ok(Advertisement::Refs(refs)) = parse_advertisement(&detached) else {
+            panic!("refs expected")
+        };
+        assert_eq!(
+            resolve(DEFAULT_BRANCH, &refs),
+            Ok(Resolved {
+                commit: C.to_owned(),
+                name: "HEAD".to_owned()
+            })
+        );
+        assert_eq!(resolve(DEFAULT_BRANCH, &[]), Err(GitError::NoDefaultBranch));
+    }
+
+    #[test]
+    fn default_branch_over_version_2() {
+        assert_eq!(candidates(DEFAULT_BRANCH), ["HEAD"]);
+        assert_eq!(
+            String::from_utf8(ls_refs_request(DEFAULT_BRANCH)).unwrap(),
+            "0014command=ls-refs\n00010009peel\n000csymrefs\n0014ref-prefix HEAD\n0000"
+        );
+        let body = pkts(&[
+            &format!("{A} HEAD symref-target:refs/heads/master\n"),
+            "0000",
+        ]);
+        let refs = parse_ls_refs(&body).unwrap();
+        assert_eq!(
+            resolve(DEFAULT_BRANCH, &refs),
+            Ok(Resolved {
+                commit: A.to_owned(),
+                name: "refs/heads/master".to_owned()
+            })
         );
     }
 }

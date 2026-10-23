@@ -59,6 +59,10 @@ pub struct BuildRunSpec {
     /// The full commit SHA.
     #[schemars(length(max = 40), regex(pattern = REVISION_PATTERN))]
     pub revision: String,
+    /// The full name of the ref `revision` was resolved from, such as `refs/heads/master`.
+    #[serde(default, rename = "ref", skip_serializing_if = "Option::is_none")]
+    #[schemars(length(max = crate::build::MAX_RESOLVED_REF))]
+    pub git_ref: Option<String>,
     /// Build with this plan instead of following the `Build`'s plan policy.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schemars(length(max = 71), regex(pattern = DIGEST_PATTERN))]

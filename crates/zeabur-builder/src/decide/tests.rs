@@ -52,6 +52,7 @@ fn run(name: &str, revision: &str, phase: Option<Phase>, at: &str) -> BuildRun {
         BuildRunSpec {
             build_ref: "api".to_owned(),
             revision: revision.to_owned(),
+            git_ref: None,
             plan_digest: None,
             force_replan: false,
             trigger: None,
@@ -347,6 +348,27 @@ fn image_and_tags() {
     assert_eq!(
         tags(&build, &run).unwrap(),
         ["feature-x-1761058800-3e1a9c2", "latest"]
+    );
+}
+
+#[test]
+fn default_branch_tags_and_message() {
+    let mut build = build();
+    build.spec.source.git.git_ref = "HEAD".to_owned();
+    let mut run = run("api-x7k2p", A, None, "2025-10-21T15:00:00Z");
+    run.spec.git_ref = Some("refs/heads/master".to_owned());
+    assert_eq!(tags(&build, &run).unwrap(), ["master-1761058800-3e1a9c2"]);
+    assert_eq!(
+        resolved_message("HEAD", Some("refs/heads/master"), A),
+        format!("HEAD (master) is {A}")
+    );
+    assert_eq!(
+        resolved_message("main", Some("refs/heads/main"), A),
+        format!("main is {A}")
+    );
+    assert_eq!(
+        resolved_message("refs/heads/main", Some("refs/heads/main"), A),
+        format!("refs/heads/main is {A}")
     );
 }
 

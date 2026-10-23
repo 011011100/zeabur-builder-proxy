@@ -59,7 +59,7 @@ impl ResolveError {
     /// The `SourceReady` reason.
     pub(crate) const fn reason(&self) -> &'static str {
         match self {
-            Self::Git(GitError::RefNotFound(_)) => "RefNotFound",
+            Self::Git(GitError::RefNotFound(_) | GitError::NoDefaultBranch) => "RefNotFound",
             Self::Status(_, status)
                 if status.as_u16() == 401 || status.as_u16() == 403 || status.as_u16() == 404 =>
             {
@@ -144,13 +144,13 @@ impl Resolver {
         Ok(body.to_bytes())
     }
 
-    /// The commit `git_ref` points at in the repository at `url`.
+    /// The commit `git_ref` points at in the repository at `url`, and the ref it came from.
     pub(crate) async fn resolve(
         &self,
         url: &str,
         git_ref: &str,
         credentials: Option<&GitCredentials>,
-    ) -> Result<String, ResolveError> {
+    ) -> Result<git::Resolved, ResolveError> {
         let http = url.starts_with("https://") || url.starts_with("http://");
         if !http {
             let remote =

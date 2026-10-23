@@ -313,17 +313,37 @@ pub(crate) fn image(build: &Build, default_registry: &str) -> String {
     )
 }
 
+/// A ref without its `refs/heads/` or `refs/tags/` prefix.
+pub(crate) fn short_ref(git_ref: &str) -> &str {
+    git_ref
+        .strip_prefix("refs/heads/")
+        .or_else(|| git_ref.strip_prefix("refs/tags/"))
+        .unwrap_or(git_ref)
+}
+
+/// The `SourceReady` message: `main is <sha>`, or `HEAD (master) is <sha>` for the default
+/// branch.
+pub(crate) fn resolved_message(git_ref: &str, resolved: Option<&str>, sha: &str) -> String {
+    match resolved.map(short_ref) {
+        Some(name) if short_ref(git_ref) != name => {
+            format!("{git_ref} ({name}) is {sha}")
+        }
+        _ => format!("{git_ref} is {sha}"),
+    }
+}
+
 /// The tags of a run: the template's, then the extra ones.
 pub(crate) fn tags(build: &Build, run: &BuildRun) -> Result<Vec<String>, TagError> {
     let output = build.spec.output.as_ref();
     let template = output
         .and_then(|o| o.tag_template.as_deref())
         .unwrap_or(tag::DEFAULT_TEMPLATE);
-    let git_ref = &build.spec.source.git.git_ref;
-    let branch = git_ref
-        .strip_prefix("refs/heads/")
-        .or_else(|| git_ref.strip_prefix("refs/tags/"))
-        .unwrap_or(git_ref);
+    let git_ref = run
+        .spec
+        .git_ref
+        .as_deref()
+        .unwrap_or(&build.spec.source.git.git_ref);
+    let branch = short_ref(git_ref);
     let unix_time = run
         .metadata
         .creation_timestamp

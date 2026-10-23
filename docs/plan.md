@@ -434,6 +434,7 @@ type SourceProvider interface {
 
 - ~~使用 `gix` 0.89 的 `ls-refs`（等同 `ls-remote`），controller image 不需要 git binary；但 SSH remote 需要 `ssh`（gix 透過它連線）。~~
 - **〔變更〕** 不用 gix。HTTP(S) 用 smart HTTP 的兩個請求（`zeabur-builder-core::git`）；SSH 用 `russh` 0.64（aws-lc-rs，不開 RSA）在 controller 裡連線，執行 `git-upload-pack '<path>'`，讀到 v0 ref 清單的 flush 就斷線。controller image 不需要 `git` 也不需要 `ssh`。連線 15 秒、之後整體 30 秒逾時。
+- **〔變更〕** `ref` 可省略，預設 `HEAD`，也就是 repo 的預設分支，和 `git clone` 一樣。v0 從能力清單的 `symref=HEAD:<ref>` 得知它指向哪個分支，v2 的 `ls-refs` 加上 `symrefs` 參數；每次輪詢都重新解析，預設分支改名也會跟上。解析出的分支寫在 `status.resolvedRef` 與 `BuildRun` 的 `spec.ref`，tag 的 `.Branch` 用它。
 - 憑證 Secret 格式（沿用 Kubernetes 慣用型別）：
   - `kubernetes.io/ssh-auth`：`ssh-privatekey`，加上**必填**的 `known_hosts`（不允許關閉 host key 檢查）
   - `kubernetes.io/basic-auth`：`username`、`password`（token）

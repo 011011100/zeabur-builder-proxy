@@ -16,9 +16,12 @@ apiVersion: builder.zeabur.com/v1alpha1
 kind: Build
 metadata: {name: api, namespace: team-a}
 spec:
-  source: {git: {url: https://github.com/acme/api, ref: main}}
+  source: {git: {url: https://github.com/acme/api, ref: main}}   # default: HEAD
   builderRef: railpack
 ```
+
+Leave out `ref` to follow the repository's default branch; `status.resolvedRef` says which
+branch that was.
 
 - **Three ways to build.** Your Dockerfile, [Railpack](https://railpack.com) for repositories
   without one, or [zbplan](https://github.com/zeabur/zbplan), which writes a Dockerfile with an

@@ -241,7 +241,8 @@ async fn reconcile_build(build: Arc<Build>, ctx: Arc<Context>) -> Result<Action,
             cancel_run(&ctx, &namespace, cancel).await?;
         }
         if let Some(trigger) = next.create {
-            let run = create_run(&runs_api, &build, sha, trigger).await?;
+            let run =
+                create_run(&runs_api, &build, sha, status.resolved_ref.clone(), trigger).await?;
             tracing::info!(build = %name, namespace = %namespace, buildrun = %run.name_any(), revision = %sha, ?trigger, "new run");
             runs.push(run);
         }
@@ -292,9 +293,10 @@ async fn resolve_source(
                     .resolve(&git.url, &git.git_ref, credentials.as_ref())
                     .await
                 {
-                    Ok(sha) => {
+                    Ok(resolved) => {
                         status.last_resolved_at = Some(at.to_string());
-                        Ok(sha)
+                        status.resolved_ref = Some(resolved.name);
+                        Ok(resolved.commit)
                     }
                     Err(e) => Err((e.reason(), e.to_string())),
                 },
@@ -313,7 +315,7 @@ async fn resolve_source(
                 "SourceReady",
                 ConditionStatus::True,
                 "Resolved",
-                &format!("{} is {sha}", git.git_ref),
+                &decide::resolved_message(&git.git_ref, status.resolved_ref.as_deref(), sha),
                 at,
                 generation,
             );
@@ -369,6 +371,7 @@ async fn create_run(
     api: &Api<BuildRun>,
     build: &Build,
     sha: &str,
+    git_ref: Option<String>,
     trigger: Trigger,
 ) -> Result<BuildRun, Error> {
     let name = build.name_any();
@@ -394,6 +397,7 @@ async fn create_run(
         spec: BuildRunSpec {
             build_ref: name,
             revision: sha.to_owned(),
+            git_ref,
             plan_digest: None,
             force_replan: false,
             trigger: Some(trigger),

@@ -17,6 +17,8 @@ use crate::common::{
 pub const MAX_URL: usize = 2048;
 /// Longest Git ref.
 pub const MAX_REF: usize = 255;
+/// Longest resolved ref, with its `refs/heads/` prefix.
+pub const MAX_RESOLVED_REF: usize = 1024;
 /// Longest path inside the repository.
 pub const MAX_PATH: usize = 1024;
 /// Longest image repository.
@@ -141,9 +143,10 @@ pub struct GitSource {
     /// `https://`, `ssh://` or `user@host:path`.
     #[schemars(length(min = 1, max = MAX_URL))]
     pub url: String,
-    /// A branch or tag; no wildcards.
+    /// A branch or tag; no wildcards. Default `HEAD`: the repository's default branch, which is
+    /// resolved again on every poll, so a renamed default branch is followed.
     #[schemars(length(min = 1, max = MAX_REF))]
-    #[serde(rename = "ref")]
+    #[serde(rename = "ref", default = "default_ref")]
     pub git_ref: String,
     /// The build context inside the repository, for monorepos.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -154,6 +157,10 @@ pub struct GitSource {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schemars(length(max = MAX_PATH), regex(pattern = RELATIVE_PATH_PATTERN))]
     pub dockerfile: Option<String>,
+}
+
+fn default_ref() -> String {
+    "HEAD".to_owned()
 }
 
 /// The image to push.
@@ -296,6 +303,11 @@ pub struct BuildStatus {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schemars(length(max = 40), regex(pattern = REVISION_PATTERN))]
     pub remote_revision: Option<String>,
+    /// The full name of the ref `remoteRevision` came from, such as `refs/heads/master` when
+    /// `ref` is `HEAD`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(length(max = MAX_RESOLVED_REF))]
+    pub resolved_ref: Option<String>,
     /// When the ref was last resolved.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schemars(extend("format" = "date-time"))]

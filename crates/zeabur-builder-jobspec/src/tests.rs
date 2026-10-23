@@ -51,6 +51,7 @@ fn build_run() -> BuildRun {
         BuildRunSpec {
             build_ref: "api".to_owned(),
             revision: SHA.to_owned(),
+            git_ref: None,
             plan_digest: None,
             force_replan: false,
             trigger: Some(Trigger::Webhook),
