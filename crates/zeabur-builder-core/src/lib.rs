@@ -1,6 +1,7 @@
 //! Zeabur Builder's decisions that need no I/O.
 //!
 //! - [`git`]: resolving a branch or tag to a commit from a Git server's answer.
+//! - [`ssh`]: SSH remotes and the `known_hosts` keys that vouch for them.
 //! - [`repo`]: one key per Git repository, however its URL is written, so a webhook, a poll and a
 //!   `Build` agree on which repository they mean.
 //! - [`tag`]: the immutable, sortable image tag of a build.
@@ -16,6 +17,7 @@ pub mod git;
 pub mod progress;
 pub mod repo;
 pub mod result;
+pub mod ssh;
 pub mod tag;
 
 /// A full Git commit SHA: 40 lowercase hexadecimal digits.

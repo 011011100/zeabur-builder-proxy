@@ -176,6 +176,43 @@ pub fn parse_advertisement(body: &[u8]) -> Result<Advertisement, GitError> {
     Ok(Advertisement::Refs(refs))
 }
 
+/// Where a version 0 advertisement read from a stream ends.
+///
+/// Its length up to and including the first flush, or `None` while more must be read. Over SSH
+/// the server then waits for the client, so the stream does not end by itself.
+///
+/// # Errors
+///
+/// When the bytes so far are not pkt-lines, exceed [`MAX_RESPONSE_BYTES`], or carry an error.
+pub fn advertisement_end(body: &[u8]) -> Result<Option<usize>, GitError> {
+    let mut at = 0;
+    loop {
+        if at > MAX_RESPONSE_BYTES {
+            return Err(GitError::TooLarge);
+        }
+        let Some(head) = body.get(at..at + 4) else {
+            return Ok(None);
+        };
+        let len = std::str::from_utf8(head)
+            .ok()
+            .and_then(|hex| usize::from_str_radix(hex, 16).ok())
+            .ok_or(GitError::PktLine)?;
+        match len {
+            0 => return Ok(Some(at + 4)),
+            1..=3 => return Err(GitError::PktLine),
+            _ => {
+                let Some(data) = body.get(at + 4..at + len) else {
+                    return Ok(None);
+                };
+                if let Some(message) = data.strip_prefix(b"ERR ") {
+                    return Err(GitError::Server(text(message)));
+                }
+                at += len;
+            }
+        }
+    }
+}
+
 /// The names a ref may stand for, in preference order.
 #[must_use]
 pub fn candidates(git_ref: &str) -> Vec<String> {
@@ -263,6 +300,33 @@ mod tests {
             }
         }
         out
+    }
+
+    #[test]
+    fn advertisement_over_a_stream() {
+        let mut body = pkts(&[
+            &format!("{A} HEAD\0multi_ack\n"),
+            &format!("{A} refs/heads/main\n"),
+            "0000",
+        ]);
+        let end = body.len();
+        body.extend_from_slice(b"0009more");
+        assert_eq!(advertisement_end(&body), Ok(Some(end)));
+        for cut in [0, 3, 4, 20, end - 1] {
+            assert_eq!(advertisement_end(&body[..cut]), Ok(None), "{cut}");
+        }
+        let Ok(Advertisement::Refs(refs)) = parse_advertisement(&body[..end]) else {
+            panic!("not refs");
+        };
+        assert_eq!(resolve("main", &refs), Ok(A.to_owned()));
+
+        let denied = pkts(&["ERR access denied\n"]);
+        assert_eq!(
+            advertisement_end(&denied),
+            Err(GitError::Server("access denied".to_owned()))
+        );
+        assert_eq!(advertisement_end(b"00zz"), Err(GitError::PktLine));
+        assert_eq!(advertisement_end(b"0003"), Err(GitError::PktLine));
     }
 
     #[test]
