@@ -43,6 +43,7 @@ use zeabur_builder_api::{annotations, labels};
 use zeabur_builder_core::repo::RepoKey;
 use zeabur_builder_jobspec::{GitAuth, JobInputs};
 
+use crate::credentials::{GitCredentials, Refusal};
 use crate::decide::{self, Observed};
 use crate::notify::{self, Credentials};
 use crate::remote::{self, HttpClient, Resolver};
@@ -282,25 +283,28 @@ async fn resolve_source(
 ) -> Option<String> {
     let generation = build.metadata.generation;
     let git = &build.spec.source.git;
-    let resolved = if build.spec.source.credentials_ref.is_some() {
-        Err((
-            "CredentialsMissing",
-            "Git credentials are not supported yet; only public repositories".to_owned(),
-        ))
-    } else if !decide::needs_resolve(build.status.as_ref(), generation, rebuild, interval, at) {
-        status
-            .remote_revision
-            .clone()
-            .ok_or(("ResolveFailed", String::new()))
-    } else {
-        match ctx.resolver.resolve(&git.url, &git.git_ref).await {
-            Ok(sha) => {
-                status.last_resolved_at = Some(at.to_string());
-                Ok(sha)
+    let resolved =
+        if decide::needs_resolve(build.status.as_ref(), generation, rebuild, interval, at) {
+            match git_credentials(ctx, build).await {
+                Err(refusal) => Err(refusal),
+                Ok(credentials) => match ctx
+                    .resolver
+                    .resolve(&git.url, &git.git_ref, credentials.as_ref())
+                    .await
+                {
+                    Ok(sha) => {
+                        status.last_resolved_at = Some(at.to_string());
+                        Ok(sha)
+                    }
+                    Err(e) => Err((e.reason(), e.to_string())),
+                },
             }
-            Err(e) => Err((e.reason(), e.to_string())),
-        }
-    };
+        } else {
+            status
+                .remote_revision
+                .clone()
+                .ok_or(("ResolveFailed", String::new()))
+        };
     match &resolved {
         Ok(sha) => {
             status.remote_revision = Some(sha.clone());
@@ -329,6 +333,26 @@ async fn resolve_source(
     }
 
     resolved.ok()
+}
+
+/// The credentials the `Build`'s `credentialsRef` names, from its namespace.
+async fn git_credentials(ctx: &Context, build: &Build) -> Result<Option<GitCredentials>, Refusal> {
+    let Some(secret_ref) = &build.spec.source.credentials_ref else {
+        return Ok(None);
+    };
+    let name = &secret_ref.name;
+    let namespace = build.namespace().unwrap_or_default();
+    let secret = Api::<Secret>::namespaced(ctx.client.clone(), &namespace)
+        .get_opt(name)
+        .await
+        .map_err(|e| ("CredentialsUnreadable", format!("Secret `{name}`: {e}")))?
+        .ok_or_else(|| {
+            (
+                "CredentialsMissing",
+                format!("no Secret `{name}` in `{namespace}`"),
+            )
+        })?;
+    GitCredentials::from_secret(name, &secret).map(Some)
 }
 
 fn not_found(e: kube::Error) -> Result<(), Error> {
@@ -738,6 +762,24 @@ async fn start(ctx: &Context, run: &BuildRun, status: BuildRunStatus) -> Result<
         Err(e) => return finish(ctx, run, fail(e.to_string())).await,
     };
 
+    let credentials = match git_credentials(ctx, &build).await {
+        Ok(credentials) => credentials,
+        Err(("CredentialsUnreadable", message)) => {
+            return pending(ctx, run, status, Reason::InfraError, message).await;
+        }
+        Err((_, message)) => {
+            let failed = BuildRunStatus {
+                reason: Some(Reason::SourceFailed),
+                ..fail(message)
+            };
+            return finish(ctx, run, failed).await;
+        }
+    };
+    let git_auth = match (&credentials, &build.spec.source.credentials_ref) {
+        (Some(credentials), Some(secret)) => credentials.job_auth(&secret.name),
+        _ => GitAuth::Anonymous,
+    };
+
     let settings = &ctx.settings;
     let registry_auth = match admit(ctx, &namespace).await? {
         Ok(auth) => auth,
@@ -768,7 +810,7 @@ async fn start(ctx: &Context, run: &BuildRun, status: BuildRunStatus) -> Result<
         tags: &tags,
         buildkitd_addr: &woken.address,
         job_image: &settings.job_image,
-        git_auth: GitAuth::Anonymous,
+        git_auth,
         planner_credentials: None,
         buildkit_tls_secret: CLIENT_TLS_COPY,
         registry_auth_secret: &registry_secret,

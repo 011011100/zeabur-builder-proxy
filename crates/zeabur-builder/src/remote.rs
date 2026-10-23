@@ -1,12 +1,13 @@
-//! Asks a Git server over HTTPS which commit a ref points at ([`zeabur_builder_core::git`]).
+//! Asks a Git server which commit a ref points at ([`zeabur_builder_core::git`]).
 //!
-//! Anonymous only: credentials for plain Git (plan §5.3) are not implemented yet. `ssh://` and
-//! scp-like URLs are refused here; the Job could fetch them, but the controller cannot resolve
-//! them without `ssh`.
+//! `https://` and `http://` URLs are asked over smart HTTP, anonymously or with basic auth;
+//! `ssh://` and scp-like URLs over SSH with a deploy key ([`crate::ssh`]).
 
 use std::sync::Arc;
 use std::time::Duration;
 
+use base64::Engine as _;
+use base64::engine::general_purpose::STANDARD;
 use bytes::Bytes;
 use http::{Method, Request, StatusCode, header};
 use http_body_util::{BodyExt as _, Full, Limited};
@@ -17,6 +18,10 @@ use hyper_util::rt::TokioExecutor;
 use rustls::ClientConfig;
 use thiserror::Error;
 use zeabur_builder_core::git::{self, Advertisement, GitError, MAX_RESPONSE_BYTES};
+use zeabur_builder_core::ssh::SshRemote;
+
+use crate::credentials::GitCredentials;
+use crate::ssh;
 
 const TIMEOUT: Duration = Duration::from_secs(30);
 const USER_AGENT: &str = concat!("git/zeabur-builder-", env!("CARGO_PKG_VERSION"));
@@ -24,9 +29,21 @@ const USER_AGENT: &str = concat!("git/zeabur-builder-", env!("CARGO_PKG_VERSION"
 /// Why a ref could not be resolved.
 #[derive(Debug, Error)]
 pub(crate) enum ResolveError {
-    /// Not an `http://` or `https://` URL.
-    #[error("only http and https repositories can be polled, not `{0}`")]
+    /// Neither an HTTP nor an SSH URL.
+    #[error("only http, https and ssh repositories can be polled, not `{0}`")]
     Scheme(String),
+    /// An SSH URL without an SSH Secret.
+    #[error("{0}")]
+    NoCredentials(String),
+    /// The credentials do not fit the URL, or do not parse.
+    #[error("{0}")]
+    Credentials(String),
+    /// The SSH server's host key is not in `known_hosts`.
+    #[error("{0}")]
+    HostKey(String),
+    /// The server refused the credentials or the repository.
+    #[error("{0}")]
+    Denied(String),
     /// The server answered with an HTTP error.
     #[error("{0} answered {1}")]
     Status(String, StatusCode),
@@ -48,7 +65,11 @@ impl ResolveError {
             {
                 "AuthFailed"
             }
+            Self::Denied(_) => "AuthFailed",
             Self::Scheme(_) => "UnsupportedURL",
+            Self::NoCredentials(_) => "CredentialsMissing",
+            Self::Credentials(_) => "CredentialsInvalid",
+            Self::HostKey(_) => "HostKeyMismatch",
             Self::Status(..) | Self::Transport(..) | Self::Git(_) => "ResolveFailed",
         }
     }
@@ -100,20 +121,12 @@ impl Resolver {
         url: &str,
         content_type: Option<&str>,
         body: Vec<u8>,
+        basic: Option<(&str, &str)>,
     ) -> Result<Bytes, ResolveError> {
         let transport =
             |e: &dyn std::fmt::Display| ResolveError::Transport(url.to_owned(), e.to_string());
-        let mut request = Request::builder()
-            .method(method)
-            .uri(url)
-            .header(header::USER_AGENT, USER_AGENT)
-            .header("Git-Protocol", "version=2");
-        if let Some(content_type) = content_type {
-            request = request.header(header::CONTENT_TYPE, content_type);
-        }
-        let request = request
-            .body(Full::new(Bytes::from(body)))
-            .map_err(|e| transport(&e))?;
+        let request =
+            git_request(method, url, content_type, body, basic).map_err(|e| transport(&e))?;
         let response = tokio::time::timeout(TIMEOUT, self.client.request(request))
             .await
             .map_err(|e| transport(&e))?
@@ -132,10 +145,56 @@ impl Resolver {
     }
 
     /// The commit `git_ref` points at in the repository at `url`.
-    pub(crate) async fn resolve(&self, url: &str, git_ref: &str) -> Result<String, ResolveError> {
-        if !(url.starts_with("https://") || url.starts_with("http://")) {
-            return Err(ResolveError::Scheme(url.to_owned()));
+    pub(crate) async fn resolve(
+        &self,
+        url: &str,
+        git_ref: &str,
+        credentials: Option<&GitCredentials>,
+    ) -> Result<String, ResolveError> {
+        let http = url.starts_with("https://") || url.starts_with("http://");
+        if !http {
+            let remote =
+                SshRemote::parse(url).ok_or_else(|| ResolveError::Scheme(url.to_owned()))?;
+            let (private_key, known_hosts) = match credentials {
+                Some(GitCredentials::Ssh {
+                    private_key,
+                    known_hosts,
+                }) => (private_key, known_hosts),
+                Some(GitCredentials::Basic { .. }) => {
+                    return Err(ResolveError::Credentials(
+                        "a kubernetes.io/basic-auth Secret needs an https URL".to_owned(),
+                    ));
+                }
+                None => {
+                    return Err(ResolveError::NoCredentials(
+                        "an SSH URL needs a kubernetes.io/ssh-auth Secret in credentialsRef"
+                            .to_owned(),
+                    ));
+                }
+            };
+            let advertisement = ssh::advertisement(&remote, private_key, known_hosts).await?;
+            let Advertisement::Refs(refs) = git::parse_advertisement(&advertisement)? else {
+                return Err(GitError::PktLine.into());
+            };
+            return Ok(git::resolve(git_ref, &refs)?);
         }
+        let basic = match credentials {
+            None => None,
+            Some(GitCredentials::Basic { .. }) if !url.starts_with("https://") => {
+                return Err(ResolveError::Credentials(
+                    "a kubernetes.io/basic-auth Secret needs an https URL".to_owned(),
+                ));
+            }
+            Some(GitCredentials::Basic { username, password }) => {
+                Some((username.as_str(), password.as_str()))
+            }
+            Some(GitCredentials::Ssh { .. }) => {
+                return Err(ResolveError::Credentials(
+                    "a kubernetes.io/ssh-auth Secret needs an SSH URL, such as git@host:owner/repo.git"
+                        .to_owned(),
+                ));
+            }
+        };
         let base = url.trim_end_matches('/');
         let advertisement = self
             .request(
@@ -143,6 +202,7 @@ impl Resolver {
                 &format!("{base}/info/refs?service=git-upload-pack"),
                 None,
                 Vec::new(),
+                basic,
             )
             .await?;
         let refs = match git::parse_advertisement(&advertisement)? {
@@ -154,11 +214,114 @@ impl Resolver {
                         &format!("{base}/git-upload-pack"),
                         Some("application/x-git-upload-pack-request"),
                         git::ls_refs_request(git_ref),
+                        basic,
                     )
                     .await?;
                 git::parse_ls_refs(&answer)?
             }
         };
         Ok(git::resolve(git_ref, &refs)?)
+    }
+}
+
+/// A smart HTTP request, with `Authorization: Basic` when `basic` gives a user and password.
+fn git_request(
+    method: Method,
+    url: &str,
+    content_type: Option<&str>,
+    body: Vec<u8>,
+    basic: Option<(&str, &str)>,
+) -> Result<Request<Full<Bytes>>, http::Error> {
+    let mut request = Request::builder()
+        .method(method)
+        .uri(url)
+        .header(header::USER_AGENT, USER_AGENT)
+        .header("Git-Protocol", "version=2");
+    if let Some(content_type) = content_type {
+        request = request.header(header::CONTENT_TYPE, content_type);
+    }
+    if let Some((username, password)) = basic {
+        let mut value = header::HeaderValue::try_from(format!(
+            "Basic {}",
+            STANDARD.encode(format!("{username}:{password}"))
+        ))?;
+        value.set_sensitive(true);
+        request = request.header(header::AUTHORIZATION, value);
+    }
+    request.body(Full::new(Bytes::from(body)))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn basic_auth_header() {
+        let request = git_request(
+            Method::GET,
+            "https://github.com/acme/api.git/info/refs?service=git-upload-pack",
+            None,
+            Vec::new(),
+            Some(("x-access-token", "ghs_secret")),
+        );
+        let Ok(request) = request else {
+            panic!("request not built");
+        };
+        let auth = request.headers().get(header::AUTHORIZATION);
+        assert_eq!(
+            auth.and_then(|v| v.to_str().ok()),
+            Some("Basic eC1hY2Nlc3MtdG9rZW46Z2hzX3NlY3JldA==")
+        );
+        assert!(auth.is_some_and(header::HeaderValue::is_sensitive));
+        assert!(!format!("{request:?}").contains("eC1hY2Nlc3MtdG9rZW46Z2hzX3NlY3JldA"));
+
+        let anonymous = git_request(Method::GET, "https://github.com/x", None, Vec::new(), None);
+        assert!(anonymous.is_ok_and(|r| !r.headers().contains_key(header::AUTHORIZATION)));
+    }
+
+    #[tokio::test]
+    async fn credentials_must_fit_the_url() {
+        let Ok(client) = http_client() else {
+            return;
+        };
+        let resolver = Resolver::new(client);
+        let ssh = GitCredentials::Ssh {
+            private_key: String::new(),
+            known_hosts: String::new(),
+        };
+        let basic = GitCredentials::Basic {
+            username: "u".to_owned(),
+            password: "p".to_owned(),
+        };
+        let reason = async |url: &str, credentials: Option<&GitCredentials>| {
+            resolver
+                .resolve(url, "main", credentials)
+                .await
+                .map_err(|e| e.reason())
+        };
+        assert_eq!(
+            reason("https://github.com/acme/api.git", Some(&ssh)).await,
+            Err("CredentialsInvalid")
+        );
+        assert_eq!(
+            reason("git@github.com:acme/api.git", None).await,
+            Err("CredentialsMissing")
+        );
+        assert_eq!(
+            reason("git@github.com:acme/api.git", Some(&basic)).await,
+            Err("CredentialsInvalid")
+        );
+        assert_eq!(
+            reason("git@github.com:acme/api.git", Some(&ssh)).await,
+            Err("CredentialsInvalid")
+        );
+        assert_eq!(
+            reason("http://git.example.com/acme/api.git", Some(&basic)).await,
+            Err("CredentialsInvalid")
+        );
+        assert_eq!(
+            reason("file:///srv/api.git", None).await,
+            Err("UnsupportedURL")
+        );
     }
 }

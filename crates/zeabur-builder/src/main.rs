@@ -1,11 +1,13 @@
 //! `zeabur-builder`: the controller binary.
 
 mod controller;
+mod credentials;
 mod daemon;
 mod decide;
 mod notify;
 mod output;
 mod remote;
+mod ssh;
 mod tls;
 
 use std::process::ExitCode;

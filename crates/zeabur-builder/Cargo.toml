@@ -33,6 +33,7 @@ kube = { workspace = true, features = ["client", "runtime", "rustls-tls", "aws-l
 rcgen.workspace = true
 rustls.workspace = true
 rustls-native-certs.workspace = true
+russh.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
