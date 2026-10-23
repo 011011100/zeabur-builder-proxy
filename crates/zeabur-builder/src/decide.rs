@@ -19,6 +19,33 @@ use zeabur_builder_core::tag::{self, TagError, TagInputs};
 
 /// Polling interval for plain Git when the `Build` sets none (plan §3.2).
 pub(crate) const DEFAULT_POLL: Duration = Duration::from_mins(1);
+/// Polling interval for a GitHub App source whose push events reach the controller: only a safety
+/// net, since GitHub does not deliver a failed webhook again (plan §4.4).
+pub(crate) const APP_POLL: Duration = Duration::from_mins(10);
+/// The shortest time between two polls a webhook asks for, so a flood of deliveries, genuine or
+/// replayed, cannot turn into a flood of requests to the Git server.
+pub(crate) const WAKE_GAP: Duration = Duration::from_secs(5);
+
+/// The polling interval of a `Build` that sets none.
+pub(crate) const fn default_poll(build: &Build, receiving: bool) -> Duration {
+    if receiving && build.spec.source.github_app.is_some() {
+        APP_POLL
+    } else {
+        DEFAULT_POLL
+    }
+}
+
+/// How long a woken `Build` waits before it asks the Git server: nothing when its last answer is
+/// at least [`WAKE_GAP`] old.
+pub(crate) fn wake_wait(status: Option<&BuildStatus>, now: Timestamp) -> Option<Duration> {
+    let last = status?
+        .last_resolved_at
+        .as_deref()
+        .and_then(|t| t.parse::<Timestamp>().ok())?;
+    let age = now.duration_since(last);
+    let gap = jiff::SignedDuration::try_from(WAKE_GAP).ok()?;
+    (age < gap).then(|| (gap - age).unsigned_abs())
+}
 /// Finished `BuildRun`s kept when the `Build` sets no limit.
 pub(crate) const DEFAULT_HISTORY: usize = 10;
 
@@ -106,17 +133,17 @@ pub(crate) fn set_condition(
 }
 
 /// Whether the ref must be asked again, or the last answer is recent enough. A new generation
-/// (the spec changed) always asks, and so does a pending rebuild, which builds the commit the ref
-/// points at now.
+/// (the spec changed) always asks, and so does `force`: a pending rebuild, which builds the commit
+/// the ref points at now, or a webhook.
 pub(crate) fn needs_resolve(
     status: Option<&BuildStatus>,
     generation: Option<i64>,
-    rebuild: bool,
+    force: bool,
     interval: Duration,
     now: Timestamp,
 ) -> bool {
     let Some(status) = status else { return true };
-    if rebuild || status.remote_revision.is_none() || status.observed_generation != generation {
+    if force || status.remote_revision.is_none() || status.observed_generation != generation {
         return true;
     }
     let Some(last) = status
@@ -177,8 +204,14 @@ pub(crate) struct NextRun {
 ///
 /// A commit that already has a `BuildRun`, in any phase, gets no other: a failed build is not
 /// retried by itself, which would loop on a broken commit. A [pending rebuild](pending_rebuild)
-/// builds it again, as `Manual`, under the same concurrency rules as a new commit.
-pub(crate) fn next_run(build: &Build, remote: &str, runs: &[BuildRun]) -> NextRun {
+/// builds it again, as `Manual`, under the same concurrency rules as a new commit. A new commit
+/// is built with `found_by`: `Poll`, or `Webhook` when a delivery asked for the poll.
+pub(crate) fn next_run(
+    build: &Build,
+    remote: &str,
+    runs: &[BuildRun],
+    found_by: Trigger,
+) -> NextRun {
     if build.spec.suspend {
         return NextRun::default();
     }
@@ -188,7 +221,7 @@ pub(crate) fn next_run(build: &Build, remote: &str, runs: &[BuildRun]) -> NextRu
         .and_then(|s| s.latest_revision.as_deref());
     let new_commit = latest != Some(remote) && !runs.iter().any(|r| r.spec.revision == remote);
     let trigger = if new_commit {
-        Trigger::Poll
+        found_by
     } else if pending_rebuild(build, runs).is_some() {
         Trigger::Manual
     } else {

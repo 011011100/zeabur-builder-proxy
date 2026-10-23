@@ -4,12 +4,16 @@ mod controller;
 mod credentials;
 mod daemon;
 mod decide;
+mod github;
+mod github_app;
 mod notify;
 mod output;
 mod remote;
 mod ssh;
 mod tls;
+mod webhook;
 
+use std::net::SocketAddr;
 use std::process::ExitCode;
 use std::sync::Arc;
 use std::time::Duration;
@@ -32,6 +36,9 @@ enum Command {
     Crds,
     /// Run the controller.
     Controller(ControllerArgs),
+    /// Set up the cluster's GitHub App.
+    #[command(subcommand)]
+    GithubApp(github_app::Command),
 }
 
 #[derive(Debug, Args)]
@@ -94,6 +101,34 @@ struct ControllerArgs {
     /// How long a finished Job is kept, in seconds, for log collectors.
     #[arg(long, default_value_t = 600)]
     job_ttl: i32,
+    /// The GitHub App's Secret in the controller's namespace: `app-id`, `client-id`,
+    /// `private-key`, `webhook-secret` and, for GitHub Enterprise Server, `api-url`.
+    #[arg(
+        long,
+        env = "ZEABUR_BUILDER_GITHUB_APP_SECRET",
+        default_value = "github-app"
+    )]
+    github_app_secret: String,
+    /// The `ConfigMap` in the controller's namespace that maps an installation id to the
+    /// namespaces allowed to use it, such as `"12345": "team-a, team-b"`.
+    #[arg(long, default_value = "github-app-installations")]
+    github_app_grants: String,
+    /// Where the webhook receiver listens, such as `0.0.0.0:8080`. Unset: no receiver.
+    #[arg(long, env = "ZEABUR_BUILDER_WEBHOOK_ADDR")]
+    webhook_addr: Option<SocketAddr>,
+    /// The path deliveries arrive under: `<path>/github`, `<path>/gitlab`, `<path>/gitea`,
+    /// `<path>/bitbucket`, `<path>/generic` and `<path>/github-app`.
+    #[arg(long, default_value = "/hooks")]
+    webhook_path: String,
+    /// The largest delivery read, in bytes.
+    #[arg(long, default_value_t = 1024 * 1024)]
+    webhook_max_body: usize,
+    /// Deliveries per second, on average, across all senders.
+    #[arg(long, default_value_t = 10)]
+    webhook_rate: u32,
+    /// Deliveries at once above that average.
+    #[arg(long, default_value_t = 50)]
+    webhook_burst: u32,
 }
 
 impl ControllerArgs {
@@ -124,6 +159,15 @@ impl ControllerArgs {
             job_image: self.job_image,
             job_deadline_seconds: self.job_deadline,
             job_ttl_seconds: self.job_ttl,
+            github_app_secret: self.github_app_secret,
+            github_app_grants: self.github_app_grants,
+            webhook: self.webhook_addr.map(|addr| webhook::Settings {
+                addr,
+                prefix: self.webhook_path,
+                max_body: self.webhook_max_body,
+                rate: self.webhook_rate,
+                burst: self.webhook_burst,
+            }),
         }
     }
 }
@@ -151,6 +195,17 @@ fn main() -> ExitCode {
             .map_err(|e| e.to_string())
             .and_then(|runtime| runtime.block_on(run_controller(args)))
             .map(|()| None),
+        Command::GithubApp(command) => rustls::crypto::aws_lc_rs::default_provider()
+            .install_default()
+            .map_err(|_provider| "a TLS provider is already installed".to_owned())
+            .and_then(|()| {
+                tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .map_err(|e| e.to_string())
+            })
+            .and_then(|runtime| runtime.block_on(github_app::run(command)))
+            .map(Some),
     };
     match result {
         Ok(Some(text)) => output::stdout_line(&text),

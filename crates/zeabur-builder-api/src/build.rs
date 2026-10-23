@@ -124,16 +124,32 @@ pub struct BuildSpec {
 }
 
 /// The source.
-#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq, JsonSchema)]
+#[derive(KubeSchema, Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+#[x_kube(
+    validation = Rule::new("!(has(self.credentialsRef) && has(self.githubApp))").message("set at most one of credentialsRef and githubApp"),
+    validation = Rule::new("!has(self.githubApp) || self.git.url.startsWith('https://')").message("a githubApp source needs an https URL"),
+)]
 #[serde(rename_all = "camelCase")]
 pub struct SourceSpec {
     /// The Git repository.
     pub git: GitSource,
     /// Credentials for a plain Git server: a `kubernetes.io/ssh-auth` Secret (with `known_hosts`)
     /// or a `kubernetes.io/basic-auth` one, labelled `builder.zeabur.com/git-credentials: "true"`.
-    /// Ignored when a GitHub App covers the repository.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub credentials_ref: Option<SecretRef>,
+    /// Reach the repository through an installation of the cluster's GitHub App, which a cluster
+    /// admin has allowed for this namespace.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub github_app: Option<GitHubAppSource>,
+}
+
+/// An installation of the cluster's GitHub App.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct GitHubAppSource {
+    /// The installation's id, from `https://github.com/settings/installations/<id>`.
+    #[schemars(range(min = 1))]
+    pub installation_id: i64,
 }
 
 /// A Git repository and ref.
@@ -222,17 +238,28 @@ pub struct EnvVarSource {
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq, JsonSchema, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct TriggerSpec {
-    /// GitHub App push events. Default true when a GitHub App covers the repository.
+    /// Push events from a repository webhook, signed with a secret this `Build` names. A
+    /// `githubApp` source also wakes on the App's push events, without this.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub webhook: Option<bool>,
-    /// How often to check the ref. Default `1m` for plain Git, `10m` as a safety net with a
-    /// GitHub App.
+    pub webhook: Option<WebhookTrigger>,
+    /// How often to check the ref. Default `1m`; `10m`, as a safety net, for a `githubApp`
+    /// source when the controller receives webhooks.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schemars(length(max = 32), regex(pattern = DURATION_PATTERN))]
     pub poll_interval: Option<String>,
     /// Rebuild when a base image's digest changes.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub on_base_image_change: bool,
+}
+
+/// A repository webhook.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct WebhookTrigger {
+    /// The shared secret, in a Secret in the same namespace: the webhook's secret on GitHub,
+    /// Gitea, Forgejo and Bitbucket, its secret token or signing token on GitLab, and a
+    /// `whsec_` key for the generic form.
+    pub secret_ref: SecretKeyRef,
 }
 
 /// Plan pinning.

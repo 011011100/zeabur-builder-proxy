@@ -1,0 +1,434 @@
+//! `zeabur-builder github-app`: creates the cluster's GitHub App with GitHub's manifest flow and
+//! prints the Secret [`crate::github`] reads ([manifest flow]).
+//!
+//! 1. The browser POSTs the manifest, as the form field `manifest`, to `https://github.com/settings/apps/new`
+//!    (or `/organizations/<org>/settings/apps/new`) with an unguessable `state`.
+//! 2. GitHub sends the browser back to `redirect_url` with a `code` and the same `state`.
+//! 3. `POST /app-manifests/{code}/conversions`, within an hour, returns the App's id, client id,
+//!    private key and webhook secret ([conversion]). The example sends no token, and neither does
+//!    this; GitHub's page does not say whether one is needed (not verified).
+//!
+//! `create` serves steps 1 and 2 on `127.0.0.1` and writes the Secret to stdout, for
+//! `kubectl apply -f -`; nothing else keeps the key. `manifest` prints only the manifest, for
+//! another front end such as Zeabur's.
+//!
+//! The App asks for the least it needs: `contents: read` to resolve and fetch, `metadata: read`
+//! (which GitHub grants every App), `statuses: write` for commit statuses, and `push` events.
+//!
+//! [manifest flow]: https://docs.github.com/en/apps/sharing-github-apps/registering-a-github-app-from-a-manifest
+//! [conversion]: https://docs.github.com/en/rest/apps/apps#create-a-github-app-from-a-manifest
+
+use std::convert::Infallible;
+use std::sync::{Arc, Mutex, PoisonError};
+use std::time::Duration;
+
+use aws_lc_rs::constant_time::verify_slices_are_equal;
+use bytes::Bytes;
+use clap::{Args, Subcommand};
+use http::{Method, Request, Response, StatusCode, header};
+use http_body_util::{BodyExt as _, Full, Limited};
+use hyper::service::service_fn;
+use hyper_util::rt::TokioIo;
+use serde_json::{Value, json};
+use tokio::net::TcpListener;
+use tokio::sync::oneshot;
+
+use crate::{output, remote};
+
+/// The manifest flow's time limit.
+const FLOW_LIMIT: Duration = Duration::from_hours(1);
+const USER_AGENT: &str = concat!("zeabur-builder/", env!("CARGO_PKG_VERSION"));
+
+/// `github-app` subcommands.
+#[derive(Debug, Subcommand)]
+pub(crate) enum Command {
+    /// Create the App in a browser, then print its Secret for `kubectl apply -f -`.
+    Create(CreateArgs),
+    /// Print the App's manifest.
+    Manifest(ManifestArgs),
+}
+
+/// What the manifest needs.
+#[derive(Debug, Args)]
+pub(crate) struct ManifestArgs {
+    /// Where GitHub sends the App's events: the receiver's public URL ending in
+    /// `/hooks/github-app`.
+    #[arg(long)]
+    webhook_url: String,
+    /// The App's name, unique on GitHub.
+    #[arg(long, default_value = "Zeabur Builder")]
+    name: String,
+    /// Where GitHub sends the browser back with the code.
+    #[arg(long)]
+    redirect_url: Option<String>,
+}
+
+/// `create`.
+#[derive(Debug, Args)]
+pub(crate) struct CreateArgs {
+    #[command(flatten)]
+    manifest: ManifestArgs,
+    /// Create the App for this organization instead of your account.
+    #[arg(long)]
+    organization: Option<String>,
+    /// The GitHub server.
+    #[arg(long, default_value = "https://github.com")]
+    github_url: String,
+    /// Its REST API.
+    #[arg(long, default_value = "https://api.github.com")]
+    api_url: String,
+    /// The Secret's name.
+    #[arg(long, default_value = "github-app")]
+    secret: String,
+    /// The controller's namespace, where the Secret goes.
+    #[arg(long, default_value = "builder-system")]
+    namespace: String,
+}
+
+/// The App's manifest.
+pub(crate) fn manifest(name: &str, webhook_url: &str, redirect_url: Option<&str>) -> Value {
+    let mut manifest = json!({
+        "name": name,
+        "url": "https://github.com/zeabur/builder",
+        "description": "Builds container images of pushed commits with Zeabur Builder.",
+        "hook_attributes": {"url": webhook_url, "active": true},
+        "public": false,
+        "default_permissions": {"contents": "read", "metadata": "read", "statuses": "write"},
+        "default_events": ["push"],
+    });
+    if let (Some(url), Some(fields)) = (redirect_url, manifest.as_object_mut()) {
+        fields.insert("redirect_url".to_owned(), json!(url));
+    }
+    manifest
+}
+
+/// The Secret, from GitHub's answer to the conversion.
+pub(crate) fn secret(
+    conversion: &Value,
+    name: &str,
+    namespace: &str,
+    api_url: &str,
+) -> Result<Value, String> {
+    let field = |key: &str| {
+        conversion
+            .get(key)
+            .filter(|v| !v.is_null())
+            .ok_or_else(|| format!("GitHub's answer has no `{key}`"))
+    };
+    let id = field("id")?
+        .as_u64()
+        .ok_or("GitHub's `id` is not a number")?;
+    let text = |key: &str| -> Result<String, String> {
+        field(key)?
+            .as_str()
+            .map(str::to_owned)
+            .ok_or_else(|| format!("GitHub's `{key}` is not text"))
+    };
+    let mut data = json!({
+        "app-id": id.to_string(),
+        "client-id": text("client_id")?,
+        "private-key": text("pem")?,
+        "webhook-secret": text("webhook_secret")?,
+    });
+    if api_url.trim_end_matches('/') != "https://api.github.com"
+        && let Some(fields) = data.as_object_mut()
+    {
+        fields.insert("api-url".to_owned(), json!(api_url));
+    }
+    Ok(json!({
+        "apiVersion": "v1",
+        "kind": "Secret",
+        "metadata": {
+            "name": name,
+            "namespace": namespace,
+            "annotations": {
+                "builder.zeabur.com/github-app": text("html_url").unwrap_or_default(),
+            },
+        },
+        "type": "Opaque",
+        "stringData": data,
+    }))
+}
+
+fn escape(text: &str) -> String {
+    text.chars()
+        .map(|c| match c {
+            '&' => "&amp;".to_owned(),
+            '<' => "&lt;".to_owned(),
+            '>' => "&gt;".to_owned(),
+            '"' => "&quot;".to_owned(),
+            '\'' => "&#39;".to_owned(),
+            c => c.to_string(),
+        })
+        .collect()
+}
+
+/// The page that POSTs the manifest to GitHub.
+pub(crate) fn form(action: &str, manifest: &Value) -> String {
+    format!(
+        "<!doctype html><meta charset=utf-8><title>Create the GitHub App</title>\
+         <form method=post action=\"{}\"><input type=hidden name=manifest value=\"{}\">\
+         <p>Zeabur Builder will ask GitHub to create the App below.</p>\
+         <pre>{}</pre><button type=submit>Create on GitHub</button></form>",
+        escape(action),
+        escape(&manifest.to_string()),
+        escape(&serde_json::to_string_pretty(manifest).unwrap_or_default()),
+    )
+}
+
+/// `code` and `state` from `/callback?code=…&state=…`.
+fn callback(query: &str) -> (Option<&str>, Option<&str>) {
+    let mut code = None;
+    let mut state = None;
+    for pair in query.split('&') {
+        match pair.split_once('=') {
+            Some(("code", v)) => code = Some(v),
+            Some(("state", v)) => state = Some(v),
+            _ => {}
+        }
+    }
+    let code = code.filter(|c| !c.is_empty() && c.bytes().all(|b| b.is_ascii_alphanumeric()));
+    (code, state)
+}
+
+fn page(status: StatusCode, text: &str) -> Response<Full<Bytes>> {
+    let mut response = Response::new(Full::new(Bytes::from(format!(
+        "<!doctype html><meta charset=utf-8><p>{}</p>",
+        escape(text)
+    ))));
+    *response.status_mut() = status;
+    response.headers_mut().insert(
+        header::CONTENT_TYPE,
+        header::HeaderValue::from_static("text/html; charset=utf-8"),
+    );
+    response
+}
+
+async fn convert(api_url: &str, code: &str) -> Result<Value, String> {
+    let client = remote::http_client()?;
+    let request = Request::builder()
+        .method(Method::POST)
+        .uri(format!(
+            "{}/app-manifests/{code}/conversions",
+            api_url.trim_end_matches('/')
+        ))
+        .header(header::USER_AGENT, USER_AGENT)
+        .header(header::ACCEPT, "application/vnd.github+json")
+        .body(Full::new(Bytes::new()))
+        .map_err(|e| e.to_string())?;
+    let response = tokio::time::timeout(Duration::from_secs(30), client.request(request))
+        .await
+        .map_err(|e| e.to_string())?
+        .map_err(|e| e.to_string())?;
+    let status = response.status();
+    let body = Limited::new(response.into_body(), 1024 * 1024)
+        .collect()
+        .await
+        .map_err(|e| e.to_string())?
+        .to_bytes();
+    if status != StatusCode::CREATED {
+        return Err(format!("GitHub answered {status} to the conversion"));
+    }
+    serde_json::from_slice(&body).map_err(|_error| "GitHub's answer is not JSON".to_owned())
+}
+
+/// Runs a `github-app` subcommand; the text for stdout.
+pub(crate) async fn run(command: Command) -> Result<String, String> {
+    match command {
+        Command::Manifest(args) => {
+            Ok(manifest(&args.name, &args.webhook_url, args.redirect_url.as_deref()).to_string())
+        }
+        Command::Create(args) => create(args).await,
+    }
+}
+
+type Done = Arc<Mutex<Option<oneshot::Sender<Result<Value, String>>>>>;
+
+/// The form page, the state, the API URL and where the conversion goes.
+type Shared = (String, String, String, Done);
+
+/// Serves the form and takes GitHub's redirect back.
+async fn answer(
+    request: &Request<hyper::body::Incoming>,
+    shared: &Shared,
+) -> Response<Full<Bytes>> {
+    let (html, state, api_url, done) = shared;
+    match request.uri().path() {
+        "/" => page(StatusCode::OK, "").map(|_| Full::new(Bytes::from(html.clone()))),
+        "/callback" => {
+            let (code, given) = callback(request.uri().query().unwrap_or_default());
+            let state_ok = given
+                .is_some_and(|g| verify_slices_are_equal(g.as_bytes(), state.as_bytes()).is_ok());
+            match code {
+                Some(code) if state_ok => {
+                    let converted = convert(api_url, code).await;
+                    let text = match &converted {
+                        Ok(_) => {
+                            "The App is created. Its Secret is on the terminal; close this tab."
+                                .to_owned()
+                        }
+                        Err(e) => e.clone(),
+                    };
+                    if let Some(tx) = done.lock().unwrap_or_else(PoisonError::into_inner).take()
+                        && tx.send(converted).is_err()
+                    {
+                        tracing::debug!("the flow already ended");
+                    }
+                    page(StatusCode::OK, &text)
+                }
+                _ => page(
+                    StatusCode::BAD_REQUEST,
+                    "The code or state is missing or wrong.",
+                ),
+            }
+        }
+        _ => page(StatusCode::NOT_FOUND, "Not found."),
+    }
+}
+
+async fn create(args: CreateArgs) -> Result<String, String> {
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .map_err(|e| format!("cannot listen on 127.0.0.1: {e}"))?;
+    let port = listener.local_addr().map_err(|e| e.to_string())?.port();
+    let mut nonce = [0_u8; 24];
+    aws_lc_rs::rand::fill(&mut nonce).map_err(|_error| "no randomness".to_owned())?;
+    let state: String = nonce
+        .iter()
+        .flat_map(|b| [b >> 4, b & 15])
+        .filter_map(|n| char::from_digit(n.into(), 16))
+        .collect();
+    let github = args.github_url.trim_end_matches('/');
+    let new_app = args.organization.as_ref().map_or_else(
+        || format!("{github}/settings/apps/new"),
+        |org| format!("{github}/organizations/{org}/settings/apps/new"),
+    );
+    let redirect = args
+        .manifest
+        .redirect_url
+        .clone()
+        .unwrap_or_else(|| format!("http://127.0.0.1:{port}/callback"));
+    let page_html = form(
+        &format!("{new_app}?state={state}"),
+        &manifest(
+            &args.manifest.name,
+            &args.manifest.webhook_url,
+            Some(&redirect),
+        ),
+    );
+    output::stderr_line(&format!(
+        "Open http://127.0.0.1:{port}/ in a browser signed in to GitHub."
+    ));
+
+    let (tx, rx) = oneshot::channel();
+    let done: Done = Arc::new(Mutex::new(Some(tx)));
+    let shared: Arc<Shared> = Arc::new((page_html, state, args.api_url.clone(), done));
+    let serve = async {
+        loop {
+            let Ok((stream, _)) = listener.accept().await else {
+                break;
+            };
+            let shared = Arc::clone(&shared);
+            tokio::spawn(async move {
+                let service = service_fn(move |request: Request<hyper::body::Incoming>| {
+                    let shared = Arc::clone(&shared);
+                    async move { Ok::<_, Infallible>(answer(&request, &shared).await) }
+                });
+                if let Err(e) = hyper::server::conn::http1::Builder::new()
+                    .serve_connection(TokioIo::new(stream), service)
+                    .await
+                {
+                    tracing::debug!(error = %e, "callback connection");
+                }
+            });
+        }
+    };
+    let converted = tokio::select! {
+        result = tokio::time::timeout(FLOW_LIMIT, rx) => result
+            .map_err(|_elapsed| "GitHub's manifest flow takes at most an hour".to_owned())?
+            .map_err(|_closed| "the flow stopped".to_owned())??,
+        () = serve => return Err("the callback server stopped".to_owned()),
+    };
+    let secret = secret(&converted, &args.secret, &args.namespace, &args.api_url)?;
+    output::stderr_line(&format!(
+        "Created {}. Install it on the accounts whose repositories you build, then allow \
+         namespaces in the ConfigMap github-app-installations.",
+        converted
+            .get("html_url")
+            .and_then(Value::as_str)
+            .unwrap_or("the App")
+    ));
+    serde_json::to_string_pretty(&secret).map_err(|e| e.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_manifest_asks_for_little() {
+        let m = manifest(
+            "Zeabur Builder",
+            "https://hooks.example.com/hooks/github-app",
+            Some("http://127.0.0.1:9/callback"),
+        );
+        assert_eq!(
+            m["default_permissions"],
+            json!({"contents": "read", "metadata": "read", "statuses": "write"})
+        );
+        assert_eq!(m["default_events"], json!(["push"]));
+        assert_eq!(m["public"], json!(false));
+        assert_eq!(
+            m["hook_attributes"],
+            json!({"url": "https://hooks.example.com/hooks/github-app", "active": true})
+        );
+        assert_eq!(m["redirect_url"], "http://127.0.0.1:9/callback");
+    }
+
+    #[test]
+    fn the_secret_keeps_what_the_controller_reads() {
+        let conversion = json!({
+            "id": 42, "slug": "zeabur-builder", "client_id": "Iv23li", "client_secret": "cs",
+            "webhook_secret": "ws", "pem": "-----BEGIN RSA PRIVATE KEY-----",
+            "html_url": "https://github.com/apps/zeabur-builder", "owner": {}
+        });
+        let s = secret(
+            &conversion,
+            "github-app",
+            "builder-system",
+            "https://api.github.com/",
+        )
+        .unwrap();
+        assert_eq!(
+            s["stringData"],
+            json!({"app-id": "42", "client-id": "Iv23li", "private-key": "-----BEGIN RSA PRIVATE KEY-----",
+                   "webhook-secret": "ws"})
+        );
+        assert_eq!(s["metadata"]["namespace"], "builder-system");
+        let ghes = secret(&conversion, "x", "y", "https://ghe.example.com/api/v3").unwrap();
+        assert_eq!(
+            ghes["stringData"]["api-url"],
+            "https://ghe.example.com/api/v3"
+        );
+        let mut no_secret = conversion;
+        no_secret["webhook_secret"] = Value::Null;
+        assert!(secret(&no_secret, "x", "y", "https://api.github.com").is_err());
+    }
+
+    #[test]
+    fn the_form_escapes_the_manifest() {
+        let m = manifest("<x\" onload=\"", "https://h/hooks/github-app", None);
+        let html = form("https://github.com/settings/apps/new?state=s&x=1", &m);
+        assert!(!html.contains("<x"));
+        assert!(!html.contains("\" onload"));
+        assert!(html.contains("state=s&amp;x=1"));
+    }
+
+    #[test]
+    fn callbacks() {
+        assert_eq!(callback("code=abc123&state=s"), (Some("abc123"), Some("s")));
+        assert_eq!(callback("state=s&code=a/../b").0, None);
+        assert_eq!(callback("code=").0, None);
+        assert_eq!(callback(""), (None, None));
+    }
+}

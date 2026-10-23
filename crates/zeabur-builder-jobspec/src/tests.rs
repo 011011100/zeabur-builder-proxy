@@ -29,6 +29,7 @@ fn build(url: &str, context_dir: Option<&str>, env: Vec<BuildEnvVar>) -> Build {
                     dockerfile: None,
                 },
                 credentials_ref: None,
+                github_app: None,
             },
             builder_ref: "dockerfile".to_owned(),
             output: None,

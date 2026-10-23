@@ -12,14 +12,19 @@
 //! Decisions are in [`crate::decide`]; this module only reads and writes objects. Status is
 //! written with server-side apply, so a field the controller stops setting is removed.
 //!
-//! Not yet: leader election (run one replica), the repository-level poller and webhooks
-//! (plan §4.3, §4.4), and `flux-receiver` and `generic` notify targets.
+//! A webhook ([`crate::webhook`]) marks a `Build` and queues it; its reconcile then asks the Git
+//! server at once, unless it asked less than [`decide::WAKE_GAP`] ago. A `githubApp` source is
+//! resolved and fetched with installation tokens and gets commit statuses ([`crate::github`]).
+//!
+//! Not yet: leader election (run one replica), the repository-level poller (plan §4.4), and
+//! `flux-receiver` and `generic` notify targets.
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::time::Duration;
 
 use futures_util::StreamExt as _;
+use futures_util::future::BoxFuture;
 use jiff::Timestamp;
 use k8s_openapi::ByteString;
 use k8s_openapi::api::batch::v1::Job;
@@ -29,6 +34,7 @@ use kube::api::{
 };
 use kube::runtime::controller::{Action, Controller};
 use kube::runtime::events::{Event, EventType, Recorder, Reporter};
+use kube::runtime::reflector::Store;
 use kube::runtime::watcher;
 use kube::{Client, Resource as _, ResourceExt as _};
 use serde::Serialize;
@@ -45,8 +51,10 @@ use zeabur_builder_jobspec::{GitAuth, JobInputs};
 
 use crate::credentials::{GitCredentials, Refusal};
 use crate::decide::{self, Observed};
+use crate::github::{self, Access, GitHub, State};
 use crate::notify::{self, Credentials};
 use crate::remote::{self, HttpClient, Resolver};
+use crate::webhook::{self, Lookup, Receiver, Wakes};
 use crate::{daemon, tls};
 
 const MANAGER: &str = "zeabur-builder";
@@ -77,6 +85,13 @@ pub(crate) struct Settings {
     pub(crate) job_deadline_seconds: i64,
     /// `ttlSecondsAfterFinished`.
     pub(crate) job_ttl_seconds: i32,
+    /// The GitHub App's Secret, in the controller's namespace.
+    pub(crate) github_app_secret: String,
+    /// The `ConfigMap` of namespaces allowed to use each installation, in the controller's
+    /// namespace.
+    pub(crate) github_app_grants: String,
+    /// The webhook receiver, when it runs.
+    pub(crate) webhook: Option<webhook::Settings>,
 }
 
 struct Context {
@@ -85,6 +100,65 @@ struct Context {
     resolver: Resolver,
     recorder: Recorder,
     settings: Settings,
+    github: Arc<GitHub>,
+    wakes: Arc<Wakes>,
+}
+
+/// What the receiver reads: `Build`s from the reconciler's cache, Secrets from the API server.
+struct ClusterLookup {
+    builds: Store<Build>,
+    client: Client,
+    github: Arc<GitHub>,
+}
+
+impl Lookup for ClusterLookup {
+    fn builds(&self) -> Vec<Arc<Build>> {
+        self.builds.state()
+    }
+
+    fn secret<'a>(
+        &'a self,
+        namespace: &'a str,
+        name: &'a str,
+        key: &'a str,
+    ) -> BoxFuture<'a, Option<Vec<u8>>> {
+        Box::pin(async move {
+            let secret = Api::<Secret>::namespaced(self.client.clone(), namespace)
+                .get_opt(name)
+                .await;
+            match secret {
+                Ok(secret) => secret?.data?.remove(key).map(|v| v.0),
+                Err(e) => {
+                    tracing::warn!(%namespace, secret = name, error = %e, "webhook secret unreadable");
+                    None
+                }
+            }
+        })
+    }
+
+    fn touch<'a>(&'a self, namespace: &'a str, name: &'a str, at: Timestamp) -> BoxFuture<'a, ()> {
+        Box::pin(async move {
+            let patch = serde_json::json!({"status": {"lastWebhookAt": at.to_string()}});
+            let patched = Api::<Build>::namespaced(self.client.clone(), namespace)
+                .patch_status(name, &PatchParams::default(), &Patch::Merge(&patch))
+                .await;
+            if let Err(e) = patched {
+                tracing::warn!(%namespace, build = name, error = %e, "webhook wake not written");
+            }
+        })
+    }
+
+    fn app_secret(&self) -> BoxFuture<'_, Option<Vec<u8>>> {
+        Box::pin(async move {
+            match self.github.app().await {
+                Ok(app) => app.webhook_secret.clone(),
+                Err((_, message)) => {
+                    tracing::warn!(message, "GitHub App webhook refused");
+                    None
+                }
+            }
+        })
+    }
 }
 
 #[derive(Debug, Error)]
@@ -118,11 +192,23 @@ where
     Ok(())
 }
 
-/// Runs both controllers and the buildkitd sweep until a termination signal.
+/// Runs both controllers, the buildkitd sweep and the webhook receiver until a termination
+/// signal.
 pub(crate) async fn run(client: Client, settings: Settings) -> Result<(), String> {
     let sweep = daemon::sweep_forever(client.clone(), Arc::clone(&settings.daemon));
     let http = remote::http_client()?;
+    let github = Arc::new(GitHub::new(
+        &client,
+        http.clone(),
+        &settings.namespace,
+        settings.github_app_secret.clone(),
+        settings.github_app_grants.clone(),
+    ));
+    let wakes = Arc::new(Wakes::default());
+    let receiver_settings = settings.webhook.clone();
     let context = Arc::new(Context {
+        github: Arc::clone(&github),
+        wakes: Arc::clone(&wakes),
         recorder: Recorder::new(
             client.clone(),
             Reporter {
@@ -142,14 +228,23 @@ pub(crate) async fn run(client: Client, settings: Settings) -> Result<(), String
     .owns(
         Api::<BuildRun>::all(client.clone()),
         watcher::Config::default(),
-    )
-    .shutdown_on_signal()
-    .run(reconcile_build, retry, Arc::clone(&context))
-    .for_each(|result| async move {
-        if let Err(e) = result {
-            tracing::warn!(error = %e, "build reconcile");
-        }
+    );
+    let receiver = receiver_settings.map(|settings| {
+        let lookup = ClusterLookup {
+            builds: builds.store(),
+            client: client.clone(),
+            github,
+        };
+        Arc::new(Receiver::new(Box::new(lookup), wakes, settings))
     });
+    let builds = builds
+        .shutdown_on_signal()
+        .run(reconcile_build, retry, Arc::clone(&context))
+        .for_each(|result| async move {
+            if let Err(e) = result {
+                tracing::warn!(error = %e, "build reconcile");
+            }
+        });
     let runs = Controller::new(
         Api::<BuildRun>::all(client.clone()),
         watcher::Config::default(),
@@ -165,9 +260,16 @@ pub(crate) async fn run(client: Client, settings: Settings) -> Result<(), String
             tracing::warn!(error = %e, "buildrun reconcile");
         }
     });
+    let receive = async {
+        match receiver {
+            Some(receiver) => webhook::serve(receiver).await,
+            None => std::future::pending().await,
+        }
+    };
     tokio::select! {
         ((), ()) = async { tokio::join!(builds, runs) } => {}
         () = sweep => {}
+        served = receive => served?,
     }
     Ok(())
 }
@@ -189,23 +291,13 @@ fn jitter(interval: Duration, name: &str) -> Duration {
     (interval + Duration::from_millis(offset)).saturating_sub(Duration::from_millis(spread))
 }
 
-async fn reconcile_build(build: Arc<Build>, ctx: Arc<Context>) -> Result<Action, Error> {
-    let namespace = build.namespace().unwrap_or_default();
-    let name = build.name_any();
-    let generation = build.metadata.generation;
-    let builds: Api<Build> = Api::namespaced(ctx.client.clone(), &namespace);
-    let runs_api: Api<BuildRun> = Api::namespaced(ctx.client.clone(), &namespace);
-    let at = now();
-    let mut status = build.status.clone().unwrap_or_default();
-    status.source_mode = Some(SourceMode::PlainGit);
-    let interval = build
-        .spec
-        .triggers
-        .poll_interval
-        .as_deref()
-        .and_then(decide::parse_duration)
-        .unwrap_or(decide::DEFAULT_POLL);
-
+/// The Build's `ClusterBuilder`, recorded in its `BuilderReady` condition.
+async fn find_builder(
+    ctx: &Context,
+    build: &Build,
+    status: &mut BuildStatus,
+    at: Timestamp,
+) -> Result<Option<ClusterBuilder>, Error> {
     let builder = Api::<ClusterBuilder>::all(ctx.client.clone())
         .get_opt(&build.spec.builder_ref)
         .await?;
@@ -225,20 +317,64 @@ async fn reconcile_build(build: Arc<Build>, ctx: Arc<Context>) -> Result<Action,
         reason,
         &message,
         at,
-        generation,
+        build.metadata.generation,
     );
+    Ok(builder)
+}
+
+async fn reconcile_build(build: Arc<Build>, ctx: Arc<Context>) -> Result<Action, Error> {
+    let namespace = build.namespace().unwrap_or_default();
+    let name = build.name_any();
+    let generation = build.metadata.generation;
+    let builds: Api<Build> = Api::namespaced(ctx.client.clone(), &namespace);
+    let runs_api: Api<BuildRun> = Api::namespaced(ctx.client.clone(), &namespace);
+    let at = now();
+    let mut status = build.status.clone().unwrap_or_default();
+    status.source_mode = Some(if build.spec.source.github_app.is_some() {
+        SourceMode::GitHubApp
+    } else {
+        SourceMode::PlainGit
+    });
+    let interval = build
+        .spec
+        .triggers
+        .poll_interval
+        .as_deref()
+        .and_then(decide::parse_duration)
+        .unwrap_or_else(|| decide::default_poll(&build, ctx.settings.webhook.is_some()));
+    let mut requeue = jitter(interval, &name);
+    let mut woken = false;
+    if ctx.wakes.take(&namespace, &name) {
+        match decide::wake_wait(build.status.as_ref(), at) {
+            None => {
+                woken = true;
+                status.last_webhook_at = Some(at.to_string());
+            }
+            Some(wait) => {
+                ctx.wakes.wake(&namespace, &name);
+                requeue = requeue.min(wait);
+            }
+        }
+    }
+
+    let builder = find_builder(&ctx, &build, &mut status, at).await?;
 
     let mut runs = runs_api
         .list(&ListParams::default().fields(&format!("spec.buildRef={name}")))
         .await?
         .items;
     let rebuild = decide::pending_rebuild(&build, &runs).is_some();
-    let resolved = resolve_source(&ctx, &build, &mut status, rebuild, interval, at).await;
+    let resolved = resolve_source(&ctx, &build, &mut status, rebuild || woken, interval, at).await;
 
     if let (Some(sha), Some(_)) = (&resolved, &builder) {
-        let next = decide::next_run(&build, sha, &runs);
+        let found_by = if woken {
+            Trigger::Webhook
+        } else {
+            Trigger::Poll
+        };
+        let next = decide::next_run(&build, sha, &runs, found_by);
         for cancel in &next.cancel {
-            cancel_run(&ctx, &namespace, cancel).await?;
+            cancel_run(&ctx, &build, cancel).await?;
         }
         if let Some(trigger) = next.create {
             let run =
@@ -270,7 +406,7 @@ async fn reconcile_build(build: Arc<Build>, ctx: Arc<Context>) -> Result<Action,
     if let Some(run) = decide::notify_due(&build, &runs) {
         notify_targets(&ctx, &build, run, &image).await?;
     }
-    Ok(Action::requeue(jitter(interval, &name)))
+    Ok(Action::requeue(requeue))
 }
 
 /// Resolves the ref, or reuses the last answer while it is fresh, and sets `SourceReady`.
@@ -278,35 +414,35 @@ async fn resolve_source(
     ctx: &Context,
     build: &Build,
     status: &mut BuildStatus,
-    rebuild: bool,
+    force: bool,
     interval: Duration,
     at: Timestamp,
 ) -> Option<String> {
     let generation = build.metadata.generation;
     let git = &build.spec.source.git;
-    let resolved =
-        if decide::needs_resolve(build.status.as_ref(), generation, rebuild, interval, at) {
-            match git_credentials(ctx, build).await {
-                Err(refusal) => Err(refusal),
-                Ok(credentials) => match ctx
-                    .resolver
-                    .resolve(&git.url, &git.git_ref, credentials.as_ref())
-                    .await
-                {
-                    Ok(resolved) => {
-                        status.last_resolved_at = Some(at.to_string());
-                        status.resolved_ref = Some(resolved.name);
-                        Ok(resolved.commit)
-                    }
-                    Err(e) => Err((e.reason(), e.to_string())),
-                },
-            }
-        } else {
-            status
-                .remote_revision
-                .clone()
-                .ok_or(("ResolveFailed", String::new()))
-        };
+    let resolved = if decide::needs_resolve(build.status.as_ref(), generation, force, interval, at)
+    {
+        match git_credentials(ctx, build).await {
+            Err(refusal) => Err(refusal),
+            Ok(credentials) => match ctx
+                .resolver
+                .resolve(&git.url, &git.git_ref, credentials.as_ref())
+                .await
+            {
+                Ok(resolved) => {
+                    status.last_resolved_at = Some(at.to_string());
+                    status.resolved_ref = Some(resolved.name);
+                    Ok(resolved.commit)
+                }
+                Err(e) => Err((e.reason(), e.to_string())),
+            },
+        }
+    } else {
+        status
+            .remote_revision
+            .clone()
+            .ok_or(("ResolveFailed", String::new()))
+    };
     match &resolved {
         Ok(sha) => {
             status.remote_revision = Some(sha.clone());
@@ -337,8 +473,16 @@ async fn resolve_source(
     resolved.ok()
 }
 
-/// The credentials the `Build`'s `credentialsRef` names, from its namespace.
+/// The credentials the `Build`'s `credentialsRef` names, from its namespace, or a token of its
+/// GitHub App installation.
 async fn git_credentials(ctx: &Context, build: &Build) -> Result<Option<GitCredentials>, Refusal> {
+    if build.spec.source.github_app.is_some() {
+        let token = app_token(ctx, build, Access::Controller).await?;
+        return Ok(Some(GitCredentials::Basic {
+            username: "x-access-token".to_owned(),
+            password: token,
+        }));
+    }
     let Some(secret_ref) = &build.spec.source.credentials_ref else {
         return Ok(None);
     };
@@ -355,6 +499,54 @@ async fn git_credentials(ctx: &Context, build: &Build) -> Result<Option<GitCrede
             )
         })?;
     GitCredentials::from_secret(name, &secret).map(Some)
+}
+
+/// The plain Git credentials the Job mounts; a `githubApp` source gets its token later.
+async fn git_credentials_for_job(
+    ctx: &Context,
+    build: &Build,
+) -> Result<Option<GitCredentials>, Refusal> {
+    if build.spec.source.github_app.is_some() {
+        return Ok(None);
+    }
+    git_credentials(ctx, build).await
+}
+
+/// A token of the `Build`'s installation for its repository, once the namespace is allowed to use
+/// the installation.
+async fn app_token(ctx: &Context, build: &Build, access: Access) -> Result<String, Refusal> {
+    let Some(app) = &build.spec.source.github_app else {
+        return Err(("CredentialsMissing", "no githubApp source".to_owned()));
+    };
+    let namespace = build.namespace().unwrap_or_default();
+    ctx.github.allowed(app.installation_id, &namespace).await?;
+    let key = RepoKey::parse(&build.spec.source.git.url)
+        .map_err(|e| ("UnsupportedURL", e.to_string()))?;
+    ctx.github.token(app.installation_id, &key, access).await
+}
+
+/// Sets the commit status of a `githubApp` source's run. Nothing happens for other sources.
+async fn report(ctx: &Context, build: &Build, sha: &str, state: State, description: &str) {
+    let Some(app) = &build.spec.source.github_app else {
+        return;
+    };
+    let namespace = build.namespace().unwrap_or_default();
+    let Ok(key) = RepoKey::parse(&build.spec.source.git.url) else {
+        return;
+    };
+    if ctx
+        .github
+        .allowed(app.installation_id, &namespace)
+        .await
+        .is_err()
+    {
+        return;
+    }
+    let context = format!("zeabur-builder/{namespace}/{}", build.name_any());
+    let body = github::status_body(state, &context, description);
+    ctx.github
+        .report(app.installation_id, &key, sha, &body)
+        .await;
 }
 
 fn not_found(e: kube::Error) -> Result<(), Error> {
@@ -407,7 +599,8 @@ async fn create_run(
     Ok(api.create(&PostParams::default(), &run).await?)
 }
 
-async fn cancel_run(ctx: &Context, namespace: &str, name: &str) -> Result<(), Error> {
+async fn cancel_run(ctx: &Context, build: &Build, name: &str) -> Result<(), Error> {
+    let namespace = &build.namespace().unwrap_or_default();
     let runs: Api<BuildRun> = Api::namespaced(ctx.client.clone(), namespace);
     let Some(run) = runs.get_opt(name).await? else {
         return Ok(());
@@ -418,6 +611,14 @@ async fn cancel_run(ctx: &Context, namespace: &str, name: &str) -> Result<(), Er
     status.message = Some("a newer run replaced it".to_owned());
     status.completion_time = Some(now().to_string());
     apply_status(&runs, name, &status).await?;
+    report(
+        ctx,
+        build,
+        &run.spec.revision,
+        State::Error,
+        "replaced by a newer commit",
+    )
+    .await;
     Api::<Job>::namespaced(ctx.client.clone(), namespace)
         .delete(
             name,
@@ -506,11 +707,13 @@ async fn finish(
         &status,
     )
     .await?;
-    Api::<Secret>::namespaced(ctx.client.clone(), &namespace)
-        .delete(&format!("{name}-registry"), &DeleteParams::default())
-        .await
-        .map(drop)
-        .or_else(not_found)?;
+    for copy in [format!("{name}-registry"), format!("{name}-git")] {
+        Api::<Secret>::namespaced(ctx.client.clone(), &namespace)
+            .delete(&copy, &DeleteParams::default())
+            .await
+            .map(drop)
+            .or_else(not_found)?;
+    }
     let (type_, reason, note) = match status.phase {
         Some(Phase::Succeeded) => (
             EventType::Normal,
@@ -533,6 +736,17 @@ async fn finish(
     };
     tracing::info!(buildrun = %name, namespace = %namespace, reason, note, "finished");
     record(ctx, &run.object_ref(&()), type_, reason, "Build", &note).await;
+    if let Some(build) = Api::<Build>::namespaced(ctx.client.clone(), &namespace)
+        .get_opt(&run.spec.build_ref)
+        .await?
+    {
+        let state = match (status.phase, status.reason) {
+            (Some(Phase::Succeeded), _) => State::Success,
+            (_, Some(Reason::PlanFailed | Reason::BuildFailed)) => State::Failure,
+            _ => State::Error,
+        };
+        report(ctx, &build, &run.spec.revision, state, &note).await;
+    }
     Ok(Action::await_change())
 }
 
@@ -745,6 +959,33 @@ async fn admit(
     }))
 }
 
+/// Records the Job a run waits on.
+async fn job_created(
+    ctx: &Context,
+    run: &BuildRun,
+    status: BuildRunStatus,
+    pod: &str,
+    tags: Vec<String>,
+) -> Result<(), Error> {
+    let name = run.name_any();
+    let next = BuildRunStatus {
+        phase: Some(Phase::Pending),
+        reason: None,
+        message: None,
+        job_ref: Some(name.clone()),
+        buildkitd_instance: Some(pod.to_owned()),
+        start_time: Some(now().to_string()),
+        tags,
+        ..status
+    };
+    apply_status(
+        &Api::<BuildRun>::namespaced(ctx.client.clone(), &run.namespace().unwrap_or_default()),
+        &name,
+        &next,
+    )
+    .await
+}
+
 async fn start(ctx: &Context, run: &BuildRun, status: BuildRunStatus) -> Result<Action, Error> {
     let namespace = run.namespace().unwrap_or_default();
     let name = run.name_any();
@@ -758,6 +999,10 @@ async fn start(ctx: &Context, run: &BuildRun, status: BuildRunStatus) -> Result<
         message: Some(message),
         ..BuildRunStatus::default()
     };
+    let source_failed = |message: String| BuildRunStatus {
+        reason: Some(Reason::SourceFailed),
+        ..fail(message)
+    };
     if let Err(e) = RepoKey::parse(&build.spec.source.git.url) {
         return finish(ctx, run, fail(e.to_string())).await;
     }
@@ -766,20 +1011,15 @@ async fn start(ctx: &Context, run: &BuildRun, status: BuildRunStatus) -> Result<
         Err(e) => return finish(ctx, run, fail(e.to_string())).await,
     };
 
-    let credentials = match git_credentials(ctx, &build).await {
+    let credentials = match git_credentials_for_job(ctx, &build).await {
         Ok(credentials) => credentials,
         Err(("CredentialsUnreadable", message)) => {
             return pending(ctx, run, status, Reason::InfraError, message).await;
         }
-        Err((_, message)) => {
-            let failed = BuildRunStatus {
-                reason: Some(Reason::SourceFailed),
-                ..fail(message)
-            };
-            return finish(ctx, run, failed).await;
-        }
+        Err((_, message)) => return finish(ctx, run, source_failed(message)).await,
     };
-    let git_auth = match (&credentials, &build.spec.source.credentials_ref) {
+    let git_secret = format!("{name}-git");
+    let mut git_auth = match (&credentials, &build.spec.source.credentials_ref) {
         (Some(credentials), Some(secret)) => credentials.job_auth(&secret.name),
         _ => GitAuth::Anonymous,
     };
@@ -799,6 +1039,19 @@ async fn start(ctx: &Context, run: &BuildRun, status: BuildRunStatus) -> Result<
             format!("waiting for {} to be ready", woken.pod),
         )
         .await;
+    }
+    if build.spec.source.github_app.is_some() {
+        // Minted only now, so a run waiting for a slot does not mint a token every retry.
+        match app_token(ctx, &build, Access::Fetch).await {
+            Ok(token) => ensure_git_secret(ctx, run, &git_secret, token).await?,
+            Err(("ResolveFailed", message)) => {
+                return pending(ctx, run, status, Reason::InfraError, message).await;
+            }
+            Err((_, message)) => return finish(ctx, run, source_failed(message)).await,
+        }
+        git_auth = GitAuth::Basic {
+            secret: &git_secret,
+        };
     }
     tls::put_client(&ctx.client, &namespace, CLIENT_TLS_COPY, &woken.client).await?;
     let registry_secret = format!("{name}-registry");
@@ -826,23 +1079,9 @@ async fn start(ctx: &Context, run: &BuildRun, status: BuildRunStatus) -> Result<
         Err(e) => return finish(ctx, run, fail(e.to_string())).await,
     };
     create_if_missing(&Api::namespaced(ctx.client.clone(), &namespace), &job).await?;
-    let next = BuildRunStatus {
-        phase: Some(Phase::Pending),
-        reason: None,
-        message: None,
-        job_ref: Some(name.clone()),
-        buildkitd_instance: Some(woken.pod.clone()),
-        start_time: Some(now().to_string()),
-        tags: tags.clone(),
-        ..status
-    };
-    apply_status(
-        &Api::<BuildRun>::namespaced(ctx.client.clone(), &namespace),
-        &name,
-        &next,
-    )
-    .await?;
+    job_created(ctx, run, status, &woken.pod, tags).await?;
     tracing::info!(buildrun = %name, namespace = %namespace, buildkitd = %woken.pod, image = %image, "job created");
+    report(ctx, &build, &run.spec.revision, State::Pending, "building").await;
     Ok(Action::await_change())
 }
 
@@ -865,6 +1104,36 @@ async fn registry_auth(ctx: &Context, namespace: &str) -> Result<Option<ByteStri
         .and_then(|mut d| d.remove(".dockerconfigjson"))
         .map(Some)
         .ok_or_else(|| Error::Invalid(format!("Secret `{name}` has no .dockerconfigjson")))
+}
+
+/// The run's installation token, as a `kubernetes.io/basic-auth` Secret owned by the `BuildRun`
+/// and deleted when it finishes.
+async fn ensure_git_secret(
+    ctx: &Context,
+    run: &BuildRun,
+    name: &str,
+    token: String,
+) -> Result<(), Error> {
+    let namespace = run.namespace().unwrap_or_default();
+    let secret = Secret {
+        metadata: ObjectMeta {
+            name: Some(name.to_owned()),
+            namespace: Some(namespace.clone()),
+            labels: Some(BTreeMap::from([
+                (labels::BUILD_RUN.to_owned(), run.name_any()),
+                (labels::MANAGED_BY.to_owned(), labels::MANAGER.to_owned()),
+            ])),
+            owner_references: run.controller_owner_ref(&()).map(|o| vec![o]),
+            ..ObjectMeta::default()
+        },
+        type_: Some("kubernetes.io/basic-auth".to_owned()),
+        string_data: Some(BTreeMap::from([
+            ("username".to_owned(), "x-access-token".to_owned()),
+            ("password".to_owned(), token),
+        ])),
+        ..Secret::default()
+    };
+    create_if_missing(&Api::namespaced(ctx.client.clone(), &namespace), &secret).await
 }
 
 /// The run's copy of the push credentials, owned by the `BuildRun` and deleted when it finishes.

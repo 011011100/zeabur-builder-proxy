@@ -484,7 +484,7 @@
                         "description": "Where the source comes from.",
                         "properties": {
                           "credentialsRef": {
-                            "description": "Credentials for a plain Git server: a `kubernetes.io/ssh-auth` Secret (with `known_hosts`)\nor a `kubernetes.io/basic-auth` one, labelled `builder.zeabur.com/git-credentials: \"true\"`.\nIgnored when a GitHub App covers the repository.",
+                            "description": "Credentials for a plain Git server: a `kubernetes.io/ssh-auth` Secret (with `known_hosts`)\nor a `kubernetes.io/basic-auth` one, labelled `builder.zeabur.com/git-credentials: \"true\"`.",
                             "nullable": true,
                             "properties": {
                               "name": {
@@ -534,12 +534,38 @@
                               "url"
                             ],
                             "type": "object"
+                          },
+                          "githubApp": {
+                            "description": "Reach the repository through an installation of the cluster's GitHub App, which a cluster\nadmin has allowed for this namespace.",
+                            "nullable": true,
+                            "properties": {
+                              "installationId": {
+                                "description": "The installation's id, from `https://github.com/settings/installations/<id>`.",
+                                "format": "int64",
+                                "minimum": 1.0,
+                                "type": "integer"
+                              }
+                            },
+                            "required": [
+                              "installationId"
+                            ],
+                            "type": "object"
                           }
                         },
                         "required": [
                           "git"
                         ],
-                        "type": "object"
+                        "type": "object",
+                        "x-kubernetes-validations": [
+                          {
+                            "message": "set at most one of credentialsRef and githubApp",
+                            "rule": "!(has(self.credentialsRef) && has(self.githubApp))"
+                          },
+                          {
+                            "message": "a githubApp source needs an https URL",
+                            "rule": "!has(self.githubApp) || self.git.url.startsWith('https://')"
+                          }
+                        ]
                       },
                       "suspend": {
                         "description": "Stop automatic builds. `BuildRun`s created by hand still run.",
@@ -554,16 +580,43 @@
                             "type": "boolean"
                           },
                           "pollInterval": {
-                            "description": "How often to check the ref. Default `1m` for plain Git, `10m` as a safety net with a\nGitHub App.",
+                            "description": "How often to check the ref. Default `1m`; `10m`, as a safety net, for a `githubApp`\nsource when the controller receives webhooks.",
                             "maxLength": 32,
                             "nullable": true,
                             "pattern": "^([0-9]{1,6}(\\.[0-9]{1,3})?(ms|s|m|h))+$",
                             "type": "string"
                           },
                           "webhook": {
-                            "description": "GitHub App push events. Default true when a GitHub App covers the repository.",
+                            "description": "Push events from a repository webhook, signed with a secret this `Build` names. A\n`githubApp` source also wakes on the App's push events, without this.",
                             "nullable": true,
-                            "type": "boolean"
+                            "properties": {
+                              "secretRef": {
+                                "description": "The shared secret, in a Secret in the same namespace: the webhook's secret on GitHub,\nGitea, Forgejo and Bitbucket, its secret token or signing token on GitLab, and a\n`whsec_` key for the generic form.",
+                                "properties": {
+                                  "key": {
+                                    "description": "The key.",
+                                    "maxLength": 253,
+                                    "minLength": 1,
+                                    "type": "string"
+                                  },
+                                  "name": {
+                                    "description": "The Secret's name.",
+                                    "maxLength": 253,
+                                    "minLength": 1,
+                                    "type": "string"
+                                  }
+                                },
+                                "required": [
+                                  "key",
+                                  "name"
+                                ],
+                                "type": "object"
+                              }
+                            },
+                            "required": [
+                              "secretRef"
+                            ],
+                            "type": "object"
                           }
                         },
                         "type": "object"

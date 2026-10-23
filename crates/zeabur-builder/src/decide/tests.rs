@@ -4,7 +4,8 @@ use k8s_openapi::api::core::v1::{
 };
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::Time;
 use zeabur_builder_api::build::{
-    BuildSpec, GitSource, NotifyTarget, NotifyType, OutputSpec, PlanPolicy, SourceSpec, TriggerSpec,
+    BuildSpec, GitHubAppSource, GitSource, NotifyTarget, NotifyType, OutputSpec, PlanPolicy,
+    SourceSpec, TriggerSpec,
 };
 use zeabur_builder_api::build_run::BuildRunSpec;
 
@@ -30,6 +31,7 @@ fn build() -> Build {
                     dockerfile: None,
                 },
                 credentials_ref: None,
+                github_app: None,
             },
             builder_ref: "dockerfile".to_owned(),
             output: None,
@@ -139,6 +141,53 @@ fn resolves_once_per_interval_or_new_generation() {
 }
 
 #[test]
+fn a_woken_build_records_the_webhook_as_its_trigger() {
+    let build = build();
+    assert_eq!(
+        next_run(&build, B, &[], Trigger::Webhook).create,
+        Some(Trigger::Webhook)
+    );
+    let runs = [run(
+        "api-1",
+        B,
+        Some(Phase::Succeeded),
+        "2026-10-22T07:00:00Z",
+    )];
+    assert_eq!(
+        next_run(&build, B, &runs, Trigger::Webhook),
+        NextRun::default(),
+        "a delivery for a commit already built builds nothing"
+    );
+}
+
+#[test]
+fn webhooks_wait_out_the_gap_between_polls() {
+    let status = |at: &str| BuildStatus {
+        last_resolved_at: Some(at.to_owned()),
+        ..BuildStatus::default()
+    };
+    assert_eq!(wake_wait(None, now()), None);
+    assert_eq!(
+        wake_wait(Some(&status("2026-10-22T07:59:58Z")), now()),
+        Some(Duration::from_secs(3))
+    );
+    assert_eq!(
+        wake_wait(Some(&status("2026-10-22T07:59:55Z")), now()),
+        None
+    );
+    assert_eq!(wake_wait(Some(&BuildStatus::default()), now()), None);
+}
+
+#[test]
+fn app_sources_poll_less_when_webhooks_arrive() {
+    let mut build = build();
+    assert_eq!(default_poll(&build, true), DEFAULT_POLL);
+    build.spec.source.github_app = Some(GitHubAppSource { installation_id: 1 });
+    assert_eq!(default_poll(&build, true), APP_POLL);
+    assert_eq!(default_poll(&build, false), DEFAULT_POLL);
+}
+
+#[test]
 fn a_new_commit_replaces_the_running_build() {
     let build = build();
     let runs = [run(
@@ -148,13 +197,16 @@ fn a_new_commit_replaces_the_running_build() {
         "2026-10-22T07:00:00Z",
     )];
     assert_eq!(
-        next_run(&build, B, &runs),
+        next_run(&build, B, &runs, Trigger::Poll),
         NextRun {
             create: Some(Trigger::Poll),
             cancel: vec!["api-1".to_owned()]
         }
     );
-    assert_eq!(next_run(&build, A, &runs), NextRun::default());
+    assert_eq!(
+        next_run(&build, A, &runs, Trigger::Poll),
+        NextRun::default()
+    );
 }
 
 #[test]
@@ -167,13 +219,25 @@ fn queue_waits_and_failures_are_not_retried() {
         Some(Phase::Building),
         "2026-10-22T07:00:00Z",
     )];
-    assert_eq!(next_run(&build, B, &running), NextRun::default());
+    assert_eq!(
+        next_run(&build, B, &running, Trigger::Poll),
+        NextRun::default()
+    );
     let failed = [run("api-1", A, Some(Phase::Failed), "2026-10-22T07:00:00Z")];
-    assert_eq!(next_run(&build, A, &failed), NextRun::default());
-    assert_eq!(next_run(&build, B, &failed).create, Some(Trigger::Poll));
+    assert_eq!(
+        next_run(&build, A, &failed, Trigger::Poll),
+        NextRun::default()
+    );
+    assert_eq!(
+        next_run(&build, B, &failed, Trigger::Poll).create,
+        Some(Trigger::Poll)
+    );
 
     build.spec.suspend = true;
-    assert_eq!(next_run(&build, B, &failed), NextRun::default());
+    assert_eq!(
+        next_run(&build, B, &failed, Trigger::Poll),
+        NextRun::default()
+    );
 }
 
 #[test]
@@ -183,7 +247,7 @@ fn a_built_commit_is_not_built_again_after_pruning() {
         latest_revision: Some(A.to_owned()),
         ..BuildStatus::default()
     });
-    assert_eq!(next_run(&build, A, &[]), NextRun::default());
+    assert_eq!(next_run(&build, A, &[], Trigger::Poll), NextRun::default());
 }
 
 fn rebuild(mut meta: ObjectMeta, value: &str) -> ObjectMeta {
@@ -201,19 +265,22 @@ fn a_new_rebuild_value_builds_the_commit_again() {
         ..BuildStatus::default()
     });
     let mut first = run("api-1", A, Some(Phase::Succeeded), "2026-10-22T07:00:00Z");
-    assert_eq!(next_run(&build, A, &[first.clone()]), NextRun::default());
+    assert_eq!(
+        next_run(&build, A, &[first.clone()], Trigger::Poll),
+        NextRun::default()
+    );
 
     build.metadata = rebuild(build.metadata, "1");
     assert_eq!(pending_rebuild(&build, &[first.clone()]), Some("1"));
     assert_eq!(
-        next_run(&build, A, &[first.clone()]),
+        next_run(&build, A, &[first.clone()], Trigger::Poll),
         NextRun {
             create: Some(Trigger::Manual),
             cancel: Vec::new()
         }
     );
     assert_eq!(
-        next_run(&build, A, &[]).create,
+        next_run(&build, A, &[], Trigger::Poll).create,
         Some(Trigger::Manual),
         "after pruning too"
     );
@@ -222,12 +289,18 @@ fn a_new_rebuild_value_builds_the_commit_again() {
     let by_hand = run("api-2", A, Some(Phase::Failed), "2026-10-22T07:30:00Z");
     let runs = [first, by_hand];
     assert_eq!(pending_rebuild(&build, &runs), None);
-    assert_eq!(next_run(&build, A, &runs), NextRun::default());
+    assert_eq!(
+        next_run(&build, A, &runs, Trigger::Poll),
+        NextRun::default()
+    );
 
     build.metadata = rebuild(build.metadata, "2");
-    assert_eq!(next_run(&build, A, &runs).create, Some(Trigger::Manual));
     assert_eq!(
-        next_run(&build, B, &runs).create,
+        next_run(&build, A, &runs, Trigger::Poll).create,
+        Some(Trigger::Manual)
+    );
+    assert_eq!(
+        next_run(&build, B, &runs, Trigger::Poll).create,
         Some(Trigger::Poll),
         "a new commit answers the rebuild too"
     );
@@ -241,7 +314,7 @@ fn a_rebuild_follows_concurrency_and_waits_for_suspend() {
     running.metadata = rebuild(running.metadata, "1");
     let runs = [running.clone()];
     assert_eq!(
-        next_run(&build, A, &runs),
+        next_run(&build, A, &runs, Trigger::Poll),
         NextRun {
             create: Some(Trigger::Manual),
             cancel: vec!["api-1".to_owned()]
@@ -249,7 +322,10 @@ fn a_rebuild_follows_concurrency_and_waits_for_suspend() {
     );
 
     build.spec.concurrency = Concurrency::Queue;
-    assert_eq!(next_run(&build, A, &runs), NextRun::default());
+    assert_eq!(
+        next_run(&build, A, &runs, Trigger::Poll),
+        NextRun::default()
+    );
     assert_eq!(pending_rebuild(&build, &runs), Some("2"));
 
     build.spec.suspend = true;
@@ -259,9 +335,15 @@ fn a_rebuild_follows_concurrency_and_waits_for_suspend() {
         phase: Some(Phase::Succeeded),
         ..BuildRunStatus::default()
     });
-    assert_eq!(next_run(&build, A, &[done.clone()]), NextRun::default());
+    assert_eq!(
+        next_run(&build, A, &[done.clone()], Trigger::Poll),
+        NextRun::default()
+    );
     build.spec.suspend = false;
-    assert_eq!(next_run(&build, A, &[done]).create, Some(Trigger::Manual));
+    assert_eq!(
+        next_run(&build, A, &[done], Trigger::Poll).create,
+        Some(Trigger::Manual)
+    );
 }
 
 #[test]
