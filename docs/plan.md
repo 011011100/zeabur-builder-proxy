@@ -208,6 +208,9 @@ type TriggerSpec struct {
     Webhook *bool `json:"webhook,omitempty"`
     // plain Git 預設 1m；GitHub App 模式作為安全網，預設 10m
     PollInterval *metav1.Duration `json:"pollInterval,omitempty"`
+    // 〔變更〕 webhook 改為 `{secretRef: {name, key}}`：每個 Build 用自己 namespace 裡的 Secret
+    // 驗證 plain Git 的 webhook。GitHub App 的 Build 不需要，用 App 的 webhook secret。
+    // pollInterval 只有在 controller 有開 webhook 接收端時，App 模式才預設 10m。
     // base image digest 變更時自動重建（M3）
     OnBaseImageChange bool `json:"onBaseImageChange,omitempty"`
 }
@@ -326,6 +329,8 @@ BuildRun 的 ownerReference 指向 Build，Job 的 ownerReference 指向 BuildRu
 
 觸發來源：Build 本身的變更、owned BuildRun 的變更、webhook 喚醒、poller 喚醒（**〔變更〕** 透過 `Controller::reconcile_on` 的 channel，取代 `source.Channel`／`GenericEvent`）、annotation 變更。
 
+**〔變更〕** kube 4.2 的 `reconcile_on` 要開 unstable feature，所以不用。webhook 接收端把 Build 記進記憶體裡的待喚醒集合，再 patch `status.lastWebhookAt` 觸發 watch；reconcile 看到 Build 在集合裡就強制 resolve，這個 run 的 trigger 記為 `webhook`。距離上次 resolve 不到 5 秒的喚醒會延到 5 秒後，重送的 delivery 最多只多一次 `ls-remote`。
+
 流程：
 
 1. 解析 ClusterBuilder → 設定 `BuilderReady`。
@@ -356,7 +361,7 @@ BuildRun 的 ownerReference 指向 Build，Job 的 ownerReference 指向 BuildRu
    - **〔變更〕** 把該 namespace 的 client 憑證寫進 build namespace 的 `zeabur-builder-buildkit-client` Secret（§7.3）。
    - 若需要短期憑證（GitHub token、LLM key 副本），建立 BuildRun 擁有的 Secret。
    - 建立 Job（§6.1）。
-   - GitHub App 模式下建立 check run，狀態為 `in_progress`。
+   - GitHub App 模式下建立 check run，狀態為 `in_progress`。**〔變更〕** 改用 commit status（`pending`），context 為 `zeabur-builder/<namespace>/<build>`。status 一次呼叫就好，不必記住 check run 的 id，也足以表達成功或失敗；被新 commit 取代的 run 回報 `error`。
 2. **Planning／Building**：從 Job Pod 的 init container 狀態推導目前階段；不需要另外溝通管道。
 3. **完成**：讀取 build 容器的 termination message（§6.4），寫入 digest、tags、plan、base images、各階段耗時、cache 統計。
    - 成功：更新 Build 的 `latestRevision`、`latestImage`、`pinnedPlanDigest`；發出 Kubernetes Event；送出 notify（§9）；check run 設為 `success`；記錄指標。
@@ -379,6 +384,14 @@ Job 消失或 Pod 被驅逐時，標記 `InfraError`，**不自動重試**（v1�
 - 對每個符合的 Build 更新 `status.lastWebhookAt`，並把 key 送進喚醒 channel。
 - **webhook 只是喚醒訊號，不攜帶真相**（ADR-3）。
 - **只有 leader 處理 webhook**：非 leader 的副本收到時，回 503 讓 GitHub 記錄失敗，或者只做喚醒（喚醒本身是冪等的）。v1 只跑單一副本，所以可以先不處理這個情況，但程式碼要寫成之後擴充不必大改的形式。
+
+**〔變更〕** 實作（`crates/zeabur-builder/src/webhook.rs`）：
+
+- 路徑 `<prefix>/<provider>`，provider 為 `github`、`github-app`、`gitlab`、`gitea`、`forgejo`、`bitbucket`、`generic`（Standard Webhooks）。prefix 預設 `/hooks`，接收端預設關閉（`--webhook-addr`）。chart 的 Service、Ingress、HTTPRoute 也預設關閉。
+- 簽章：plain Git 用 Build 的 `triggers.webhook.secretRef`，App 用 App Secret 的 `webhook-secret`。只拿 payload 裡的 repo 正規化後找候選 Build，再逐一試它們的 secret；repo 不認得與簽章錯誤回同樣的 401。
+- 去重以 provider、delivery id 與 Build 為 key（GitLab 同一事件送到多個 webhook 時 UUID 相同）。Standard Webhooks 另外檢查時間戳，容許 5 分鐘。
+- 限制：全域 token bucket（預設每秒 10、burst 50）、body 上限（預設 1 MiB）、讀取逾時 10 秒、同時 64 個連線。驗證完立即回 202。
+- 只取 repo 與 ref；不使用 payload 裡的 URL、SHA 或 ref 去 fetch。pull request 事件目前只回 202 並忽略，之後做 preview 時另外加一種 event。
 
 ### 4.4 Poller
 
@@ -414,6 +427,13 @@ type SourceProvider interface {
 
 **設定**（controller 層級的 ConfigMap 加 Secret，不做成 CRD）：支援多個 App，每個 App 包含 `appID`、`privateKey`、`webhookSecret`、`baseURL`（GHES 使用）。
 
+**〔變更〕** v1 只支援一個 App，Build 明確寫 `source.githubApp.installationId`，不靠 `Matches` 猜：
+
+- App Secret（預設 `github-app`，controller 的 namespace）：`app-id`、`client-id`、`private-key`、`webhook-secret`，GHES 另加 `api-url`。由管理員以 `zeabur-builder github-app create` 走 manifest flow 產生。
+- 授權 ConfigMap（預設 `github-app-installations`）：`"<installationId>": "team-a, team-b"` 或 `"*"`。沒列在裡面的 namespace 不能用該 installation，避免一個 team 借用別的 org 的安裝。
+- 權限：Contents: Read、Metadata: Read、Commit statuses: Read & write；事件只訂 `push`。之後做 preview 要加 Pull requests 權限，各 org 要重新同意。
+- token：controller 自己 resolve 與回報 status 用的 token（contents read、statuses write）快取到過期前 5 分鐘；Job 用的 token 只有 contents read，每個 run 在 buildkitd ready 後才產生，寫成 BuildRun 擁有的 Secret，run 結束就刪。
+
 **App 權限（最小化）**
 - Repository permissions：Contents: Read、Metadata: Read、Checks: Read & write
 - 訂閱事件：`push`
@@ -429,6 +449,8 @@ type SourceProvider interface {
 ~~建議使用的套件：`github.com/google/go-github` 加上 `github.com/bradleyfalzon/ghinstallation`。~~
 
 **〔變更〕** 使用 `octocrab` 0.54.5：支援 App JWT、指定 `repositories` 與 `permissions` 的 installation token，以及 Checks API。
+
+**〔變更〕** 不用 octocrab。只需要兩個 API（installation token 與 commit status），直接用現有的 hyper client；JWT 以 aws-lc-rs 簽 RS256，維持 cargo-deny 只允許 aws-lc-rs 的規則。
 
 ### 5.3 Plain Git provider
 

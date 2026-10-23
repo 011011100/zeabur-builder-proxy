@@ -197,7 +197,9 @@ registry-push-poc-c with push credentials in builder-system`），也沒有建�
 
 - Ready 在第一個 run 結束前都是 `Unknown`（`NotBuilt`）；ref 不存在只顯示在 `SourceReady`。
 - Git：`credentialsRef`（token 或 deploy key，plan §5.3）只有單元測試與本機 SSH server 的測試涵蓋，還沒在叢集上跑過。
-- 觸發：每個 Build 各自 polling 與 `rebuild` annotation；沒有 webhook、沒有 repo 層級的 poller。
+- 觸發：每個 Build 各自 polling 與 `rebuild` annotation；沒有 repo 層級的 poller。push webhook
+  （GitHub、GitLab、Gitea／Forgejo、Bitbucket、Standard Webhooks）只有單元測試涵蓋，還沒接過真的
+  Git server。
   annotation 是在上面這些結果之後加的，只有單元測試涵蓋。
 - Controller：單一 replica，沒有 leader election。幾個 run 同時 reconcile 時，namespace 的並行數可能
   超過上限一個。縮到 0 與新 run 開始之間也可能互相競爭；新 run 的建立時間算作活動，所以窗口很小。
@@ -213,4 +215,4 @@ registry-push-poc-c with push credentials in builder-system`），也沒有建�
 - 通知：只支援 `keel`，在上面這些結果之後加的；`flux-receiver` 與 `generic` 只記錄 log 後略過；
   沒有 `notify_errors_total` 指標。
 - sandbox runtime（`--buildkitd-runtime-class`）沒有在 gVisor 或 Kata 上試過。
-- 不在範圍內：zbplan（M4）、GitHub App。
+- 不在範圍內：zbplan（M4）。GitHub App 已實作，只有單元測試，還沒在真的 GitHub 上建立過。

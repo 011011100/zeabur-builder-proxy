@@ -5,7 +5,8 @@ Git with BuildKit, and hands the result to Flux, Keel or Argo CD for rollout.
 
 > **Status: proof of concept.** The controller builds Dockerfile and Railpack images from polled
 > Git repositories, public or private with a token or deploy key, on a test cluster
-> ([proof of concept](docs/poc.md)); webhooks, zbplan and rollout integrations are not built yet.
+> ([proof of concept](docs/poc.md)). Push webhooks and the GitHub App are built and unit-tested
+> but have not met a real Git server; zbplan and most rollout integrations are not built yet.
 > See the [plan](docs/plan.md) (Traditional Chinese) and the
 > [feasibility study](docs/feasibility.md).
 
@@ -26,8 +27,9 @@ branch that was.
 - **Three ways to build.** Your Dockerfile, [Railpack](https://railpack.com) for repositories
   without one, or [zbplan](https://github.com/zeabur/zbplan), which writes a Dockerfile with an
   LLM once and reuses it.
-- **GitHub App or any Git server.** Push events start builds and report back as checks; plain Git
-  repositories are polled.
+- **GitHub App or any Git server.** Pushes from GitHub, GitLab, Gitea, Forgejo or Bitbucket start
+  builds at once; without a webhook, repositories are polled. Through the GitHub App, private
+  repositories need no token, and each commit gets a status.
 - **Tags rollout tools can sort.** `main-1761058800-3e1a9c2`: one per build, newest last, plus the
   digest in `status.latestImage`.
 - **One buildkitd per namespace.** Its own cache, certificate authority and registry path, so
@@ -55,6 +57,47 @@ kubectl get buildruns
 NAME        BUILD   PHASE       REASON   STARTED   FINISHED   AGE
 api-x7k2p   api     Succeeded            2m        30s        2m
 ```
+
+## Push webhooks
+
+A delivery only says "look now": the controller takes the repository and branch from it, checks
+the signature, and resolves the ref itself. Enable the receiver in the chart
+(`deploy/chart`, `webhooks.enabled`, then `webhooks.ingress` or `webhooks.httpRoute`), and give
+each `Build` a secret:
+
+```yaml
+spec:
+  triggers:
+    webhook: {secretRef: {name: api-webhook, key: secret}}
+```
+
+Point the repository's webhook at `https://<host>/hooks/<provider>`, where `<provider>` is
+`github`, `gitlab`, `gitea`, `forgejo`, `bitbucket` or `generic`
+([Standard Webhooks](https://www.standardwebhooks.com/)), with the same secret. Polling stays on.
+
+## GitHub App
+
+A cluster admin creates the App once and stores it in the controller's namespace:
+
+```sh
+zeabur-builder github-app create --webhook-url https://<host>/hooks/github-app \
+  > github-app.json   # opens the manifest flow on 127.0.0.1
+kubectl -n builder-system apply -f github-app.json
+kubectl -n builder-system create configmap github-app-installations \
+  --from-literal=12345678=team-a,team-b   # installation id: namespaces allowed to use it
+```
+
+A `Build` then names the installation instead of a token:
+
+```yaml
+spec:
+  source:
+    git: {url: https://github.com/acme/private-api}
+    githubApp: {installationId: 12345678}
+```
+
+The controller mints a token for one repository per use: read-only for the build Job, and
+commit statuses for itself. With webhooks on, such Builds poll every 10 minutes as a safety net.
 
 ## Try the skeleton
 
