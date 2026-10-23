@@ -9,6 +9,11 @@
 //! | `plan` (init) | planner image | Railpack or zbplan writes `/workspace/plan`; absent for `dockerfile` |
 //! | `build` | job image | `zeabur-builder-job -- buildctl build …` |
 //!
+//! A Railpack build runs `buildctl` twice: Railpack's image, pushed by digest only, then a
+//! Dockerfile build `FROM` it that makes it run as a non-root user and pushes the tags
+//! ([`zeabur_builder_core::railpack`]). The first leaves an untagged manifest in the repository
+//! for the registry's garbage collection.
+//!
 //! The job image is `moby/buildkit` (for `buildctl` and `git`) plus `zeabur-builder-job`, a small
 //! static wrapper that runs the `buildctl` command it is given with `--progress rawjson`, prints
 //! the progress for people, counts cached steps, reads the image digest from `--metadata-file`
@@ -367,21 +372,15 @@ fn plan_container(inputs: &JobInputs<'_>) -> Result<Option<Container>, JobError>
 
 fn build_container(inputs: &JobInputs<'_>, repo: &RepoKey) -> Result<Container, JobError> {
     let context = context_path(inputs);
+    let non_root = non_root(inputs.builder);
     let mut wrapper = vec!["zeabur-builder-job".to_owned()];
-    let mut buildctl = vec![
-        "buildctl".to_owned(),
-        "--addr".to_owned(),
-        inputs.buildkitd_addr.to_owned(),
-        "--tlsdir".to_owned(),
-        BUILDKIT_TLS.to_owned(),
-        "build".to_owned(),
-        "--progress".to_owned(),
-        "rawjson".to_owned(),
-        "--metadata-file".to_owned(),
-        format!("{OUT}/metadata.json"),
-        "--local".to_owned(),
-        format!("context={context}"),
-    ];
+    let metadata = if non_root {
+        format!("{OUT}/railpack-metadata.json")
+    } else {
+        format!("{OUT}/metadata.json")
+    };
+    let mut buildctl = buildctl(inputs, &metadata);
+    buildctl.extend(["--local".to_owned(), format!("context={context}")]);
     frontend_args(inputs, &context, &mut wrapper, &mut buildctl)?;
     for var in &inputs.build.spec.env {
         buildctl.extend([
@@ -389,9 +388,21 @@ fn build_container(inputs: &JobInputs<'_>, repo: &RepoKey) -> Result<Container, 
             format!("id={},env={SECRET_ENV_PREFIX}{}", var.name, var.name),
         ]);
     }
-    buildctl.extend(output_args(inputs, repo));
+    if non_root {
+        buildctl.extend(output(inputs, repo, &[inputs.image.to_owned()], true));
+    } else {
+        buildctl.extend(output(inputs, repo, &tagged(inputs), false));
+    }
+    buildctl.extend(cache_args(inputs));
+    if non_root {
+        wrapper.extend(["--non-root".to_owned(), PLAN.to_owned()]);
+    }
     wrapper.push("--".to_owned());
     wrapper.extend(buildctl.iter().map(|arg| literal(arg)));
+    if non_root {
+        wrapper.push("--then".to_owned());
+        wrapper.extend(non_root_build(inputs, repo).iter().map(|arg| literal(arg)));
+    }
 
     let mut env_vars = vec![env("HOME", "/tmp"), env("DOCKER_CONFIG", REGISTRY_AUTH)];
     env_vars.extend(inputs.build.spec.env.iter().map(secret_env));
@@ -408,6 +419,48 @@ fn build_container(inputs: &JobInputs<'_>, repo: &RepoKey) -> Result<Container, 
         termination_message_path: Some("/dev/termination-log".to_owned()),
         ..hardened()
     })
+}
+
+/// Whether the build ends with [`non_root_build`]: Railpack's frontend writes an image that runs
+/// as root ([`zeabur_builder_core::railpack`]).
+fn non_root(builder: &ClusterBuilderSpec) -> bool {
+    builder.kind == BuilderType::Railpack && builder.frontend.kind == FrontendType::Gateway
+}
+
+/// `buildctl … build` up to the frontend.
+fn buildctl(inputs: &JobInputs<'_>, metadata: &str) -> Vec<String> {
+    vec![
+        "buildctl".to_owned(),
+        "--addr".to_owned(),
+        inputs.buildkitd_addr.to_owned(),
+        "--tlsdir".to_owned(),
+        BUILDKIT_TLS.to_owned(),
+        "build".to_owned(),
+        "--progress".to_owned(),
+        "rawjson".to_owned(),
+        "--metadata-file".to_owned(),
+        metadata.to_owned(),
+    ]
+}
+
+/// The second build: the Railpack image, pushed by digest only, made to run as
+/// [`IMAGE_UID`](zeabur_builder_core::railpack::IMAGE_UID) by the Dockerfile `zeabur-builder-job
+/// --non-root` writes, and pushed with the tags. `{digest}` is the first build's digest.
+fn non_root_build(inputs: &JobInputs<'_>, repo: &RepoKey) -> Vec<String> {
+    let dir = format!("{PLAN}/non-root");
+    let mut buildctl = buildctl(inputs, &format!("{OUT}/metadata.json"));
+    buildctl.extend([
+        "--frontend".to_owned(),
+        "dockerfile.v0".to_owned(),
+        "--local".to_owned(),
+        format!("context={dir}"),
+        "--local".to_owned(),
+        format!("dockerfile={dir}"),
+        "--opt".to_owned(),
+        format!("context:app=docker-image://{}@{{digest}}", inputs.image),
+    ]);
+    buildctl.extend(output(inputs, repo, &tagged(inputs), false));
+    buildctl
 }
 
 /// `--frontend`, the plan's location and the frontend options.
@@ -467,26 +520,40 @@ fn frontend_args(
     Ok(())
 }
 
-/// `--output` and the registry cache.
-fn output_args(inputs: &JobInputs<'_>, repo: &RepoKey) -> [String; 6] {
-    let names: Vec<String> = inputs
+/// `<image>:<tag>` for each tag.
+fn tagged(inputs: &JobInputs<'_>) -> Vec<String> {
+    inputs
         .tags
         .iter()
         .map(|tag| format!("{}:{tag}", inputs.image))
-        .collect();
+        .collect()
+}
+
+/// `--output`, pushing `names`; `by_digest` pushes the image without a tag.
+fn output(
+    inputs: &JobInputs<'_>,
+    repo: &RepoKey,
+    names: &[String],
+    by_digest: bool,
+) -> [String; 2] {
     // `--output` is one CSV record. The source annotation is the repository key, never the URL,
     // which may carry a token (`https://token@host/…`).
-    let output = [
+    let mut output = vec![
         "type=image".to_owned(),
         format!("name={}", names.join(",")),
         "push=true".to_owned(),
+    ];
+    if by_digest {
+        output.push("push-by-digest=true".to_owned());
+    }
+    output.extend([
         "oci-mediatypes=true".to_owned(),
         format!("annotation.org.opencontainers.image.source=https://{repo}"),
         format!(
             "annotation.org.opencontainers.image.revision={}",
             inputs.build_run.spec.revision
         ),
-    ];
+    ]);
     [
         "--output".to_owned(),
         output
@@ -494,6 +561,12 @@ fn output_args(inputs: &JobInputs<'_>, repo: &RepoKey) -> [String; 6] {
             .map(|field| csv_field(field))
             .collect::<Vec<_>>()
             .join(","),
+    ]
+}
+
+/// The registry cache.
+fn cache_args(inputs: &JobInputs<'_>) -> [String; 4] {
+    [
         "--import-cache".to_owned(),
         format!("type=registry,ref={}:buildcache", inputs.image),
         "--export-cache".to_owned(),

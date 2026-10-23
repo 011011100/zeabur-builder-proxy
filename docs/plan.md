@@ -503,6 +503,12 @@ volumes:
 
 Railpack 參考：<https://railpack.com/guides/running-railpack-in-production/>、<https://railpack.com/reference/frontend>
 
+**〔新增〕Railpack image 以非 root 執行**：Railpack 的 frontend 寫出的 image 沒有 `USER`，以 root 執行，在 Pod Security `restricted`（`runAsNonRoot`）下無法啟動。Railpack 建置因此分兩次 `buildctl`：
+1. build 容器先改寫 `railpack-plan.json`：deploy 從哪些 step 複製檔案，就在那些 step 最後加一個指令，把 `/app` 與 `/root` 交給 UID 1000（BuildKit 的 copy 保留來源的擁有者），image 不會多一份改了擁有者的檔案。這次只以 digest 推送（`push-by-digest=true`），不打 tag。
+2. 第二次以 `dockerfile.v0` 建置 `FROM` 第一次的 image（named context `app`）：把 `/app`、`/root` 下仍屬 root 的項目（copy 建立的目錄、base image 的 `/root`）交給 1000，在 `/etc/passwd`、`/etc/group` 加上 `app`，設 `HOME=/root` 與 `USER 1000:1000`，推送 tag。這一層只有幾 kB。
+
+第一次推送的 manifest 沒有 tag，留給 registry 的 garbage collection。
+
 ~~`[待驗證]` zbplan 的輸出、exit code、輪數與 token、LLM 設定、授權~~ **〔已驗證〕**（細節見 feasibility.md）：
 - Dockerfile 輸出到 stdout，log 在 stderr；plan 容器以 `zbplan … > /workspace/plan/Dockerfile` 擷取。
 - 成功 exit 0，任何失敗 exit 1。

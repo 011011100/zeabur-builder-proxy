@@ -33,6 +33,8 @@ branch that was.
 - **One buildkitd per namespace.** Its own cache, certificate authority and registry path, so
   teams sharing a cluster don't share builds. It keeps its cache between builds, so
   `RUN --mount=type=cache` survives, and scales to zero when idle.
+- **Images that run without root.** Railpack's images run as uid 1000 with `/app` theirs, so
+  they start under Pod Security `restricted`.
 - **Small.** One controller, a buildkitd per building namespace, one Job per build. No Tekton, no
   admission webhook server.
 
