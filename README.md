@@ -1,3 +1,8 @@
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/images/cover-dark.avif">
+  <img alt="Zeabur Builder: push a commit, get an image digest; a Build for a Git repository and the tag and digest of the image it built" src="docs/images/cover-light.avif">
+</picture>
+
 # Zeabur Builder
 
 **Push a commit, get an image digest.** A Kubernetes operator that builds container images from
