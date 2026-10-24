@@ -89,7 +89,7 @@ pub(crate) struct CreateArgs {
 pub(crate) fn manifest(name: &str, webhook_url: &str, redirect_url: Option<&str>) -> Value {
     let mut manifest = json!({
         "name": name,
-        "url": "https://github.com/zeabur/builder",
+        "url": "https://github.com/zeabur-oss/builder",
         "description": "Builds container images of pushed commits with Zeabur Builder.",
         "hook_attributes": {"url": webhook_url, "active": true},
         "public": false,

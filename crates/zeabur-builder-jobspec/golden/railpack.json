@@ -128,7 +128,7 @@
                 }
               }
             ],
-            "image": "ghcr.io/zeabur/builder-job:v0.0.1",
+            "image": "ghcr.io/zeabur-oss/builder-job:v0.0.1",
             "name": "build",
             "securityContext": {
               "allowPrivilegeEscalation": false,
@@ -194,7 +194,7 @@
                 "value": "https:http:ssh:git"
               }
             ],
-            "image": "ghcr.io/zeabur/builder-job:v0.0.1",
+            "image": "ghcr.io/zeabur-oss/builder-job:v0.0.1",
             "name": "fetch",
             "securityContext": {
               "allowPrivilegeEscalation": false,
@@ -262,7 +262,7 @@
                 }
               }
             ],
-            "image": "ghcr.io/zeabur/builder-railpack:v0.43.0",
+            "image": "ghcr.io/zeabur-oss/builder-railpack:v0.43.0",
             "name": "plan",
             "securityContext": {
               "allowPrivilegeEscalation": false,

@@ -58,7 +58,7 @@ functions of their inputs, so they are tested without a cluster.
 
 ## Toolchain, lints and dependencies
 
-Shared with [Zeabur Identity](https://github.com/zeabur/identity):
+Shared with [Zeabur Identity](https://github.com/zeabur-oss/identity):
 
 - `rust-toolchain.toml` is the only place the compiler version is set; `scripts/bump-toolchain.sh`
   also updates the hash in `flake.nix`.

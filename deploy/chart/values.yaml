@@ -1,7 +1,7 @@
 # Apply the CRDs first: kubectl apply --server-side -f deploy/crds.json
 
 image:
-  repository: ghcr.io/zeabur/builder
+  repository: ghcr.io/zeabur-oss/builder
   tag: ""
   pullPolicy: IfNotPresent
 

@@ -79,7 +79,7 @@ fn railpack() -> ClusterBuilderSpec {
     ClusterBuilderSpec {
         kind: BuilderType::Railpack,
         planner: Some(PlannerSpec {
-            image: format!("ghcr.io/zeabur/builder-railpack:{RAILPACK}"),
+            image: format!("ghcr.io/zeabur-oss/builder-railpack:{RAILPACK}"),
             deterministic: true,
             needs_buildkit: false,
             credentials_ref: None,
@@ -98,7 +98,7 @@ fn zbplan() -> ClusterBuilderSpec {
     ClusterBuilderSpec {
         kind: BuilderType::Zbplan,
         planner: Some(PlannerSpec {
-            image: "ghcr.io/zeabur/builder-zbplan:v0.3.0".to_owned(),
+            image: "ghcr.io/zeabur-oss/builder-zbplan:v0.3.0".to_owned(),
             deterministic: false,
             needs_buildkit: true,
             credentials_ref: Some(SecretRef {
@@ -131,7 +131,7 @@ fn inputs<'a>(
         image: "registry.internal/team-a/api",
         tags,
         buildkitd_addr: "tcp://buildkitd-team-a-0.buildkitd-team-a.builder-system.svc:1234",
-        job_image: "ghcr.io/zeabur/builder-job:v0.0.1",
+        job_image: "ghcr.io/zeabur-oss/builder-job:v0.0.1",
         git_auth,
         planner_credentials: None,
         buildkit_tls_secret: "zeabur-builder-buildkit-client",

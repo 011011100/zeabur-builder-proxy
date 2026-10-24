@@ -805,7 +805,7 @@ fairness:
 job:
   ttlSecondsAfterFinished: 600
   defaultTimeout: 60m
-  buildImage: ghcr.io/zeabur/builder-job:<version>
+  buildImage: ghcr.io/zeabur-oss/builder-job:<version>
 logs:
   urlTemplate: ""                            # 選用
 metrics:

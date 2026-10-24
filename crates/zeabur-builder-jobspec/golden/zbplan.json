@@ -81,7 +81,7 @@
                 "value": "/etc/zeabur-builder/registry"
               }
             ],
-            "image": "ghcr.io/zeabur/builder-job:v0.0.1",
+            "image": "ghcr.io/zeabur-oss/builder-job:v0.0.1",
             "name": "build",
             "securityContext": {
               "allowPrivilegeEscalation": false,
@@ -147,7 +147,7 @@
                 "value": "https:http:ssh:git"
               }
             ],
-            "image": "ghcr.io/zeabur/builder-job:v0.0.1",
+            "image": "ghcr.io/zeabur-oss/builder-job:v0.0.1",
             "name": "fetch",
             "securityContext": {
               "allowPrivilegeEscalation": false,
@@ -200,7 +200,7 @@
                 }
               }
             ],
-            "image": "ghcr.io/zeabur/builder-zbplan:v0.3.0",
+            "image": "ghcr.io/zeabur-oss/builder-zbplan:v0.3.0",
             "name": "plan",
             "securityContext": {
               "allowPrivilegeEscalation": false,
