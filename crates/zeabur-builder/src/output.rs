@@ -3,7 +3,7 @@
 use std::io::Write as _;
 use std::process::ExitCode;
 
-/// Writes a line to stdout. A closed pipe (`| head`) is a failure, not a panic.
+/// Writes a line to stdout. A closed pipe (`| head`) is a failure and does not panic.
 pub(crate) fn stdout_line(text: &str) -> ExitCode {
     let mut out = std::io::stdout().lock();
     match writeln!(out, "{text}").and_then(|()| out.flush()) {

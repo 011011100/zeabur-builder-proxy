@@ -1,4 +1,4 @@
-//! The webhook receiver (plan §4.3): `POST <prefix>/<provider>` wakes the `Build`s a push concerns.
+//! The webhook receiver: `POST <prefix>/<provider>` wakes the `Build`s a push concerns.
 //!
 //! A delivery is read for one thing only: which repository and refs it names
 //! ([`zeabur_builder_core::hook`]). The `Build`s that follow that repository and name a webhook

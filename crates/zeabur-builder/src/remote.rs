@@ -30,7 +30,7 @@ const USER_AGENT: &str = concat!("git/zeabur-builder-", env!("CARGO_PKG_VERSION"
 #[derive(Debug, Error)]
 pub(crate) enum ResolveError {
     /// Neither an HTTP nor an SSH URL.
-    #[error("only http, https and ssh repositories can be polled, not `{0}`")]
+    #[error("cannot poll `{0}`: use an http, https or ssh URL")]
     Scheme(String),
     /// An SSH URL without an SSH Secret.
     #[error("{0}")]

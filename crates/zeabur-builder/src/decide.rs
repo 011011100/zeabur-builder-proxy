@@ -1,5 +1,5 @@
 //! The reconcilers' decisions, as functions of what they observed: no I/O and no clock (the time
-//! is an argument), so every transition is tested without a cluster (plan §14).
+//! is an argument), so every transition is tested without a cluster.
 
 use std::time::Duration;
 
@@ -17,10 +17,10 @@ use zeabur_builder_api::common::{Condition, ConditionStatus};
 use zeabur_builder_core::result::{self, BuildResult, FailureReason, Outcome};
 use zeabur_builder_core::tag::{self, TagError, TagInputs};
 
-/// Polling interval for plain Git when the `Build` sets none (plan §3.2).
+/// Polling interval for plain Git when the `Build` sets none.
 pub(crate) const DEFAULT_POLL: Duration = Duration::from_mins(1);
 /// Polling interval for a GitHub App source whose push events reach the controller: only a safety
-/// net, since GitHub does not deliver a failed webhook again (plan §4.4).
+/// net, since GitHub does not deliver a failed webhook again.
 pub(crate) const APP_POLL: Duration = Duration::from_mins(10);
 /// The shortest time between two polls a webhook asks for, so a flood of deliveries, genuine or
 /// replayed, cannot turn into a flood of requests to the Git server.
@@ -224,7 +224,7 @@ fn answered_rebuild(runs: &[BuildRun]) -> Option<&BuildRun> {
 /// one. Every run the controller creates records the value of that moment, so a value set before
 /// a build asks for nothing more once that build starts.
 ///
-/// A suspended `Build` has none pending: plan §4.1 skips steps 4 to 6, the rebuild among them.
+/// A suspended `Build` has none pending: it asks for no build, the rebuild among them.
 /// The request is kept and runs when `suspend` is cleared; a `BuildRun` created by hand still
 /// runs while suspended.
 pub(crate) fn pending_rebuild<'a>(build: &'a Build, runs: &[BuildRun]) -> Option<&'a str> {
@@ -283,7 +283,7 @@ pub(crate) struct NextRun {
     pub(crate) cancel: Vec<String>,
 }
 
-/// Decides whether `remote` needs a build (plan §4.1, steps 4 to 6).
+/// Decides whether `remote` needs a build.
 ///
 /// A commit that already has a `BuildRun`, in any phase, gets no other: a failed build is not
 /// retried by itself, which would loop on a broken commit. A [pending rebuild](pending_rebuild)
@@ -373,7 +373,7 @@ pub(crate) fn prune(runs: &[BuildRun], limit: usize) -> Vec<String> {
     names
 }
 
-/// Concurrent builds per namespace when the controller sets none (plan §11).
+/// Concurrent builds per namespace when the controller sets none.
 pub(crate) const DEFAULT_MAX_CONCURRENT: u32 = 3;
 
 /// A namespace's limit of concurrent builds: its annotation when it holds a positive number,
@@ -551,7 +551,7 @@ pub(crate) fn notify_due<'a>(build: &Build, runs: &'a [BuildRun]) -> Option<&'a 
     latest_success(runs).filter(|r| r.status.as_ref().is_some_and(|s| s.notified_at.is_none()))
 }
 
-/// The body of Keel's native webhook (plan §9): the repository without a tag, and the run's first
+/// The body of Keel's native webhook: the repository without a tag, and the run's first
 /// tag, the one rendered from the tag template.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub(crate) struct KeelPayload<'a> {
@@ -567,7 +567,7 @@ pub(crate) fn keel_payload<'a>(image: &'a str, run: &'a BuildRun) -> Option<Keel
     Some(KeelPayload { name: image, tag })
 }
 
-/// The waits between notify attempts: three attempts with exponential backoff (plan §9).
+/// The waits between notify attempts: three attempts with exponential backoff.
 pub(crate) const NOTIFY_BACKOFF: [Duration; 2] = [Duration::from_secs(1), Duration::from_secs(4)];
 
 /// What the Job and its Pod say about a run.
@@ -668,7 +668,7 @@ fn from_result(result: BuildResult) -> Observed {
     Observed::Finished(Box::new(status))
 }
 
-/// Reads a run's progress or result from its Job and Pod (plan §4.2, steps 2 and 3).
+/// Reads a run's progress or result from its Job and Pod.
 pub(crate) fn observe(job: &Job, pod: Option<&Pod>) -> Observed {
     let pod_status = pod.and_then(|p| p.status.as_ref());
     let message = pod.and_then(termination_message);

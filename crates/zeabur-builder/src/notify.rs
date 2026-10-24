@@ -1,4 +1,4 @@
-//! Posts a notification (plan §9) with retries.
+//! Posts a notification with retries.
 //!
 //! Basic auth is what a `keel` target's `secretRef` gives: Keel checks it on its webhooks when
 //! `BASIC_AUTH_USER` and `BASIC_AUTH_PASSWORD` are set (not verified).

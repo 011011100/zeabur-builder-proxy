@@ -1,10 +1,10 @@
 //! What a webhook delivery names: a repository and the refs a push moved.
 //!
-//! A delivery is only a wake-up call (plan §4.3, ADR-3). Nothing else is read from it: no commit,
+//! A delivery is only a wake-up call. Nothing else is read from it: no commit,
 //! no URL to fetch from. The controller takes the [`RepoKey`]s to find the `Build`s that follow
 //! the repository, checks the signature with each one's secret, and has those whose ref was
 //! pushed ask the Git server again. A forged or replayed delivery can at most cause one more
-//! poll, and the poll answers from the server, not from the payload.
+//! poll, and the poll answers from the server.
 //!
 //! Payloads, per provider:
 //!

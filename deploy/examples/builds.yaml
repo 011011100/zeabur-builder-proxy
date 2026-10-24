@@ -3,32 +3,32 @@
 apiVersion: v1
 kind: Namespace
 metadata:
-  name: builder-poc
+  name: team-a
 ---
 apiVersion: builder.zeabur.com/v1alpha1
 kind: Build
-metadata: {name: whoami, namespace: builder-poc}
+metadata: {name: whoami, namespace: team-a}
 spec:
   source: {git: {url: https://github.com/traefik/whoami}}
   builderRef: dockerfile
 ---
 apiVersion: builder.zeabur.com/v1alpha1
 kind: Build
-metadata: {name: hello-python, namespace: builder-poc}
+metadata: {name: hello-python, namespace: team-a}
 spec:
   source: {git: {url: https://github.com/dockersamples/helloworld-demo-python, ref: main}}
   builderRef: railpack
 ---
 apiVersion: builder.zeabur.com/v1alpha1
 kind: Build
-metadata: {name: no-such-ref, namespace: builder-poc}
+metadata: {name: no-such-ref, namespace: team-a}
 spec:
   source: {git: {url: https://github.com/traefik/whoami, ref: no-such-branch}}
   builderRef: dockerfile
 ---
 apiVersion: builder.zeabur.com/v1alpha1
 kind: Build
-metadata: {name: no-such-dockerfile, namespace: builder-poc}
+metadata: {name: no-such-dockerfile, namespace: team-a}
 spec:
   source: {git: {url: https://github.com/traefik/whoami, ref: master, dockerfile: Dockerfile.missing}}
   builderRef: dockerfile

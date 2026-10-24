@@ -1,7 +1,8 @@
 //! Custom resources in the `builder.zeabur.com` API group.
 //!
 //! - [`cluster_builder::ClusterBuilder`]: how to plan and which `BuildKit` frontend to build with.
-//!   Cluster-scoped and written by admins; the chart ships `dockerfile`, `railpack` and `zbplan`.
+//!   Cluster-scoped and written by admins; `deploy/examples/controller.yaml` has `dockerfile` and
+//!   `railpack`.
 //! - [`build::Build`]: what to build, written by a team. The desired state: follow a Git ref and
 //!   keep an image of its newest commit.
 //! - [`build_run::BuildRun`]: one build of one commit. Its spec is immutable; the controller

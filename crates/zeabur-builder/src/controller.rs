@@ -1,4 +1,4 @@
-//! The two reconcilers (plan §4.1, §4.2), on kube-runtime.
+//! The two reconcilers, on kube-runtime.
 //!
 //! - **Build**: resolves the ref, creates a `BuildRun` for a new commit or a new `rebuild` value,
 //!   cancels or waits for older runs, prunes history, summarises the newest result in its status
@@ -21,8 +21,7 @@
 //! Only the holder of the Lease reconciles ([`crate::leader`]). The other replicas watch and
 //! receive webhooks.
 //!
-//! Not yet: the repository-level poller (plan §4.4), and `flux-receiver` and `generic` notify
-//! targets.
+//! Not yet: `flux-receiver` and `generic` notify targets.
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -312,7 +311,7 @@ fn retry<K>(_: Arc<K>, error: &Error, _: Arc<Context>) -> Action {
     Action::requeue(Duration::from_secs(30))
 }
 
-/// Spreads polls by up to ±10% (plan §4.4), from the name and the clock's nanoseconds.
+/// Spreads polls by up to ±10%, from the name and the clock's nanoseconds.
 fn jitter(interval: Duration, name: &str) -> Duration {
     let seed = name.bytes().fold(
         u64::from(now().subsec_nanosecond().unsigned_abs()),
@@ -834,7 +833,7 @@ async fn record(
     }
 }
 
-/// Sends a run's image to the `Build`'s notify targets (plan §9), records each answer as an
+/// Sends a run's image to the `Build`'s notify targets, records each answer as an
 /// Event on the `Build` and marks the run sent, whatever the answers: a failure never fails the
 /// run nor is sent again. A crash between sending and marking sends once more.
 async fn notify_targets(
@@ -1158,7 +1157,7 @@ async fn start(ctx: &Context, run: &BuildRun, status: BuildRunStatus) -> Result<
     Ok(Action::await_change())
 }
 
-/// A namespace's push credentials (plan §8): its own Secret when the controller is given a
+/// A namespace's push credentials: its own Secret when the controller is given a
 /// prefix, `None` while that Secret is missing; an empty Docker config otherwise, for a registry
 /// that takes anonymous pushes.
 async fn registry_auth(ctx: &Context, namespace: &str) -> Result<Option<ByteString>, Error> {

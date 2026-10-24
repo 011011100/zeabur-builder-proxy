@@ -105,7 +105,7 @@ fn flag_value<'a>(command: &'a [String], flag: &str) -> Option<&'a str> {
         .map(String::as_str)
 }
 
-/// A failed push is the registry's fault, not the build's: report it as such.
+/// A failed push is the registry's fault: report it as `PushFailed`.
 fn classify(error: &str) -> FailureReason {
     let error = error.to_ascii_lowercase();
     if error.contains("failed to push") || error.contains("pushing") {

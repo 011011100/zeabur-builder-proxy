@@ -6,7 +6,7 @@
 //! key. The rules:
 //!
 //! - The scheme, user name and default port (22, 80, 443, 9418) are dropped: the key names a
-//!   repository, not a way to reach it. Other ports stay, since they can be another server.
+//!   repository whatever way reaches it. Other ports stay, since they can be another server.
 //! - The scp-like SSH form `user@host:path` becomes `host/path`, as Git itself reads it
 //!   ([git-clone], "GIT URLS").
 //! - The host is lowercased (DNS names are case-insensitive), and a trailing `/` or `.git` is
@@ -131,7 +131,7 @@ fn scp_like(url: &str) -> Result<(String, String), RepoUrlError> {
     let (authority, path) = url
         .split_once(':')
         .ok_or_else(|| RepoUrlError::Scheme(String::new()))?;
-    // `ext::cmd` and `fd::0` are remote helpers, not hosts.
+    // `ext::cmd` and `fd::0` name remote helpers.
     if authority.contains('/') || path.starts_with(':') {
         return Err(RepoUrlError::Scheme(authority.to_owned()));
     }

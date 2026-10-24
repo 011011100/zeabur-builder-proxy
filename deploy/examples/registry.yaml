@@ -1,6 +1,6 @@
-# Zot over plain HTTP for the proof of concept, without persistence. scripts/poc.sh writes its
-# config and htpasswd: every build namespace has a user named after it that may push only below
-# `<namespace>/`, and anyone may pull. Not for production: see docs/poc.md.
+# Zot over plain HTTP, without persistence, for a test cluster. scripts/deploy-example.sh writes
+# its config and htpasswd: every build namespace has a user named after it that may push only
+# below `<namespace>/`, and anyone may pull.
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -35,7 +35,7 @@ spec:
             capabilities: {drop: [ALL]}
           volumeMounts:
             - {name: config, mountPath: /etc/zot/config.json, subPath: config.json, readOnly: true}
-            # A Secret volume, not subPath: Zot reloads accounts when the file changes.
+            # A Secret volume without subPath: Zot reloads accounts when the file changes.
             - {name: htpasswd, mountPath: /etc/zot/auth, readOnly: true}
             - {name: data, mountPath: /var/lib/registry}
           resources:

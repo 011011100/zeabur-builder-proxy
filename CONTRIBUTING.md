@@ -2,9 +2,8 @@
 
 ## Developer Certificate of Origin
 
-This project uses the [Developer Certificate of Origin 1.1](DCO), not a CLA. Sign off every
-commit to certify that you wrote it or otherwise have the right to submit it under the project
-licence:
+This project uses the [Developer Certificate of Origin 1.1](DCO). Sign off every commit to
+certify that you wrote it or otherwise have the right to submit it under the project licence:
 
 ```sh
 git commit -s
@@ -38,8 +37,7 @@ Review a golden-file diff like code: it is exactly what will run in every build.
 
 Design rationale lives next to the code, in rustdoc: state the decision and its reason, and
 cite the specification, upstream source or prior art it rests on. Never cite something you have
-not read; write "not verified" instead. Documentation is written in English; the plan is in
-Traditional Chinese.
+not read; write "not verified" instead. Documentation is written in English.
 
 ## Crate levels
 
@@ -71,11 +69,26 @@ Shared with [Zeabur Identity](https://github.com/zeabur-oss/identity):
 
 ## Tests against a cluster
 
-Use a disposable cluster with its own kubeconfig, never your normal context:
+Use a disposable cluster with its own kubeconfig, never your normal context. The example in
+`deploy/examples/` runs the controller, an in-cluster registry and four sample Builds:
 
 ```sh
 export KUBECONFIG=$(mktemp -d)/kubeconfig
-kind create cluster --name zeabur-builder
-cargo run -q -p zeabur-builder -- crds | kubectl apply -f -
-kind delete cluster --name zeabur-builder
+k3d cluster create zeabur-builder
+scripts/build-images.sh zeabur-builder dev
+K3D_CLUSTER=zeabur-builder scripts/deploy-example.sh k3d-zeabur-builder whoami hello-python
+```
+
+`scripts/deploy-example.sh` applies `deploy/crds.json` and `deploy/examples/`, gives each namespace
+in `NAMESPACES` (default `team-a`) its own registry account, and waits for each named Build's
+`status.latestImage`. It stops at the first failed `BuildRun`.
+
+To check the isolation between two namespaces, deploy with `NAMESPACES="team-a team-b"`, let each
+namespace build once, then run `scripts/example-isolation.sh k3d-zeabur-builder`.
+
+```sh
+kubectl -n team-a get build -o wide        # Ready, Revision, Image
+kubectl -n team-a get buildrun             # Phase, Reason, Started, Finished
+kubectl -n team-a logs job/<buildrun>      # buildctl progress
+k3d cluster delete zeabur-builder
 ```

@@ -4,7 +4,7 @@
 //! with its own CA and cache volume, in the builder's namespace. Sharing a daemon across
 //! namespaces shares its layer cache, its cache mounts (keyed only by `id`, which a Dockerfile
 //! chooses), its build history and its network, and `BuildKit`'s control API has no per-caller
-//! authorisation ([control.go]); so the daemon, not a cache-key prefix, is the boundary.
+//! authorisation ([control.go]); so the boundary is the daemon itself.
 //!
 //! The name is `buildkitd-<namespace>`, so `kubectl get pods` reads plainly. A `StatefulSet`'s
 //! name may be at most 52 characters, since its Pods carry the label

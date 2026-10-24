@@ -1,4 +1,4 @@
-# What every namespace's buildkitd shares (plan §7): its config, and the egress policy of its
+# What every namespace's buildkitd shares: its config, and the egress policy of its
 # RUN steps. The controller creates each namespace's StatefulSet, headless Service and ingress
 # NetworkPolicy in builder-system the first time the namespace builds.
 apiVersion: v1

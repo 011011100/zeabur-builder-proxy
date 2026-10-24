@@ -25,7 +25,7 @@
 //! kubelet expands `$(VAR)` in `command` and `args`.
 //!
 //! The Pod runs as a non-root user with a read-only root filesystem, no capabilities and no
-//! service account token: `RUN` steps execute in buildkitd, not here, so the Job needs no
+//! service account token: `RUN` steps execute in buildkitd, so the Job needs no
 //! privileges.
 
 pub mod buildkitd;

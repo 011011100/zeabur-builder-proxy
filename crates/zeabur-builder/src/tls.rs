@@ -1,4 +1,4 @@
-//! mTLS between build Jobs and buildkitd (plan §7.3): one CA per build namespace, made the first
+//! mTLS between build Jobs and buildkitd: one CA per build namespace, made the first
 //! time the namespace builds, with a server certificate for its buildkitd and a client
 //! certificate for its Jobs.
 //!

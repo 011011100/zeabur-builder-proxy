@@ -1,4 +1,4 @@
-//! Git credentials from the Secret a `Build`'s `credentialsRef` names (plan §5.3).
+//! Git credentials from the Secret a `Build`'s `credentialsRef` names.
 //!
 //! The Secret must carry the label `builder.zeabur.com/git-credentials: "true"`, so a `Build`
 //! cannot point the controller at any Secret in its namespace.

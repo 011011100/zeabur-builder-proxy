@@ -1,4 +1,4 @@
-# The controller, its permissions and the two ClusterBuilders of the proof of concept.
+# The controller, its permissions and the two ClusterBuilders.
 # __IMAGE_PREFIX__ and __TAG__ name the images built by scripts/build-images.sh; __HOST_USERS__ is
 # buildkitd's hostUsers and __IDLE__ the seconds before an idle buildkitd scales to zero.
 apiVersion: v1
@@ -28,8 +28,7 @@ rules:
   - apiGroups: [""]
     resources: [namespaces]
     verbs: [get, list]
-  # The client certificate and push credentials copied into build namespaces. Cluster-wide for
-  # the proof of concept.
+  # The client certificate and push credentials copied into build namespaces. Cluster-wide.
   - apiGroups: [""]
     resources: [secrets]
     verbs: [get, create, update, delete]

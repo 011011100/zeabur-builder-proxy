@@ -6,8 +6,8 @@
 //! exec into the daemon or read its server key.
 //!
 //! - **One CA per namespace.** buildkitd checks only that a client certificate chains to its
-//!   `--tlscacert`, not who it names, so the Secret it mounts holds that namespace's CA alone. A
-//!   client certificate read from a project's namespace opens only that project's daemon.
+//!   `--tlscacert` and ignores whom it names, so the Secret it mounts holds that namespace's CA
+//!   alone. A client certificate read from a project's namespace opens only that project's daemon.
 //! - **Ingress.** Port 1234 admits Pods whose namespace is the build namespace, by
 //!   `kubernetes.io/metadata.name`, which the API server sets and nobody can change. A Pod label
 //!   would not do: project members create Pods with any label they like.
@@ -20,7 +20,7 @@
 //! - **Network.** `RUN` steps get their own network namespace through the config's `networkMode =
 //!   "bridge"`, so they leave through the Pod's address and the cluster-wide egress policy on
 //!   `app.kubernetes.io/name: buildkitd` applies to them; that policy and the config are deployment
-//!   files, not built here.
+//!   files (`deploy/examples/buildkitd.yaml`).
 //! - **Probes.** `buildctl debug workers` over the local socket, which needs no client certificate;
 //!   every two seconds, since a build waits on readiness after a cold start.
 

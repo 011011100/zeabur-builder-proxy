@@ -75,7 +75,7 @@
             }
             // pkgs.lib.optionalAttrs pkgs.stdenv.hostPlatform.isLinux (
               # Static musl builds of the host architecture: aws-lc-sys must be compiled against musl
-              # headers, not glibc ones.
+              # headers.
               let
                 muslCc = pkgs.pkgsStatic.stdenv.cc;
                 bin = "${muslCc}/bin/${muslCc.targetPrefix}";

@@ -1,6 +1,6 @@
 //! Resolving a branch or tag to a commit over Git's smart HTTP protocol, without Git.
 //!
-//! The controller asks the server itself (ADR-3: the ref is resolved, never taken from a webhook)
+//! The controller asks the server itself (a webhook never supplies the commit)
 //! and needs only two requests ([http-protocol], [protocol-v2]):
 //!
 //! 1. `GET <url>/info/refs?service=git-upload-pack` with `Git-Protocol: version=2`. A server that
