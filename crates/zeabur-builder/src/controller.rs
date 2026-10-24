@@ -18,8 +18,11 @@
 //! writes `lastWebhookAt`, so its apply cannot put back an older time. A `githubApp` source is
 //! resolved and fetched with installation tokens and gets commit statuses ([`crate::github`]).
 //!
-//! Not yet: leader election (run one replica), the repository-level poller (plan §4.4), and
-//! `flux-receiver` and `generic` notify targets.
+//! Only the holder of the Lease reconciles ([`crate::leader`]). The other replicas watch and
+//! receive webhooks.
+//!
+//! Not yet: the repository-level poller (plan §4.4), and `flux-receiver` and `generic` notify
+//! targets.
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -54,6 +57,7 @@ use zeabur_builder_jobspec::{GitAuth, JobInputs};
 use crate::credentials::{GitCredentials, Refusal};
 use crate::decide::{self, Observed, Wake};
 use crate::github::{self, Access, GitHub, State};
+use crate::leader::{self, Leader};
 use crate::notify::{self, Credentials};
 use crate::remote::{self, HttpClient, Resolver};
 use crate::webhook::{self, Lookup, Receiver};
@@ -67,6 +71,10 @@ const WEBHOOK_MANAGER: &str = "zeabur-builder-webhook";
 const PENDING_RETRY: Duration = Duration::from_secs(15);
 /// How often a `BuildRun` waiting for its buildkitd to start is looked at again.
 const STARTING_RETRY: Duration = Duration::from_secs(2);
+/// Selects the `BuildRun`s that are not finished, by the selectable field `status.phase`.
+const UNFINISHED: &str = "status.phase!=Succeeded,status.phase!=Failed,status.phase!=Cancelled";
+/// Objects read per page of a LIST.
+const PAGE: u32 = 100;
 /// The name of the client certificate Secret in a build namespace.
 const CLIENT_TLS_COPY: &str = "zeabur-builder-buildkit-client";
 
@@ -101,6 +109,7 @@ pub(crate) struct Settings {
 
 struct Context {
     client: Client,
+    leader: Leader,
     http: HttpClient,
     resolver: Resolver,
     recorder: Recorder,
@@ -207,7 +216,15 @@ where
 /// Runs both controllers, the buildkitd sweep and the webhook receiver until a termination
 /// signal.
 pub(crate) async fn run(client: Client, settings: Settings) -> Result<(), String> {
-    let sweep = daemon::sweep_forever(client.clone(), Arc::clone(&settings.daemon));
+    let identity = std::env::var("POD_NAME").ok();
+    let (leader, election) = leader::elect(client.clone(), &settings.namespace, identity).await?;
+    let served = run_replica(client, settings, leader).await;
+    election.release().await;
+    served
+}
+
+/// Runs the controllers, the sweep and the receiver until a termination signal.
+async fn run_replica(client: Client, settings: Settings, leader: Leader) -> Result<(), String> {
     let http = remote::http_client()?;
     let github = Arc::new(GitHub::new(
         &client,
@@ -217,7 +234,9 @@ pub(crate) async fn run(client: Client, settings: Settings) -> Result<(), String
         settings.github_app_grants.clone(),
     ));
     let receiver_settings = settings.webhook.clone();
+    let daemon_settings = Arc::clone(&settings.daemon);
     let context = Arc::new(Context {
+        leader: leader.clone(),
         github: Arc::clone(&github),
         recorder: Recorder::new(
             client.clone(),
@@ -238,7 +257,8 @@ pub(crate) async fn run(client: Client, settings: Settings) -> Result<(), String
     .owns(
         Api::<BuildRun>::all(client.clone()),
         watcher::Config::default(),
-    );
+    )
+    .reconcile_all_on(leader.taken());
     let receiver = receiver_settings.map(|settings| {
         let lookup = ClusterLookup {
             builds: builds.store(),
@@ -263,13 +283,16 @@ pub(crate) async fn run(client: Client, settings: Settings) -> Result<(), String
         Api::<Job>::all(client.clone()),
         watcher::Config::default().labels(&format!("{}={}", labels::MANAGED_BY, labels::MANAGER)),
     )
-    .shutdown_on_signal()
-    .run(reconcile_run, retry, context)
-    .for_each(|result| async move {
-        if let Err(e) = result {
-            tracing::warn!(error = %e, "buildrun reconcile");
-        }
-    });
+    .reconcile_all_on(leader.taken());
+    let sweep = daemon::sweep_forever(client.clone(), daemon_settings, runs.store(), leader);
+    let runs = runs
+        .shutdown_on_signal()
+        .run(reconcile_run, retry, context)
+        .for_each(|result| async move {
+            if let Err(e) = result {
+                tracing::warn!(error = %e, "buildrun reconcile");
+            }
+        });
     let receive = async {
         match receiver {
             Some(receiver) => webhook::serve(receiver).await,
@@ -333,6 +356,9 @@ async fn find_builder(
 }
 
 async fn reconcile_build(build: Arc<Build>, ctx: Arc<Context>) -> Result<Action, Error> {
+    if !ctx.leader.is_leader() {
+        return Ok(Action::await_change());
+    }
     let namespace = build.namespace().unwrap_or_default();
     let name = build.name_any();
     let generation = build.metadata.generation;
@@ -352,14 +378,10 @@ async fn reconcile_build(build: Arc<Build>, ctx: Arc<Context>) -> Result<Action,
         .as_deref()
         .and_then(decide::parse_duration)
         .unwrap_or_else(|| decide::default_poll(&build, ctx.settings.webhook.is_some()));
-    let mut requeue = jitter(interval, &name);
-    let woken = match decide::wake(build.status.as_ref(), at) {
-        Wake::Idle => false,
-        Wake::Now => true,
-        Wake::After(wait) => {
-            requeue = requeue.min(wait);
-            false
-        }
+    let (woken, wake_after) = match decide::wake(build.status.as_ref(), at) {
+        Wake::Idle => (false, None),
+        Wake::Now => (true, None),
+        Wake::After(wait) => (false, Some(wait)),
     };
     // Owned by the receiver's field manager.
     status.last_webhook_at = None;
@@ -372,6 +394,10 @@ async fn reconcile_build(build: Arc<Build>, ctx: Arc<Context>) -> Result<Action,
         .items;
     let rebuild = decide::pending_rebuild(&build, &runs).is_some();
     let resolved = resolve_source(&ctx, &build, &mut status, rebuild || woken, interval, at).await;
+    let mut requeue = jitter(decide::next_poll(&status, interval, at), &name);
+    if let Some(wait) = wake_after {
+        requeue = requeue.min(wait);
+    }
 
     if let (Some(sha), Some(_)) = (&resolved, &builder) {
         let found_by = if woken {
@@ -387,7 +413,9 @@ async fn reconcile_build(build: Arc<Build>, ctx: Arc<Context>) -> Result<Action,
             let run =
                 create_run(&runs_api, &build, sha, status.resolved_ref.clone(), trigger).await?;
             tracing::info!(build = %name, namespace = %namespace, buildrun = %run.name_any(), revision = %sha, ?trigger, "new run");
-            runs.push(run);
+            if !runs.iter().any(|r| r.metadata.name == run.metadata.name) {
+                runs.push(run);
+            }
         }
     }
     let limit = build
@@ -571,7 +599,9 @@ fn not_found(e: kube::Error) -> Result<(), Error> {
     Err(e.into())
 }
 
-/// Creates a run of `sha`, carrying the `Build`'s `rebuild` value as the request it answers.
+/// Creates a run of `sha`, carrying the `Build`'s `rebuild` value as the request it answers, with
+/// the name [`decide::run_name`] gives it. If that run exists, returns it. If another run has the
+/// name, the API server generates one.
 async fn create_run(
     api: &Api<BuildRun>,
     build: &Build,
@@ -587,9 +617,10 @@ async fn create_run(
         .annotations()
         .get(annotations::REBUILD)
         .map(|v| BTreeMap::from([(annotations::REBUILD.to_owned(), v.clone())]));
-    let run = BuildRun {
+    let run_name = decide::run_name(build, sha);
+    let mut run = BuildRun {
         metadata: ObjectMeta {
-            generate_name: Some(format!("{name}-")),
+            name: Some(run_name.clone()),
             namespace: build.namespace(),
             annotations: rebuild,
             labels: Some(BTreeMap::from([
@@ -609,6 +640,23 @@ async fn create_run(
         },
         status: None,
     };
+    match api.create(&PostParams::default(), &run).await {
+        Err(kube::Error::Api(e)) if e.code == 409 => {}
+        created => return Ok(created?),
+    }
+    if let Some(existing) = api.get_opt(&run_name).await?
+        && existing.spec.revision == run.spec.revision
+        && existing.annotations().get(annotations::REBUILD)
+            == run.annotations().get(annotations::REBUILD)
+        && existing
+            .owner_references()
+            .iter()
+            .any(|o| Some(&o.uid) == build.metadata.uid.as_ref())
+    {
+        return Ok(existing);
+    }
+    run.metadata.name = None;
+    run.metadata.generate_name = Some(format!("{}-", run.spec.build_ref));
     Ok(api.create(&PostParams::default(), &run).await?)
 }
 
@@ -646,6 +694,9 @@ async fn cancel_run(ctx: &Context, build: &Build, name: &str) -> Result<(), Erro
 }
 
 async fn reconcile_run(run: Arc<BuildRun>, ctx: Arc<Context>) -> Result<Action, Error> {
+    if !ctx.leader.is_leader() {
+        return Ok(Action::await_change());
+    }
     let status = run.status.clone().unwrap_or_default();
     if decide::is_finished(status.phase) {
         return Ok(Action::await_change());
@@ -940,10 +991,6 @@ async fn admit(
     namespace: &str,
 ) -> Result<Result<ByteString, (Reason, String)>, Error> {
     let settings = &ctx.settings;
-    let runs = Api::<BuildRun>::namespaced(ctx.client.clone(), namespace)
-        .list(&ListParams::default())
-        .await?
-        .items;
     let limit = decide::concurrency_limit(
         Api::<Namespace>::all(ctx.client.clone())
             .get_opt(namespace)
@@ -953,8 +1000,21 @@ async fn admit(
             .map(String::as_str),
         settings.max_concurrent,
     );
-    let taken = decide::slots_taken(&runs);
-    if taken >= usize::try_from(limit).unwrap_or(usize::MAX) {
+    let limit_slots = usize::try_from(limit).unwrap_or(usize::MAX);
+    let runs = Api::<BuildRun>::namespaced(ctx.client.clone(), namespace);
+    let mut params = ListParams::default().fields(UNFINISHED).limit(PAGE);
+    let mut taken = 0;
+    loop {
+        let page = runs.list(&params).await?;
+        taken += decide::slots_taken(&page.items);
+        match page.metadata.continue_ {
+            Some(next) if !next.is_empty() && taken < limit_slots => {
+                params = params.continue_token(&next);
+            }
+            _ => break,
+        }
+    }
+    if taken >= limit_slots {
         return Ok(Err((
             Reason::QuotaExceeded,
             format!("{taken} of the namespace's {limit} builds are running"),

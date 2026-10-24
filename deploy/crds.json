@@ -1123,6 +1123,9 @@
             "selectableFields": [
               {
                 "jsonPath": ".spec.buildRef"
+              },
+              {
+                "jsonPath": ".status.phase"
               }
             ],
             "served": true,

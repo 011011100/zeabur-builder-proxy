@@ -6,6 +6,7 @@ mod daemon;
 mod decide;
 mod github;
 mod github_app;
+mod leader;
 mod notify;
 mod output;
 mod remote;

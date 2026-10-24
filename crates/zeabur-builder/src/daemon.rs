@@ -5,7 +5,7 @@
 //! changed setting reaches each daemon the next time it is woken. Scaling down goes through the
 //! `scale` subresource; the next apply takes `replicas` back.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -14,6 +14,7 @@ use k8s_openapi::api::apps::v1::StatefulSet;
 use k8s_openapi::api::core::v1::{Namespace, Pod, Secret, Service};
 use k8s_openapi::api::networking::v1::NetworkPolicy;
 use kube::api::{Api, DeleteParams, ListParams, Patch, PatchParams};
+use kube::runtime::reflector::Store;
 use kube::{Client, ResourceExt as _};
 use zeabur_builder_api::build_run::BuildRun;
 use zeabur_builder_api::labels;
@@ -21,11 +22,14 @@ use zeabur_builder_core::daemon;
 use zeabur_builder_jobspec::buildkitd::{self, DaemonInputs, Resources};
 
 use crate::decide;
+use crate::leader::Leader;
 use crate::tls::{self, Pems};
 
 const MANAGER: &str = "zeabur-builder";
 /// How often idle daemons are looked for.
 const SWEEP: Duration = Duration::from_secs(30);
+/// Objects read per page of a LIST.
+const PAGE: u32 = 500;
 
 /// How every namespace's buildkitd runs, from the command line.
 #[derive(Debug, Clone)]
@@ -177,8 +181,28 @@ async fn remove(
         .or_else(gone)
 }
 
-/// One pass: scales idle daemons to zero and removes those whose namespace is gone.
-async fn sweep(client: &Client, settings: &Settings) -> Result<(), kube::Error> {
+/// The names of all namespaces, from one paged LIST of their metadata.
+async fn namespaces(client: &Client) -> Result<BTreeSet<String>, kube::Error> {
+    let api: Api<Namespace> = Api::all(client.clone());
+    let mut names = BTreeSet::new();
+    let mut params = ListParams::default().limit(PAGE);
+    loop {
+        let page = api.list_metadata(&params).await?;
+        names.extend(page.items.into_iter().filter_map(|n| n.metadata.name));
+        match page.metadata.continue_ {
+            Some(token) if !token.is_empty() => params = params.continue_token(&token),
+            _ => return Ok(names),
+        }
+    }
+}
+
+/// One pass: scales idle daemons to zero and removes those whose namespace is gone. The runs come
+/// from the `BuildRun` reconciler's cache.
+async fn sweep(
+    client: &Client,
+    settings: &Settings,
+    runs: &Store<BuildRun>,
+) -> Result<(), kube::Error> {
     let sets: Api<StatefulSet> = Api::namespaced(client.clone(), &settings.namespace);
     let selector = format!(
         "{}={},app.kubernetes.io/name={}",
@@ -190,30 +214,29 @@ async fn sweep(client: &Client, settings: &Settings) -> Result<(), kube::Error> 
     if sets.items.is_empty() {
         return Ok(());
     }
-    let mut runs: BTreeMap<String, Vec<BuildRun>> = BTreeMap::new();
-    for run in Api::<BuildRun>::all(client.clone())
-        .list(&ListParams::default())
-        .await?
-        .items
-    {
-        runs.entry(run.namespace().unwrap_or_default())
+    let mut runs_by_namespace: BTreeMap<String, Vec<Arc<BuildRun>>> = BTreeMap::new();
+    for run in runs.state() {
+        runs_by_namespace
+            .entry(run.namespace().unwrap_or_default())
             .or_default()
             .push(run);
     }
-    let namespaces: Api<Namespace> = Api::all(client.clone());
+    let existing = namespaces(client).await?;
     let now = Timestamp::now();
     for set in &sets.items {
         let Some(namespace) = set.labels().get(labels::NAMESPACE) else {
             continue;
         };
-        if namespaces.get_opt(namespace).await?.is_none() {
+        if !existing.contains(namespace) {
             remove(client, settings, set).await?;
             tracing::info!(%namespace, statefulset = %set.name_any(), "namespace gone; buildkitd removed");
             continue;
         }
         let replicas = set.spec.as_ref().and_then(|s| s.replicas).unwrap_or(0);
-        let runs = runs.get(namespace).map_or(&[][..], Vec::as_slice);
-        if replicas > 0 && decide::idle(runs, now, settings.idle_after) {
+        let runs = runs_by_namespace
+            .get(namespace)
+            .map_or(&[][..], Vec::as_slice);
+        if replicas > 0 && decide::idle(runs.iter().map(AsRef::as_ref), now, settings.idle_after) {
             Api::<StatefulSet>::namespaced(client.clone(), &settings.namespace)
                 .patch_scale(
                     &set.name_any(),
@@ -227,14 +250,26 @@ async fn sweep(client: &Client, settings: &Settings) -> Result<(), kube::Error> 
     Ok(())
 }
 
-/// Sweeps every 30 seconds, until the process ends.
+/// Sweeps every 30 seconds while this replica is the leader, until the process ends. The first
+/// sweep waits for the cache of runs: an empty cache would make every daemon look idle.
 #[expect(clippy::infinite_loop, reason = "runs for the life of the process")]
-pub(crate) async fn sweep_forever(client: Client, settings: Arc<Settings>) {
+pub(crate) async fn sweep_forever(
+    client: Client,
+    settings: Arc<Settings>,
+    runs: Store<BuildRun>,
+    leader: Leader,
+) {
+    if runs.wait_until_ready().await.is_err() {
+        return;
+    }
     let mut interval = tokio::time::interval(SWEEP);
     interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     loop {
         interval.tick().await;
-        if let Err(e) = sweep(&client, &settings).await {
+        if !leader.is_leader() {
+            continue;
+        }
+        if let Err(e) = sweep(&client, &settings, &runs).await {
             tracing::warn!(error = %e, "buildkitd sweep");
         }
     }

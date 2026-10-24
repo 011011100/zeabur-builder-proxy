@@ -28,6 +28,7 @@ use crate::common::{Condition, DIGEST_PATTERN, MAX_NAME, REVISION_PATTERN};
     shortname = "zbrun",
     category = "zeabur-builder",
     selectable = ".spec.buildRef",
+    selectable = ".status.phase",
     printcolumn(name = "Build", type_ = "string", json_path = ".spec.buildRef"),
     printcolumn(
         name = "Revision",

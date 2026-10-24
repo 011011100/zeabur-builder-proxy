@@ -1718,6 +1718,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "kube-lease-manager"
+version = "0.12.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4bef0716ec7c48420690430e408c7f2579e4252962a33b29d36e53b4618afc33"
+dependencies = [
+ "k8s-openapi",
+ "kube",
+ "rand",
+ "thiserror",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "kube-runtime"
 version = "4.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3753,6 +3767,7 @@ dependencies = [
  "jiff",
  "k8s-openapi",
  "kube",
+ "kube-lease-manager",
  "rcgen",
  "russh",
  "rustls",

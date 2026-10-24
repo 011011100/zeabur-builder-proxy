@@ -201,8 +201,8 @@ registry-push-poc-c with push credentials in builder-system`），也沒有建�
   （GitHub、GitLab、Gitea／Forgejo、Bitbucket、Standard Webhooks）只有單元測試涵蓋，還沒接過真的
   Git server。
   annotation 是在上面這些結果之後加的，只有單元測試涵蓋。
-- Controller：單一 replica，沒有 leader election。幾個 run 同時 reconcile 時，namespace 的並行數可能
-  超過上限一個。縮到 0 與新 run 開始之間也可能互相競爭；新 run 的建立時間算作活動，所以窗口很小。
+- Controller：只有持有 Lease 的 replica reconcile（PoC 之後加上，還沒在叢集上跑過兩個 replica）。
+  幾個 run 同時 reconcile 時，namespace 的並行數可能超過上限一個。縮到 0 與新 run 開始之間也可能互相競爭；新 run 的建立時間算作活動，所以窗口很小。
 - buildkitd：`buildkitd.toml` 改了之後，要等各 namespace 的 buildkitd 下次啟動才生效。縮到 0 時
   Pod 以 `Error` 狀態結束（buildkitd 收到 SIGTERM 後以非 0 結束），不影響 cache。
 - 網路：egress 只處理 IPv4；`RUN` 仍能經 kube-dns 解析叢集內的名稱。叢集用公有網段時要自己加進

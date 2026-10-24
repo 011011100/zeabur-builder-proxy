@@ -325,6 +325,8 @@ BuildRun 的 ownerReference 指向 Build，Job 的 ownerReference 指向 BuildRu
 
 **〔變更〕** 使用 kube 4.2（`kube::runtime::Controller`）。leader election 用 `kube-leader-election` 或 `kube-lease-manager`；field indexer 以 reflector store 實作。見 ADR-9。
 
+**〔變更〕** 用 `kube-lease-manager`，Lease `zeabur-builder` 放在 controller 的 namespace。每個副本都跑 watch，cache 隨時可用；只有持有 Lease 的副本 reconcile 與做 buildkitd 的清理，拿到 Lease 時把所有物件 reconcile 一次（`reconcile_all_on`）。Lease 不能阻擋舊 leader 的寫入，所以 BuildRun 的名稱由觸發決定（見 §4.1 第 6 步），重複建立只會得到 409。
+
 ### 4.1 Build reconciler
 
 觸發來源：Build 本身的變更、owned BuildRun 的變更、webhook 喚醒、poller 喚醒（**〔變更〕** 透過 `Controller::reconcile_on` 的 channel，取代 `source.Channel`／`GenericEvent`）、annotation 變更。
@@ -343,7 +345,7 @@ BuildRun 的 ownerReference 指向 Build，Job 的 ownerReference 指向 BuildRu
 5. 依 `concurrency` 處理進行中的 BuildRun：
    - `Replace`：將舊的 BuildRun 標記為 `Cancelled`，刪除它的 Job，然後建立新的 BuildRun
    - `Queue`：等舊的跑完再建立新的
-6. 建立 BuildRun（`generateName: <build>-`），spec 寫死 SHA 與 trigger。
+6. 建立 BuildRun（`generateName: <build>-`），spec 寫死 SHA 與 trigger。**〔變更〕** 名稱是 `<build>-` 加上 5 個字元，由 Build 的 UID、SHA 與 `rebuild` 值的 SHA-256 算出，trigger 不算在內。兩個副本決定同一個 run 時，第二次建立得到 409，直接沿用已有的 run；名稱剛好被別的 run 用掉時才改用 `generateName`。
 7. 清除超過 `historyLimit` 的已完成 BuildRun（依完成時間排序，保留最近一次成功的那筆）。
 8. 依照 pollInterval 設定 `RequeueAfter`（加 jitter）。實際的 polling 由 §4.4 的 poller 統一管理，reconciler 只負責回報下一次的時間。
 
@@ -354,7 +356,7 @@ BuildRun 的 ownerReference 指向 Build，Job 的 ownerReference 指向 BuildRu
 狀態機：`Pending → Planning → Building → Succeeded | Failed | Cancelled`
 
 1. **Pending**
-   - 公平排程：若該 namespace 執行中的 BuildRun 數量 ≥ 上限，維持 Pending（`reason=QuotaExceeded`）。上限預設值由 controller 設定（`--max-concurrent-builds`，預設 3），可用 Namespace annotation `builder.zeabur.com/max-concurrent-builds` 覆寫。
+   - 公平排程：若該 namespace 執行中的 BuildRun 數量 ≥ 上限，維持 Pending（`reason=QuotaExceeded`）。上限預設值由 controller 設定（`--max-concurrent-builds`，預設 3），可用 Namespace annotation `builder.zeabur.com/max-concurrent-builds` 覆寫。**〔變更〕** `status.phase` 是 BuildRun 的 selectable field；計數只 LIST 未完成的 run（field selector），分頁讀到滿額為止。
    - ~~全域上限：所有 buildkitd 的總 slot 數。~~ **〔變更〕** 沒有全域上限：每個 namespace 有自己的 buildkitd，總容量由叢集的排程決定。
    - **〔變更〕** registry 帳號：找不到該 namespace 的推送 Secret（§8）就維持 Pending（`reason=RegistryCredentialsMissing`），也不啟動 buildkitd。
    - ~~選擇 buildkitd：使用 rendezvous hashing~~ **〔變更〕** 喚醒 buildkitd（§7.1）：確保該 namespace 的憑證、StatefulSet（replicas 1）、Service 與 NetworkPolicy 存在。Pod 還沒 Ready 就維持 Pending（`reason=BuildkitdStarting`，message 寫出等待的 Pod），每 2 秒重試。Pod 名稱寫進 `status.buildkitdInstance`。
@@ -383,12 +385,12 @@ Job 消失或 Pod 被驅逐時，標記 `InfraError`，**不自動重試**（v1�
 - 從 payload 取 repo URL 與 ref，**正規化**（§5.4）後，用 field indexer `spec.source.git.normalizedKey`（`<正規化 URL>#<ref>`）查出所有符合的 Build。
 - 對每個符合的 Build 更新 `status.lastWebhookAt`，並把 key 送進喚醒 channel。
 - **webhook 只是喚醒訊號，不攜帶真相**（ADR-3）。
-- **只有 leader 處理 webhook**：非 leader 的副本收到時，回 503 讓 GitHub 記錄失敗，或者只做喚醒（喚醒本身是冪等的）。v1 只跑單一副本，所以可以先不處理這個情況，但程式碼要寫成之後擴充不必大改的形式。
+- **只有 leader 處理 webhook**：非 leader 的副本收到時，回 503 讓 GitHub 記錄失敗，或者只做喚醒（喚醒本身是冪等的）。v1 只跑單一副本，所以可以先不處理這個情況，但程式碼要寫成之後擴充不必大改的形式。**〔變更〕** 每個副本都接收，只做喚醒。
 
 **〔變更〕** 實作（`crates/zeabur-builder/src/webhook.rs`）：
 
 - 路徑 `<prefix>/<provider>`，provider 為 `github`、`github-app`、`gitlab`、`gitea`、`forgejo`、`bitbucket`、`generic`（Standard Webhooks）。prefix 預設 `/hooks`，接收端預設關閉（`--webhook-addr`）。chart 的 Service、Ingress、HTTPRoute 也預設關閉。
-- 簽章：plain Git 用 Build 的 `triggers.webhook.secretRef`，App 用 App Secret 的 `webhook-secret`。只拿 payload 裡的 repo 正規化後找候選 Build，再逐一試它們的 secret；repo 不認得與簽章錯誤回同樣的 401。
+- 簽章：plain Git 用 Build 的 `triggers.webhook.secretRef`，App 用 App Secret 的 `webhook-secret`。只拿 payload 裡的 repo 正規化後找候選 Build，再逐一試它們的 secret；repo 不認得與簽章錯誤回同樣的 401。指向同一個 Secret key 的 Build 只讀一次；一個 delivery 最多讀 32 個不同的 key，超過時下一個 delivery 從接下來的 key 開始讀，其餘 Build 靠 polling。
 - 去重以 provider、delivery id 與 Build 為 key（GitLab 同一事件送到多個 webhook 時 UUID 相同）。Standard Webhooks 另外檢查時間戳，容許 5 分鐘。去重集合與 token bucket 都是各副本自己的：重送到另一個副本最多多一次 poll，限流總量是每秒上限乘以副本數。
 - 限制：全域 token bucket（預設每秒 10、burst 50）、body 上限（預設 1 MiB）、讀取逾時 10 秒、同時 64 個連線。驗證完立即回 202。
 - 只取 repo 與 ref；不使用 payload 裡的 URL、SHA 或 ref 去 fetch。pull request 事件目前只回 202 並忽略，之後做 preview 時另外加一種 event。
@@ -400,6 +402,7 @@ Job 消失或 Pod 被驅逐時，標記 `InfraError`，**不自動重試**（v1�
 - 加上 ±10% 的 jitter。
 - 發現某個 ref 的 SHA 和 Build 的 `remoteRevision` 不同時，喚醒該 Build。
 - GitHub App 模式的 Build 也納入 poller，作為漏接 webhook 的安全網（GitHub 不會自動重送失敗的 webhook）。
+- **〔新增〕** ref 解析失敗時退避：`SourceReady` 為 False 多久，下次就等多久，最多 10 分鐘，且不短於 pollInterval。
 
 ---
 
@@ -820,9 +823,9 @@ metrics:
   - 叢集範圍 get、list、watch（informer 只快取帶 `builder.zeabur.com/git-credentials` label 的 Secret）
   - 在 build namespace 中 create、delete（短期 Secret）
 - `events`：create、patch。
-- **〔新增〕** `namespaces`：get（清掉已刪除 namespace 的 buildkitd）。
+- **〔新增〕** `namespaces`：get、list（讀並行上限的 annotation；每次清理以一次分頁的 LIST 找出已刪除 namespace 的 buildkitd）。
 - **〔新增〕** 只在 builder 的 namespace：`statefulsets` get、list、watch、create、patch、delete；`statefulsets/scale` patch；`services`、`networkpolicies` get、create、patch、delete。
-- `coordination.k8s.io/leases`：leader election。
+- `coordination.k8s.io/leases`：leader election。**〔變更〕** 只在 controller 的 namespace：create，以及 `zeabur-builder` 這個名稱的 get、patch。
 - 不需要 admissionregistration 權限（VAP 由 chart 安裝）。
 
 Job Pod 使用的 ServiceAccount 不需要任何權限（`automountServiceAccountToken: false`）。

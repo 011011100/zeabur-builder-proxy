@@ -31,6 +31,7 @@ hyper-util.workspace = true
 jiff.workspace = true
 k8s-openapi.workspace = true
 kube = { workspace = true, features = ["client", "runtime", "rustls-tls", "aws-lc-rs"] }
+kube-lease-manager.workspace = true
 rcgen.workspace = true
 rustls.workspace = true
 rustls-native-certs.workspace = true

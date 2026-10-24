@@ -72,6 +72,25 @@ pub(crate) fn wake(status: Option<&BuildStatus>, now: Timestamp) -> Wake {
         _ => Wake::Now,
     }
 }
+
+/// The longest wait between two asks of a ref that does not resolve.
+pub(crate) const MAX_BACKOFF: Duration = APP_POLL;
+
+/// How long until the reconcile asks the Git server again: `interval`, or, while `SourceReady` is
+/// `False`, as long as it has been `False`, up to [`MAX_BACKOFF`]. A broken source thus costs
+/// fewer requests each time, and a source that comes back is asked within twice its downtime.
+pub(crate) fn next_poll(status: &BuildStatus, interval: Duration, now: Timestamp) -> Duration {
+    let failing = status
+        .conditions
+        .iter()
+        .find(|c| c.kind == "SourceReady" && c.status == ConditionStatus::False)
+        .and_then(|c| c.last_transition_time.parse::<Timestamp>().ok())
+        .map_or(Duration::ZERO, |since| {
+            now.duration_since(since).unsigned_abs()
+        });
+    interval.max(failing.min(MAX_BACKOFF))
+}
+
 /// Finished `BuildRun`s kept when the `Build` sets no limit.
 pub(crate) const DEFAULT_HISTORY: usize = 10;
 
@@ -217,6 +236,44 @@ pub(crate) fn pending_rebuild<'a>(build: &'a Build, runs: &[BuildRun]) -> Option
     (answered != Some(wanted)).then_some(wanted)
 }
 
+/// The characters of a generated name suffix, as the API server uses for `generateName`.
+const NAME_ALPHABET: &[u8] = b"bcdfghjklmnpqrstvwxz2456789";
+
+/// The name of the run the `Build` reconciler creates for `revision`: `<build>-` and five
+/// characters from a SHA-256 of the `Build`'s UID, the commit and the `rebuild` value.
+///
+/// Two replicas that decide the same run give it the same name, so the second create gets
+/// `409 Conflict`. The trigger is not in the hash: a poll and a webhook that find the same commit
+/// name the same run. The suffix has the length of a `generateName` suffix, so the name fits a Job
+/// for the same `Build` names as before.
+pub(crate) fn run_name(build: &Build, revision: &str) -> String {
+    let mut input = Vec::new();
+    for part in [
+        build.metadata.uid.as_deref().unwrap_or_default(),
+        revision,
+        rebuild_value(&build.metadata).unwrap_or_default(),
+    ] {
+        input.extend_from_slice(part.as_bytes());
+        input.push(0);
+    }
+    let digest = aws_lc_rs::digest::digest(&aws_lc_rs::digest::SHA256, &input);
+    let mut seed = digest
+        .as_ref()
+        .iter()
+        .take(8)
+        .fold(0_u64, |h, &b| (h << 8) | u64::from(b));
+    let base = NAME_ALPHABET.len() as u64;
+    let suffix: String = (0..5)
+        .map(|_| {
+            let i = usize::try_from(seed % base).unwrap_or_default();
+            seed /= base;
+            NAME_ALPHABET.get(i).map_or('b', |&c| char::from(c))
+        })
+        .collect();
+    let name = build.metadata.name.as_deref().unwrap_or_default();
+    format!("{name}-{suffix}")
+}
+
 /// What the `Build` reconciler does about the commit the ref points at.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub(crate) struct NextRun {
@@ -349,14 +406,19 @@ fn last_activity(run: &BuildRun) -> Option<Timestamp> {
 /// Whether a namespace's buildkitd may scale to zero: none of its runs is unfinished, and none
 /// was created or finished within `after`. A run created a moment ago counts, so a build that is
 /// starting keeps the daemon it is about to use.
-pub(crate) fn idle(runs: &[BuildRun], now: Timestamp, after: Duration) -> bool {
-    if runs.iter().any(|r| !is_finished(phase(r))) {
-        return false;
+pub(crate) fn idle<'a>(
+    runs: impl IntoIterator<Item = &'a BuildRun>,
+    now: Timestamp,
+    after: Duration,
+) -> bool {
+    let mut last = None;
+    for run in runs {
+        if !is_finished(phase(run)) {
+            return false;
+        }
+        last = last.max(last_activity(run));
     }
-    runs.iter()
-        .filter_map(last_activity)
-        .max()
-        .is_none_or(|last| now.duration_since(last).unsigned_abs() >= after)
+    last.is_none_or(|last| now.duration_since(last).unsigned_abs() >= after)
 }
 
 /// The image repository a `Build` pushes to.

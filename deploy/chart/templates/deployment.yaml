@@ -4,7 +4,7 @@ metadata:
   name: zeabur-builder
   labels: {{- include "builder.labels" . | nindent 4 }}
 spec:
-  # No leader election yet: exactly one replica.
+  # Only the holder of the Lease `zeabur-builder` reconciles. Another replica waits for it.
   replicas: 1
   strategy: {type: Recreate}
   selector:

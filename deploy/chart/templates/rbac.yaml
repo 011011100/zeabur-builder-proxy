@@ -22,9 +22,10 @@ rules:
   - apiGroups: [""]
     resources: [pods]
     verbs: [get, list, watch]
+  # A namespace's max-concurrent-builds annotation, and which namespaces still exist.
   - apiGroups: [""]
     resources: [namespaces]
-    verbs: [get]
+    verbs: [get, list]
   # Credentials and webhook secrets Builds name, and the Secrets copied into build namespaces.
   - apiGroups: [""]
     resources: [secrets]
@@ -42,7 +43,8 @@ roleRef: {apiGroup: rbac.authorization.k8s.io, kind: ClusterRole, name: {{ .Rele
 subjects:
   - {kind: ServiceAccount, name: zeabur-builder, namespace: {{ .Release.Namespace }}}
 ---
-# Each namespace's buildkitd, and the GitHub App's installation grants, in this namespace only.
+# Each namespace's buildkitd, the GitHub App's installation grants and the leader election Lease,
+# in this namespace only.
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
 metadata:
@@ -65,6 +67,14 @@ rules:
     resources: [configmaps]
     resourceNames: [{{ .Values.githubApp.grantsName }}]
     verbs: [get]
+  # The leader election Lease. `create` cannot be limited to one name.
+  - apiGroups: [coordination.k8s.io]
+    resources: [leases]
+    verbs: [create]
+  - apiGroups: [coordination.k8s.io]
+    resources: [leases]
+    resourceNames: [zeabur-builder]
+    verbs: [get, patch]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding

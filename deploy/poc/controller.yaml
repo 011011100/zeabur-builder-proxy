@@ -24,10 +24,10 @@ rules:
   - apiGroups: [""]
     resources: [pods]
     verbs: [get, list, watch]
-  # A namespace's max-concurrent-builds annotation, and whether it still exists.
+  # A namespace's max-concurrent-builds annotation, and which namespaces still exist.
   - apiGroups: [""]
     resources: [namespaces]
-    verbs: [get]
+    verbs: [get, list]
   # The client certificate and push credentials copied into build namespaces. Cluster-wide for
   # the proof of concept.
   - apiGroups: [""]
@@ -45,7 +45,8 @@ roleRef: {apiGroup: rbac.authorization.k8s.io, kind: ClusterRole, name: zeabur-b
 subjects:
   - {kind: ServiceAccount, name: zeabur-builder, namespace: builder-system}
 ---
-# Each namespace's buildkitd and the GitHub App's grants, in builder-system only.
+# Each namespace's buildkitd, the GitHub App's grants and the leader election Lease, in
+# builder-system only.
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
 metadata:
@@ -69,6 +70,14 @@ rules:
     resources: [configmaps]
     resourceNames: [github-app-installations]
     verbs: [get]
+  # The leader election Lease. `create` cannot be limited to one name.
+  - apiGroups: [coordination.k8s.io]
+    resources: [leases]
+    verbs: [create]
+  - apiGroups: [coordination.k8s.io]
+    resources: [leases]
+    resourceNames: [zeabur-builder]
+    verbs: [get, patch]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
@@ -86,7 +95,7 @@ metadata:
   namespace: builder-system
   labels: {app.kubernetes.io/name: zeabur-builder}
 spec:
-  # No leader election yet: exactly one replica.
+  # Only the holder of the Lease `zeabur-builder` reconciles. Another replica waits for it.
   replicas: 1
   strategy: {type: Recreate}
   selector:

@@ -1,3 +1,5 @@
+use std::collections::BTreeMap;
+
 use k8s_openapi::api::batch::v1::{JobCondition, JobStatus};
 use k8s_openapi::api::core::v1::{
     ContainerState, ContainerStateRunning, ContainerStateTerminated, PodStatus,
@@ -739,4 +741,68 @@ fn a_job_is_used_once_its_run_records_it() {
     let adopted = recorded(unrecorded, &job, later).unwrap();
     assert_eq!(adopted.job_ref.as_deref(), Some("app-x1"));
     assert_eq!(adopted.start_time, Some(now().to_string()));
+}
+
+#[test]
+fn a_run_name_follows_the_build_the_commit_and_the_rebuild_value() {
+    let mut build = build();
+    build.metadata.uid = Some("uid-1".to_owned());
+    let name = run_name(&build, A);
+    assert_eq!(name, run_name(&build, A), "two replicas name the same run");
+    assert!(
+        name.starts_with("api-") && name.len() == "api-".len() + 5,
+        "{name}"
+    );
+    assert_ne!(name, run_name(&build, B), "a new commit");
+    let mut rebuilt = build.clone();
+    rebuilt.metadata.annotations = Some(BTreeMap::from([(
+        annotations::REBUILD.to_owned(),
+        "1".to_owned(),
+    )]));
+    assert_ne!(name, run_name(&rebuilt, A), "a rebuild");
+    let mut recreated = build;
+    recreated.metadata.uid = Some("uid-2".to_owned());
+    assert_ne!(name, run_name(&recreated, A), "a Build created again");
+}
+
+#[test]
+fn a_ref_that_does_not_resolve_is_asked_less_often() {
+    let minute = Duration::from_mins(1);
+    let failing_since = |since: &str| {
+        let mut status = BuildStatus::default();
+        set_condition(
+            &mut status.conditions,
+            "SourceReady",
+            ConditionStatus::False,
+            "ResolveFailed",
+            "",
+            since.parse().unwrap(),
+            None,
+        );
+        status
+    };
+    let cases = [
+        ("resolves", BuildStatus::default(), minute, minute),
+        (
+            "failing for 3m",
+            failing_since("2026-10-22T07:57:00Z"),
+            minute,
+            Duration::from_mins(3),
+        ),
+        (
+            "failing for 2h",
+            failing_since("2026-10-22T06:00:00Z"),
+            minute,
+            MAX_BACKOFF,
+        ),
+        (
+            "an interval above the cap",
+            failing_since("2026-10-22T06:00:00Z"),
+            Duration::from_mins(30),
+            Duration::from_mins(30),
+        ),
+    ];
+    for (case, status, interval, expected) in cases {
+        assert_eq!(next_poll(&status, interval, now()), expected, "{case}");
+    }
 }
