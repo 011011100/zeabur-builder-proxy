@@ -11,6 +11,8 @@ root="$(cd "$(dirname "$0")/.." && pwd)"
 arch="$(uname -m | sed -e 's/^arm64$/aarch64/')"
 target="$arch-unknown-linux-musl"
 out="$root/target/image"
+# Image binaries are always compiled, never taken from the kache compiler cache (flake.nix).
+unset RUSTC_WRAPPER
 
 if [[ $(uname -s) == Linux ]]; then
   cargo build --release --locked --target "$target" -p zeabur-builder -p zeabur-builder-job \
@@ -24,6 +26,7 @@ else
     docker.io/nixos/nix:2.34.9 \
     nix --extra-experimental-features 'nix-command flakes' develop --command bash -c "
       set -euo pipefail
+      unset RUSTC_WRAPPER
       cargo build --release --locked --target $target -p zeabur-builder -p zeabur-builder-job
       mkdir -p /src/target/linux
       cp /target/$target/release/zeabur-builder /target/$target/release/zeabur-builder-job /src/target/linux/"

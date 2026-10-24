@@ -60,6 +60,9 @@ Shared with [Zeabur Identity](https://github.com/zeabur-oss/identity):
 
 - `rust-toolchain.toml` is the only place the compiler version is set; `scripts/bump-toolchain.sh`
   also updates the hash in `flake.nix`.
+- `nix develop` sets `RUSTC_WRAPPER=kache`, a compiler cache (https://github.com/kunobi-ninja/kache)
+  shared by every checkout and worktree on the machine. `scripts/build-images.sh` turns it off, so
+  image binaries are always compiled. kache is pinned to a release tag in `flake.nix`.
 - Lints are set once in `Cargo.toml`. All are `warn`, and `cargo lint` turns them into errors.
   Suppress with `#[expect(lint, reason = "…")]`. Only the binary's `output` module writes to
   stdout or stderr.
