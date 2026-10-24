@@ -38,7 +38,7 @@
         # rust-toolchain.toml is the only place the Rust version is set.
         rustToolchain = inputs.fenix.packages.${prev.stdenv.hostPlatform.system}.fromToolchainFile {
           file = ./rust-toolchain.toml;
-          sha256 = "sha256-SUC7eX/vmyHDmHLVrNomnduz4S8jrxBCoSaOkQawgTw=";
+          sha256 = "sha256-ackdOtCWk+NYS4SXZE1LZolba9ZfGWmu+4GhiK2Fq9E=";
         };
       };
 
