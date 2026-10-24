@@ -348,7 +348,7 @@ pub struct BuildStatus {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schemars(length(max = 40), regex(pattern = REVISION_PATTERN))]
     pub latest_revision: Option<String>,
-    /// Its image, `<repository>:<tag>@sha256:<digest>`.
+    /// Its image, `<repository>:<tag>@<digest>`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schemars(length(max = 1024))]
     pub latest_image: Option<String>,

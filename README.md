@@ -23,7 +23,7 @@ spec:
 
 For every new commit on the ref, the controller builds an image, pushes it to
 `<defaultRegistry>/<namespace>/<name>` and writes it to `status.latestImage` as
-`<repository>:<tag>@sha256:<digest>`. Leave out `ref` to follow the repository's default branch;
+`<repository>:<tag>@<digest>`. Leave out `ref` to follow the repository's default branch;
 `status.resolvedRef` says which branch that was.
 
 - **Two builders.** `dockerfile` builds your Dockerfile. `railpack` plans the build with

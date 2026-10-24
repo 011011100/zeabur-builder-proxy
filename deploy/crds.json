@@ -715,7 +715,7 @@
                         "type": "string"
                       },
                       "latestImage": {
-                        "description": "Its image, `<repository>:<tag>@sha256:<digest>`.",
+                        "description": "Its image, `<repository>:<tag>@<digest>`.",
                         "maxLength": 1024,
                         "nullable": true,
                         "type": "string"
