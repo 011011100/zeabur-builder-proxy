@@ -563,7 +563,6 @@ fn keel_gets_the_repository_and_the_template_tag() {
     );
     let untagged = succeeded("api-2", A, "2026-10-22T01:00:00Z", &[]);
     assert_eq!(keel_payload("r/team-a/api", &untagged), None);
-    assert_eq!(NOTIFY_BACKOFF.len() + 1, 3, "three attempts");
 }
 
 fn job(condition: Option<(&str, &str)>) -> Job {

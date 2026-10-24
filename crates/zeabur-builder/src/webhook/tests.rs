@@ -395,7 +395,7 @@ async fn replays_are_dropped() {
         post(&w, Provider::GitHub, headers.clone(), &body).await.1,
         "2 woken"
     );
-    assert_eq!(w.woken().len(), 2);
+    assert_eq!(w.woken(), ["team-a/api", "team-a/head"]);
     assert_eq!(
         post(&w, Provider::GitHub, headers, &body).await,
         (StatusCode::ACCEPTED, "already received".to_owned())
@@ -806,7 +806,7 @@ async fn http_limits() {
         ))
         .await;
     assert_eq!(ok.status(), StatusCode::ACCEPTED);
-    assert_eq!(w.woken().len(), 2);
+    assert_eq!(w.woken(), ["team-a/api", "team-a/head"]);
 }
 
 #[tokio::test]

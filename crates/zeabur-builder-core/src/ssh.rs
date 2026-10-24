@@ -256,7 +256,7 @@ truncated.example.com ssh-ed25519
                 },
             ]
         );
-        assert_eq!(keys("GITHUB.COM", 22).len(), 2);
+        assert_eq!(keys("GITHUB.COM", 22), keys("github.com", 22));
         assert_eq!(keys("gist.github.com", 22), vec!["AAAAE2VjZHNh"]);
         assert_eq!(keys("github.com", 2222), Vec::<&str>::new());
         assert_eq!(keys("git.example.com", 2222), vec!["AAAAport"]);
