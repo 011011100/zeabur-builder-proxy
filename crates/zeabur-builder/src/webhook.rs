@@ -4,7 +4,8 @@
 //! ([`zeabur_builder_core::hook`]). The `Build`s that follow that repository and name a webhook
 //! secret are candidates; those whose secret verifies the signature, and whose ref was pushed,
 //! are woken and ask the Git server themselves. Unknown repositories and bad signatures get the
-//! same `401`, so the receiver does not tell which repositories it builds.
+//! same `401`, so the receiver does not tell which repositories it builds. Candidates that name
+//! the same Secret key share one read, and one delivery reads at most [`MAX_SECRETS`] keys.
 //!
 //! Signatures, compared in constant time:
 //!
@@ -40,6 +41,7 @@
 use std::collections::{HashSet, VecDeque};
 use std::convert::Infallible;
 use std::net::SocketAddr;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
@@ -48,6 +50,7 @@ use aws_lc_rs::{digest, hmac};
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD;
 use bytes::Bytes;
+use futures_util::StreamExt as _;
 use futures_util::future::BoxFuture;
 use http::{HeaderMap, Method, Request, Response, StatusCode, header};
 use http_body_util::{BodyExt as _, Full, Limited};
@@ -66,8 +69,11 @@ use zeabur_builder_core::repo::RepoKey;
 pub(crate) const TOLERANCE: Duration = Duration::from_mins(5);
 /// Verified delivery ids remembered, to drop replays.
 pub(crate) const SEEN: usize = 4096;
-/// Most `Build`s whose secret one delivery is checked against.
-pub(crate) const MAX_CANDIDATES: usize = 32;
+/// Most webhook Secrets one delivery reads. A delivery is not yet verified, so this bounds the
+/// reads a sender can cause. `Build`s that name the same Secret key share one read.
+pub(crate) const MAX_SECRETS: usize = 32;
+/// Wakes written at once.
+const MAX_TOUCHES: usize = 8;
 /// How long a client may take to send its headers, and then its body.
 const READ_TIMEOUT: Duration = Duration::from_secs(10);
 /// Connections served at once.
@@ -167,6 +173,7 @@ pub(crate) struct Receiver {
     settings: Settings,
     bucket: Mutex<Bucket>,
     seen: Mutex<Seen>,
+    turn: AtomicUsize,
 }
 
 impl std::fmt::Debug for Receiver {
@@ -305,9 +312,40 @@ pub(crate) fn candidates(
             | Provider::Generic => b.spec.triggers.webhook.is_some(),
         })
         .filter(|b| RepoKey::parse(&b.spec.source.git.url).is_ok_and(|k| repositories.contains(&k)))
-        .take(MAX_CANDIDATES)
         .cloned()
         .collect()
+}
+
+/// The webhook Secret key a `Build` names.
+type SecretKey = (String, String, String);
+
+fn secret_key(build: &Build) -> Option<SecretKey> {
+    let webhook = build.spec.triggers.webhook.as_ref()?;
+    Some((
+        build.namespace().unwrap_or_default(),
+        webhook.secret_ref.name.clone(),
+        webhook.secret_ref.key.clone(),
+    ))
+}
+
+/// The Secret keys to read for `candidates`, at most [`MAX_SECRETS`]. If there are more, the
+/// keys start at `turn`, so each delivery reads the next keys and no `Build` is left out every
+/// time.
+fn secrets_to_read(candidates: &[Arc<Build>], turn: usize) -> Vec<SecretKey> {
+    let mut keys: Vec<SecretKey> = candidates.iter().filter_map(|b| secret_key(b)).collect();
+    keys.sort();
+    keys.dedup();
+    if keys.len() > MAX_SECRETS {
+        tracing::warn!(
+            secrets = keys.len(),
+            read = MAX_SECRETS,
+            "a delivery concerns more webhook Secrets than it reads; the others wait for their poll"
+        );
+        let start = turn % keys.len();
+        keys.rotate_left(start);
+        keys.truncate(MAX_SECRETS);
+    }
+    keys
 }
 
 /// Whether a push of `refs` concerns `build`.
@@ -326,6 +364,7 @@ impl Receiver {
         Self {
             bucket: Mutex::new(Bucket::new(settings.rate, settings.burst)),
             seen: Mutex::new(Seen::default()),
+            turn: AtomicUsize::new(0),
             lookup,
             settings,
         }
@@ -410,24 +449,19 @@ impl Receiver {
                 _ => return refused,
             }
         } else {
-            let mut verified = Vec::new();
-            for build in candidates {
-                let Some(webhook) = &build.spec.triggers.webhook else {
-                    continue;
-                };
-                let namespace = build.namespace().unwrap_or_default();
-                let secret = self
-                    .lookup
-                    .secret(
-                        &namespace,
-                        &webhook.secret_ref.name,
-                        &webhook.secret_ref.key,
-                    )
-                    .await;
+            let turn = self.turn.fetch_add(MAX_SECRETS, Ordering::Relaxed);
+            let mut vouching = Vec::new();
+            for key in secrets_to_read(&candidates, turn) {
+                let (namespace, name, item) = &key;
+                let secret = self.lookup.secret(namespace, name, item).await;
                 if secret.is_some_and(|s| verify(provider, &s, headers, body, now)) {
-                    verified.push(build);
+                    vouching.push(key);
                 }
             }
+            let verified: Vec<Arc<Build>> = candidates
+                .into_iter()
+                .filter(|b| secret_key(b).is_some_and(|k| vouching.contains(&k)))
+                .collect();
             if verified.is_empty() {
                 return refused;
             }
@@ -457,14 +491,18 @@ impl Receiver {
         if delivery.event != Event::Push {
             return (StatusCode::ACCEPTED, "ignored".to_owned());
         }
-        let mut woken = 0_usize;
-        for build in verified.iter().filter(|b| pushed(b, &delivery.refs)) {
-            let namespace = build.namespace().unwrap_or_default();
-            tracing::info!(build = %build.name_any(), %namespace, ?provider, "woken by a webhook");
-            self.lookup.touch(&namespace, &build.name_any(), now).await;
-            woken += 1;
-        }
-        (StatusCode::ACCEPTED, format!("{woken} woken"))
+        let woken: Vec<&Arc<Build>> = verified
+            .iter()
+            .filter(|b| pushed(b, &delivery.refs))
+            .collect();
+        futures_util::stream::iter(&woken)
+            .for_each_concurrent(MAX_TOUCHES, |build| async move {
+                let namespace = build.namespace().unwrap_or_default();
+                tracing::info!(build = %build.name_any(), %namespace, ?provider, "woken by a webhook");
+                self.lookup.touch(&namespace, &build.name_any(), now).await;
+            })
+            .await;
+        (StatusCode::ACCEPTED, format!("{} woken", woken.len()))
     }
 }
 

@@ -1,6 +1,7 @@
 //! The receiver against hostile senders, without a cluster.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use http::HeaderValue;
 use serde_json::json;
@@ -16,6 +17,7 @@ struct Fake {
     secrets: HashMap<(String, String, String), Vec<u8>>,
     app: Option<Vec<u8>>,
     touched: Arc<Mutex<Vec<String>>>,
+    reads: Arc<AtomicUsize>,
 }
 
 impl Lookup for Fake {
@@ -29,6 +31,7 @@ impl Lookup for Fake {
         name: &'a str,
         key: &'a str,
     ) -> BoxFuture<'a, Option<Vec<u8>>> {
+        self.reads.fetch_add(1, Ordering::Relaxed);
         let found = self
             .secrets
             .get(&(namespace.to_owned(), name.to_owned(), key.to_owned()))
@@ -180,6 +183,7 @@ fn world_with(max_body: usize, burst: u32) -> World {
                 secrets,
                 app: Some(APP.to_vec()),
                 touched: Arc::clone(&touched),
+                reads: Arc::default(),
             }),
             settings(max_body, burst),
         ),
@@ -549,6 +553,7 @@ async fn gitlab_tokens_and_signing_tokens() {
         )]),
         app: None,
         touched: Arc::new(Mutex::new(Vec::new())),
+        reads: Arc::default(),
     };
     let signed = Receiver::new(Box::new(fake), settings(1024, 10));
     let mut h = standard_headers(key, "msg_1", now().as_second(), &body);
@@ -568,7 +573,7 @@ async fn gitlab_tokens_and_signing_tokens() {
 }
 
 #[tokio::test]
-async fn gitea_bitbucket_and_generic() {
+async fn gitea_and_forgejo_signatures() {
     let w = world();
     let gitea =
         json!({"ref": "refs/heads/main", "after": "3e1a9c2d4f0b5a6c7d8e9f0a1b2c3d4e5f6a7b8c",
@@ -586,6 +591,7 @@ async fn gitea_bitbucket_and_generic() {
         post(&w, Provider::Gitea, h.clone(), &gitea).await.1,
         "1 woken"
     );
+    assert_eq!(w.woken(), ["team-a/tea"]);
     // Gitea sends the headers with an empty digest when the webhook has no secret.
     h.insert("x-gitea-delivery", HeaderValue::from_static("g2"));
     h.insert("x-forgejo-signature", HeaderValue::from_static(""));
@@ -593,7 +599,11 @@ async fn gitea_bitbucket_and_generic() {
         post(&w, Provider::Gitea, h, &gitea).await.0,
         StatusCode::UNAUTHORIZED
     );
+}
 
+#[tokio::test]
+async fn bitbucket_signature() {
+    let w = world();
     let bucket = json!({"repository": {"full_name": "team/app"},
         "push": {"changes": [{"new": {"type": "branch", "name": "main"}}]}})
     .to_string()
@@ -606,13 +616,19 @@ async fn gitea_bitbucket_and_generic() {
         HeaderValue::from_str(&format!("sha256={}", sign_hex(SECRET, &bucket))).unwrap(),
     );
     assert_eq!(post(&w, Provider::Bitbucket, h, &bucket).await.1, "1 woken");
+    assert_eq!(w.woken(), ["team-a/bucket"]);
+}
 
+#[tokio::test]
+async fn generic_standard_webhooks() {
+    let w = world();
     let generic = br#"{"repository": "https://github.com/acme/api", "ref": "main"}"#;
     let h = standard_headers(SECRET, "msg_1", now().as_second(), generic);
     assert_eq!(
         post(&w, Provider::Generic, h.clone(), generic).await.1,
         "2 woken"
     );
+    assert_eq!(w.woken(), ["team-a/api", "team-a/head"]);
     assert_eq!(
         post(&w, Provider::Generic, h, generic).await.1,
         "already received"
@@ -622,7 +638,91 @@ async fn gitea_bitbucket_and_generic() {
         post(&w, Provider::Generic, future, generic).await.0,
         StatusCode::UNAUTHORIZED
     );
-    w.woken();
+}
+
+/// A receiver for `count` `Build`s of `acme/api`, one per namespace, each with its own Secret
+/// when `own_secrets` is set, else all naming the same one in `team-a`.
+fn crowd(count: usize, own_secrets: bool) -> (Receiver, Arc<Mutex<Vec<String>>>, Arc<AtomicUsize>) {
+    let mut builds = Vec::new();
+    let mut secrets = HashMap::new();
+    for i in 0..count {
+        let namespace = if own_secrets {
+            format!("team-{i}")
+        } else {
+            "team-a".to_owned()
+        };
+        builds.push(build(
+            &namespace,
+            &format!("api-{i}"),
+            "https://github.com/acme/api",
+            "main",
+            &json!({}),
+        ));
+        secrets.insert(
+            (namespace, "hook".to_owned(), "secret".to_owned()),
+            SECRET.to_vec(),
+        );
+    }
+    let touched = Arc::new(Mutex::new(Vec::new()));
+    let reads = Arc::new(AtomicUsize::new(0));
+    let fake = Fake {
+        builds,
+        secrets,
+        app: None,
+        touched: Arc::clone(&touched),
+        reads: Arc::clone(&reads),
+    };
+    (
+        Receiver::new(Box::new(fake), settings(64 * 1024, 1000)),
+        touched,
+        reads,
+    )
+}
+
+#[tokio::test]
+async fn builds_that_share_a_secret_are_all_woken_with_one_read() {
+    let count = MAX_SECRETS + 8;
+    let (receiver, touched, reads) = crowd(count, false);
+    let body = github_push("refs/heads/main");
+    let (_, text) = receiver
+        .receive(
+            Provider::GitHub,
+            &github_headers(SECRET, &body, "c1", "push"),
+            &body,
+            now(),
+        )
+        .await;
+    assert_eq!(text, format!("{count} woken"));
+    assert_eq!(touched.lock().unwrap().len(), count);
+    assert_eq!(reads.load(Ordering::Relaxed), 1);
+}
+
+#[tokio::test]
+async fn more_secrets_than_one_delivery_reads_are_read_in_turn() {
+    let count = MAX_SECRETS + 8;
+    let (receiver, touched, reads) = crowd(count, true);
+    let body = github_push("refs/heads/main");
+    for (delivery, expected_reads) in [("c1", MAX_SECRETS), ("c2", 2 * MAX_SECRETS)] {
+        receiver
+            .receive(
+                Provider::GitHub,
+                &github_headers(SECRET, &body, delivery, "push"),
+                &body,
+                now(),
+            )
+            .await;
+        assert_eq!(
+            reads.load(Ordering::Relaxed),
+            expected_reads,
+            "reads are bounded"
+        );
+    }
+    let woken: HashSet<String> = touched.lock().unwrap().drain(..).collect();
+    assert_eq!(
+        woken.len(),
+        count,
+        "the next delivery reads the Secrets the first left out"
+    );
 }
 
 #[tokio::test]
