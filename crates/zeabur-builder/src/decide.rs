@@ -341,11 +341,21 @@ fn finished_at(run: &BuildRun) -> String {
         .unwrap_or_default()
 }
 
-/// The newest successful run.
+/// The successful run created last, the image `status.latestImage` names and Keel is told of.
+///
+/// Runs are ordered by creation, the order in which the reconcile found their commits on the
+/// ref, as the default tag's `.UnixTime` is; never by when they finished. A run of an older commit
+/// that finishes after a newer one so never replaces the newer image. Runs created in the same
+/// second are ordered by when they finished.
 pub(crate) fn latest_success(runs: &[BuildRun]) -> Option<&BuildRun> {
     runs.iter()
         .filter(|r| phase(r) == Some(Phase::Succeeded))
-        .max_by_key(|r| finished_at(r))
+        .max_by_key(|r| {
+            (
+                r.metadata.creation_timestamp.as_ref().map(|t| t.0),
+                finished_at(r),
+            )
+        })
 }
 
 /// The newest finished run.

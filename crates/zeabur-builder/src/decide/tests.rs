@@ -565,6 +565,51 @@ fn the_newest_success_is_notified_once() {
     assert!(notify_due(&build, &[old, new, failed]).is_none());
 }
 
+/// An older commit's run that finishes after a newer commit's run (a `Queue` run, a `BuildRun`
+/// made by hand, or a cancellation that lost the race with the Job) keeps the newer image.
+#[test]
+fn an_older_commit_finishing_late_does_not_replace_the_newer_image() {
+    let mut build = build();
+    build.spec.notify = vec![NotifyTarget {
+        kind: NotifyType::Keel,
+        url: "http://keel.keel:9300/v1/webhooks/native".to_owned(),
+        secret_ref: None,
+    }];
+    let mut older = succeeded("api-1", A, "2026-10-22T01:00:00Z", &["main-1-3e1a9c2"]);
+    if let Some(s) = older.status.as_mut() {
+        s.completion_time = Some("2026-10-22T03:00:00Z".to_owned());
+    }
+    let mut newer = succeeded("api-2", B, "2026-10-22T02:00:00Z", &["main-2-0123456"]);
+    if let Some(s) = newer.status.as_mut() {
+        s.notified_at = Some("2026-10-22T02:10:00Z".to_owned());
+    }
+    let runs = [older, newer];
+
+    let mut status = BuildStatus::default();
+    summarise(&mut status, &runs, "r/team-a/api", now(), Some(1));
+    assert_eq!(status.latest_revision.as_deref(), Some(B));
+    assert_eq!(
+        status.latest_image.as_deref(),
+        Some(format!("r/team-a/api:main-2-0123456@{DIGEST}").as_str())
+    );
+    assert!(
+        notify_due(&build, &runs).is_none(),
+        "Keel is not told of the older image"
+    );
+    assert!(
+        next_run(&build_with_status(&status), B, &runs, Trigger::Poll)
+            .create
+            .is_none()
+    );
+    assert_eq!(prune(&runs, 0), ["api-1"]);
+}
+
+fn build_with_status(status: &BuildStatus) -> Build {
+    let mut build = build();
+    build.status = Some(status.clone());
+    build
+}
+
 #[test]
 fn keel_gets_the_repository_and_the_template_tag() {
     let run = succeeded(

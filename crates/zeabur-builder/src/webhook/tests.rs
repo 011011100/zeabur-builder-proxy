@@ -439,6 +439,28 @@ async fn deliveries_without_a_push_wake_nothing() {
     assert_eq!(w.woken(), Vec::<String>::new());
 }
 
+/// GitHub's "Redeliver" sends the delivery again with its id; only the first one wakes. A copy
+/// that reaches another replica only asks the Git server once more, and
+/// [`crate::decide::next_run`] builds no commit twice.
+#[tokio::test]
+async fn app_redeliveries_wake_once() {
+    let w = world();
+    let body = github_push("refs/heads/main");
+    let headers = github_headers(APP, &body, "app-d1", "push");
+    assert_eq!(
+        post(&w, Provider::GitHubApp, headers.clone(), &body)
+            .await
+            .1,
+        "1 woken"
+    );
+    assert_eq!(w.woken(), ["team-c/via-app"]);
+    assert_eq!(
+        post(&w, Provider::GitHubApp, headers, &body).await,
+        (StatusCode::ACCEPTED, "already received".to_owned())
+    );
+    assert_eq!(w.woken(), Vec::<String>::new());
+}
+
 #[tokio::test]
 async fn the_app_wakes_its_builds_with_its_own_secret() {
     let w = world();
