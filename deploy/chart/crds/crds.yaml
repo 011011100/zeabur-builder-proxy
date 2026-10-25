@@ -572,10 +572,6 @@
                     "default": {},
                     "description": "What starts a build.",
                     "properties": {
-                      "onBaseImageChange": {
-                        "description": "Rebuild when a base image's digest changes.",
-                        "type": "boolean"
-                      },
                       "pollInterval": {
                         "description": "How often to check the ref. Default `1m`; `10m`, as a safety net, for a `githubApp`\nsource when the controller receives webhooks.",
                         "maxLength": 32,
@@ -883,7 +879,6 @@
                       "webhook",
                       "poll",
                       "manual",
-                      "baseImage",
                       "replan"
                     ],
                     "nullable": true,

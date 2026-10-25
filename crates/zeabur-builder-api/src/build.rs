@@ -247,9 +247,6 @@ pub struct TriggerSpec {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schemars(length(max = 32), regex(pattern = DURATION_PATTERN))]
     pub poll_interval: Option<String>,
-    /// Rebuild when a base image's digest changes.
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    pub on_base_image_change: bool,
 }
 
 /// A repository webhook.

@@ -86,8 +86,6 @@ pub enum Trigger {
     Poll,
     /// A person.
     Manual,
-    /// A base image changed.
-    BaseImage,
     /// A pinned plan failed and the controller planned again.
     Replan,
 }
