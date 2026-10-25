@@ -66,7 +66,10 @@ struct ControllerArgs {
     #[arg(long)]
     buildkitd_namespace: Option<String>,
     /// The buildkitd image, rootful.
-    #[arg(long, default_value = "docker.io/moby/buildkit:v0.34.1")]
+    #[arg(
+        long,
+        default_value = "docker.io/moby/buildkit:v0.34.1@sha256:99368f3e46177c6405b9740e4461d91cee004128daeecca78d4ceac50ec1da5c"
+    )]
     buildkitd_image: String,
     /// The `ConfigMap` with `buildkitd.toml`, in buildkitd's namespace.
     #[arg(long, default_value = "buildkitd")]
