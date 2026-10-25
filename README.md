@@ -22,7 +22,7 @@ spec:
 ```
 
 For every new commit on the ref, the controller builds an image, pushes it to
-`<defaultRegistry>/<namespace>/<name>` and writes it to `status.latestImage` as
+`<registry.host>/<namespace>/<name>` and writes it to `status.latestImage` as
 `<repository>:<tag>@<digest>`. Leave out `ref` to follow the repository's default branch;
 `status.resolvedRef` says which branch that was.
 
@@ -128,41 +128,67 @@ answer as an Event on the `Build`.
 
 ## Install
 
-Requirements: Kubernetes 1.33 or later for buildkitd's user namespace (older clusters set
-`--buildkitd-host-users=true`), a CNI that enforces NetworkPolicy, a registry, and disk space on
-the nodes for each namespace's build cache (20 GiB by default).
+Requirements: Kubernetes 1.33 or later for buildkitd's user namespace (older clusters add
+`--buildkitd-host-users=true` to `extraArgs`), a CNI that enforces NetworkPolicy, a registry, and
+disk space on the nodes for each namespace's build cache (20 GiB by default). buildkitd runs
+privileged, so its namespace must allow the Pod Security level `privileged`.
 
-No images are published yet. Build them for your architecture and push them to your registry:
-
-```sh
-nix develop
-scripts/build-images.sh <registry>/zeabur-builder <tag>   # builder, builder-job, builder-railpack
-```
-
-On a test cluster, `scripts/deploy-example.sh` deploys everything in `deploy/examples/`: the
-controller, its ClusterBuilders, the buildkitd config and egress policy, an in-cluster registry
-and sample Builds ([CONTRIBUTING.md](CONTRIBUTING.md#tests-against-a-cluster)).
-
-On your own cluster, install into `builder-system`:
+The chart installs the CRDs, the controller, the buildkitd config and egress policy, and the
+`dockerfile` and `railpack` ClusterBuilders. A released chart pins its three images by digest
+(see [Releases](#releases)):
 
 ```sh
-kubectl apply --server-side -f deploy/crds.json
-helm install builder deploy/chart -n builder-system --create-namespace \
-  --set image.repository=<registry>/zeabur-builder/builder --set image.tag=<tag> \
-  --set defaultRegistry=<registry>
+helm install builder oci://ghcr.io/zeabur-oss/charts/zeabur-builder --version <version> \
+  -n builder-system --create-namespace --set registry.host=<registry>
 ```
 
-Then apply the buildkitd config and egress policy (`deploy/examples/buildkitd.yaml`) and the
-ClusterBuilders (the end of `deploy/examples/controller.yaml`), with your images and registry in
-place of the example's. For each namespace that builds, create a `kubernetes.io/dockerconfigjson`
-Secret named `registry-push-<namespace>` in `builder-system`, allowed to push below
-`<registry>/<namespace>/`.
+`deploy/chart/values.yaml` documents every value. The registry values:
+
+- `registry.host`: where images go, as `<host>/<namespace>/<build>`.
+- `registry.authPrefix`: for each namespace that builds, create a
+  `kubernetes.io/dockerconfigjson` Secret named `registry-push-<namespace>` in `builder-system`,
+  allowed to push below `<registry>/<namespace>/`. Set it to `""` for a registry that takes
+  anonymous pushes.
+- `registry.ca` or `registry.caFrom`: the CA of a registry with a private certificate.
+- `registry.inCluster`: the registry's namespace, Pod labels and port, when it runs in the
+  cluster, so that the egress policy lets buildkitd reach it.
+
+With the [Zeabur Catalog](https://github.com/zeabur-oss/catalog)'s Zot, which takes anonymous
+pushes over TLS:
+
+```sh
+helm install builder oci://ghcr.io/zeabur-oss/charts/zeabur-builder --version <version> \
+  -n builder-system --create-namespace --set registry.host=zot.zot.svc:5000 \
+  --set registry.authPrefix= --set registry.caFrom.namespace=zot \
+  --set registry.caFrom.secret=zot-tls --set registry.inCluster.namespace=zot \
+  --set registry.inCluster.podLabels.app\\.kubernetes\\.io/name=zot
+```
+
+Helm does not upgrade CRDs. Before `helm upgrade`, apply the new chart's `crds/crds.yaml`.
+
+On a test cluster, `scripts/deploy-example.sh` installs the chart from this checkout with a test
+registry and sample Builds ([CONTRIBUTING.md](CONTRIBUTING.md#tests-against-a-cluster)).
+
+### Releases
+
+A tag `v<version>` builds the images for linux/amd64 and linux/arm64, smokes them on a k3s cluster,
+publishes `ghcr.io/zeabur-oss/builder`, `builder-job` and `builder-railpack` by digest, pins those
+digests in the chart, pushes the chart to `oci://ghcr.io/zeabur-oss/charts/zeabur-builder` and signs
+all of them keyless with Sigstore. A maintainer then publishes the draft release. To check an
+image before you install it:
+
+```sh
+cosign verify ghcr.io/zeabur-oss/builder@sha256:<digest> \
+  --certificate-identity https://github.com/zeabur-oss/builder/.github/workflows/release.yml@refs/tags/v<version> \
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com
+```
 
 ## Status
 
 Zeabur Builder has no release yet. The API is `v1alpha1`.
 
-On a k3s 1.36 cluster, with `scripts/deploy-example.sh` and `scripts/example-isolation.sh`:
+On a k3s 1.36 cluster, with `scripts/deploy-example.sh` and `scripts/example-isolation.sh` (CI runs
+both, `scripts/ci.sh kubernetes`):
 
 - Dockerfile and Railpack builds of public repositories, started by polling.
 - Failures for a missing ref and a missing Dockerfile, in `SourceReady` and the `BuildRun`.

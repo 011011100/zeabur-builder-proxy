@@ -20,7 +20,7 @@
 //! - **Network.** `RUN` steps get their own network namespace through the config's `networkMode =
 //!   "bridge"`, so they leave through the Pod's address and the cluster-wide egress policy on
 //!   `app.kubernetes.io/name: buildkitd` applies to them; that policy and the config are deployment
-//!   files (`deploy/examples/buildkitd.yaml`).
+//!   files (`deploy/chart/templates/buildkitd.yaml`).
 //! - **Probes.** `buildctl debug workers` over the local socket, which needs no client certificate;
 //!   every two seconds, since a build waits on readiness after a cold start.
 

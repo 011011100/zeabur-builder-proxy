@@ -1,0 +1,1139 @@
+---
+{
+  "apiVersion": "apiextensions.k8s.io/v1",
+  "kind": "CustomResourceDefinition",
+  "metadata": {
+    "name": "clusterbuilders.builder.zeabur.com"
+  },
+  "spec": {
+    "group": "builder.zeabur.com",
+    "names": {
+      "categories": [
+        "zeabur-builder"
+      ],
+      "kind": "ClusterBuilder",
+      "plural": "clusterbuilders",
+      "shortNames": [
+        "cbuilder"
+      ],
+      "singular": "clusterbuilder"
+    },
+    "scope": "Cluster",
+    "versions": [
+      {
+        "additionalPrinterColumns": [
+          {
+            "jsonPath": ".spec.type",
+            "name": "Type",
+            "type": "string"
+          },
+          {
+            "jsonPath": ".spec.frontend.type",
+            "name": "Frontend",
+            "type": "string"
+          },
+          {
+            "jsonPath": ".metadata.creationTimestamp",
+            "name": "Age",
+            "type": "date"
+          }
+        ],
+        "name": "v1alpha1",
+        "schema": {
+          "openAPIV3Schema": {
+            "description": "How Zeabur Builder plans and builds: Dockerfile, Railpack or zbplan.",
+            "properties": {
+              "spec": {
+                "description": "A way to build. Every builder reduces to the same shape: an optional planner that writes files\ninto `/workspace/plan`, then a `BuildKit` frontend with options that reads them.",
+                "properties": {
+                  "frontend": {
+                    "description": "The frontend that builds the plan.",
+                    "properties": {
+                      "opts": {
+                        "additionalProperties": {
+                          "maxLength": 4096,
+                          "type": "string"
+                        },
+                        "description": "Frontend options added to every build, as `buildctl --opt key=value`.",
+                        "maxProperties": 32,
+                        "type": "object"
+                      },
+                      "source": {
+                        "description": "The frontend image for `gateway.v0`, such as\n`ghcr.io/railwayapp/railpack-frontend:v0.43.0`. It must match the planner's version.",
+                        "maxLength": 512,
+                        "nullable": true,
+                        "type": "string"
+                      },
+                      "type": {
+                        "description": "`dockerfile.v0` (built into buildkitd) or `gateway.v0` (an image).",
+                        "enum": [
+                          "dockerfile.v0",
+                          "gateway.v0"
+                        ],
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "type"
+                    ],
+                    "type": "object",
+                    "x-kubernetes-validations": [
+                      {
+                        "message": "source is required for gateway.v0 and forbidden for dockerfile.v0",
+                        "rule": "self.type == 'gateway.v0' ? has(self.source) && self.source != '' : !has(self.source)"
+                      }
+                    ]
+                  },
+                  "planner": {
+                    "description": "The planner; absent when the builder needs no plan.",
+                    "nullable": true,
+                    "properties": {
+                      "credentialsRef": {
+                        "description": "A Secret in the controller's namespace, mounted only into the plan container (an LLM API\nkey, for one). The controller copies it into a short-lived Secret owned by the `BuildRun`.",
+                        "nullable": true,
+                        "properties": {
+                          "name": {
+                            "description": "The Secret's name.",
+                            "maxLength": 253,
+                            "minLength": 1,
+                            "type": "string"
+                          }
+                        },
+                        "required": [
+                          "name"
+                        ],
+                        "type": "object"
+                      },
+                      "deterministic": {
+                        "description": "Whether the same source always gives the same plan. Deterministic planners (Railpack) run\nevery time; others (zbplan) have their plan pinned and reused.",
+                        "type": "boolean"
+                      },
+                      "image": {
+                        "description": "The planner image, pinned by digest in production.",
+                        "maxLength": 512,
+                        "minLength": 1,
+                        "type": "string"
+                      },
+                      "needsBuildkit": {
+                        "description": "Whether planning builds on buildkitd (zbplan), so the plan container gets the client\ncertificate and the same instance as the build.",
+                        "type": "boolean"
+                      },
+                      "resources": {
+                        "description": "CPU and memory for the plan container.",
+                        "nullable": true,
+                        "properties": {
+                          "limits": {
+                            "description": "Limits.",
+                            "nullable": true,
+                            "properties": {
+                              "cpu": {
+                                "description": "CPU, such as `500m`.",
+                                "maxLength": 32,
+                                "nullable": true,
+                                "type": "string"
+                              },
+                              "memory": {
+                                "description": "Memory, such as `1Gi`.",
+                                "maxLength": 32,
+                                "nullable": true,
+                                "type": "string"
+                              }
+                            },
+                            "type": "object"
+                          },
+                          "requests": {
+                            "description": "Requests.",
+                            "nullable": true,
+                            "properties": {
+                              "cpu": {
+                                "description": "CPU, such as `500m`.",
+                                "maxLength": 32,
+                                "nullable": true,
+                                "type": "string"
+                              },
+                              "memory": {
+                                "description": "Memory, such as `1Gi`.",
+                                "maxLength": 32,
+                                "nullable": true,
+                                "type": "string"
+                              }
+                            },
+                            "type": "object"
+                          }
+                        },
+                        "type": "object"
+                      },
+                      "timeout": {
+                        "description": "How long planning may take. Default `10m`.",
+                        "maxLength": 32,
+                        "nullable": true,
+                        "pattern": "^([0-9]{1,6}(\\.[0-9]{1,3})?(ms|s|m|h))+$",
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "deterministic",
+                      "image"
+                    ],
+                    "type": "object"
+                  },
+                  "type": {
+                    "description": "What the planning step does.",
+                    "enum": [
+                      "dockerfile",
+                      "railpack",
+                      "zbplan"
+                    ],
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "frontend",
+                  "type"
+                ],
+                "type": "object",
+                "x-kubernetes-validations": [
+                  {
+                    "message": "planner is required for railpack and zbplan, and forbidden for dockerfile",
+                    "rule": "self.type == 'dockerfile' ? !has(self.planner) : has(self.planner)"
+                  }
+                ]
+              }
+            },
+            "required": [
+              "spec"
+            ],
+            "title": "ClusterBuilder",
+            "type": "object"
+          }
+        },
+        "served": true,
+        "storage": true
+      }
+    ]
+  }
+}
+---
+{
+  "apiVersion": "apiextensions.k8s.io/v1",
+  "kind": "CustomResourceDefinition",
+  "metadata": {
+    "name": "builds.builder.zeabur.com"
+  },
+  "spec": {
+    "group": "builder.zeabur.com",
+    "names": {
+      "categories": [
+        "zeabur-builder"
+      ],
+      "kind": "Build",
+      "plural": "builds",
+      "shortNames": [
+        "zbbuild"
+      ],
+      "singular": "build"
+    },
+    "scope": "Namespaced",
+    "versions": [
+      {
+        "additionalPrinterColumns": [
+          {
+            "jsonPath": ".spec.builderRef",
+            "name": "Builder",
+            "type": "string"
+          },
+          {
+            "jsonPath": ".status.sourceMode",
+            "name": "Source",
+            "type": "string"
+          },
+          {
+            "jsonPath": ".status.latestRevision",
+            "name": "Revision",
+            "type": "string"
+          },
+          {
+            "jsonPath": ".status.conditions[?(@.type==\"Ready\")].status",
+            "name": "Ready",
+            "type": "string"
+          },
+          {
+            "jsonPath": ".status.latestImage",
+            "name": "Image",
+            "priority": 1,
+            "type": "string"
+          },
+          {
+            "jsonPath": ".metadata.creationTimestamp",
+            "name": "Age",
+            "type": "date"
+          }
+        ],
+        "name": "v1alpha1",
+        "schema": {
+          "openAPIV3Schema": {
+            "description": "A Git ref that Zeabur Builder keeps built into a container image.",
+            "properties": {
+              "spec": {
+                "description": "A Git ref to follow and the image to keep built from it.\n\n```yaml\napiVersion: builder.zeabur.com/v1alpha1\nkind: Build\nmetadata: {name: api, namespace: team-a}\nspec:\n  source: {git: {url: https://github.com/acme/api, ref: main}}\n  builderRef: railpack\n```",
+                "properties": {
+                  "builderRef": {
+                    "description": "The `ClusterBuilder`.",
+                    "maxLength": 253,
+                    "minLength": 1,
+                    "type": "string"
+                  },
+                  "concurrency": {
+                    "default": "Replace",
+                    "description": "What a new commit does to a running build.",
+                    "enum": [
+                      "Replace",
+                      "Queue"
+                    ],
+                    "type": "string"
+                  },
+                  "env": {
+                    "description": "Build variables, always passed as `BuildKit` secrets, never as build arguments.",
+                    "items": {
+                      "description": "A build variable.",
+                      "properties": {
+                        "name": {
+                          "description": "The name, as the build sees it.",
+                          "maxLength": 128,
+                          "minLength": 1,
+                          "pattern": "^[A-Za-z_][A-Za-z0-9_]*$",
+                          "type": "string"
+                        },
+                        "value": {
+                          "description": "A literal value.",
+                          "maxLength": 32768,
+                          "nullable": true,
+                          "type": "string"
+                        },
+                        "valueFrom": {
+                          "description": "A value from a Secret in the same namespace.",
+                          "nullable": true,
+                          "properties": {
+                            "secretKeyRef": {
+                              "description": "A key of a Secret.",
+                              "properties": {
+                                "key": {
+                                  "description": "The key.",
+                                  "maxLength": 253,
+                                  "minLength": 1,
+                                  "type": "string"
+                                },
+                                "name": {
+                                  "description": "The Secret's name.",
+                                  "maxLength": 253,
+                                  "minLength": 1,
+                                  "type": "string"
+                                }
+                              },
+                              "required": [
+                                "key",
+                                "name"
+                              ],
+                              "type": "object"
+                            }
+                          },
+                          "required": [
+                            "secretKeyRef"
+                          ],
+                          "type": "object"
+                        }
+                      },
+                      "required": [
+                        "name"
+                      ],
+                      "type": "object",
+                      "x-kubernetes-validations": [
+                        {
+                          "message": "set exactly one of value and valueFrom",
+                          "rule": "has(self.value) != has(self.valueFrom)"
+                        }
+                      ]
+                    },
+                    "maxItems": 128,
+                    "type": "array"
+                  },
+                  "historyLimit": {
+                    "description": "Finished `BuildRun`s to keep. The newest success is always kept. Default 10.",
+                    "format": "int32",
+                    "maximum": 100.0,
+                    "minimum": 1.0,
+                    "nullable": true,
+                    "type": "integer"
+                  },
+                  "notify": {
+                    "description": "Who to tell after a successful build.",
+                    "items": {
+                      "description": "A notification after a successful build.",
+                      "properties": {
+                        "secretRef": {
+                          "description": "A token or HMAC key.",
+                          "nullable": true,
+                          "properties": {
+                            "name": {
+                              "description": "The Secret's name.",
+                              "maxLength": 253,
+                              "minLength": 1,
+                              "type": "string"
+                            }
+                          },
+                          "required": [
+                            "name"
+                          ],
+                          "type": "object"
+                        },
+                        "type": {
+                          "description": "The receiver.",
+                          "enum": [
+                            "keel",
+                            "flux-receiver",
+                            "generic"
+                          ],
+                          "type": "string"
+                        },
+                        "url": {
+                          "description": "Where to POST.",
+                          "maxLength": 2048,
+                          "minLength": 1,
+                          "pattern": "^https?://",
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "type",
+                        "url"
+                      ],
+                      "type": "object"
+                    },
+                    "maxItems": 8,
+                    "type": "array"
+                  },
+                  "output": {
+                    "description": "Where to push. Default: `<defaultRegistry>/<namespace>/<name>`.",
+                    "nullable": true,
+                    "properties": {
+                      "extraTags": {
+                        "description": "Fixed tags pushed as well, such as `latest`. Rollout tools should not rely on them.",
+                        "items": {
+                          "maxLength": 128,
+                          "pattern": "^[A-Za-z0-9_][A-Za-z0-9._-]{0,127}$",
+                          "type": "string"
+                        },
+                        "maxItems": 8,
+                        "type": "array"
+                      },
+                      "image": {
+                        "description": "The image repository, without a tag.",
+                        "maxLength": 512,
+                        "nullable": true,
+                        "pattern": "^[a-z0-9]([a-z0-9._:/-]*[a-z0-9])?$",
+                        "type": "string"
+                      },
+                      "pushSecretRef": {
+                        "description": "A `kubernetes.io/dockerconfigjson` Secret to push with instead of the controller's.",
+                        "nullable": true,
+                        "properties": {
+                          "name": {
+                            "description": "The Secret's name.",
+                            "maxLength": 253,
+                            "minLength": 1,
+                            "type": "string"
+                          }
+                        },
+                        "required": [
+                          "name"
+                        ],
+                        "type": "object"
+                      },
+                      "tagTemplate": {
+                        "description": "The tag: `{{.Field}}` with `.Branch`, `.ShortSHA`, `.SHA`, `.UnixTime` and `.BuildRun`.\nDefault `{{.Branch}}-{{.UnixTime}}-{{.ShortSHA}}`.",
+                        "maxLength": 256,
+                        "nullable": true,
+                        "type": "string"
+                      }
+                    },
+                    "type": "object"
+                  },
+                  "plan": {
+                    "default": {},
+                    "description": "Plan pinning, for planners that are not deterministic.",
+                    "properties": {
+                      "autoReplanOnFailure": {
+                        "description": "When a pinned plan fails to build, plan again once. Default true.",
+                        "nullable": true,
+                        "type": "boolean"
+                      },
+                      "pin": {
+                        "description": "Reuse the last successful plan. Default true; ignored for deterministic planners.",
+                        "nullable": true,
+                        "type": "boolean"
+                      },
+                      "requireApproval": {
+                        "description": "New plans wait for `builder.zeabur.com/approve-plan`.",
+                        "type": "boolean"
+                      }
+                    },
+                    "type": "object"
+                  },
+                  "source": {
+                    "description": "Where the source comes from.",
+                    "properties": {
+                      "credentialsRef": {
+                        "description": "Credentials for a plain Git server: a `kubernetes.io/ssh-auth` Secret (with `known_hosts`)\nor a `kubernetes.io/basic-auth` one, labelled `builder.zeabur.com/git-credentials: \"true\"`.",
+                        "nullable": true,
+                        "properties": {
+                          "name": {
+                            "description": "The Secret's name.",
+                            "maxLength": 253,
+                            "minLength": 1,
+                            "type": "string"
+                          }
+                        },
+                        "required": [
+                          "name"
+                        ],
+                        "type": "object"
+                      },
+                      "git": {
+                        "description": "The Git repository.",
+                        "properties": {
+                          "contextDir": {
+                            "description": "The build context inside the repository, for monorepos.",
+                            "maxLength": 1024,
+                            "nullable": true,
+                            "pattern": "^[A-Za-z0-9_@+-][A-Za-z0-9._@+-]*(/[A-Za-z0-9_@+-][A-Za-z0-9._@+-]*)*$",
+                            "type": "string"
+                          },
+                          "dockerfile": {
+                            "description": "The Dockerfile, relative to the context, for the `dockerfile` builder. Default\n`Dockerfile`.",
+                            "maxLength": 1024,
+                            "nullable": true,
+                            "pattern": "^[A-Za-z0-9_@+-][A-Za-z0-9._@+-]*(/[A-Za-z0-9_@+-][A-Za-z0-9._@+-]*)*$",
+                            "type": "string"
+                          },
+                          "ref": {
+                            "default": "HEAD",
+                            "description": "A branch or tag; no wildcards. Default `HEAD`: the repository's default branch, which is\nresolved again on every poll, so a renamed default branch is followed.",
+                            "maxLength": 255,
+                            "minLength": 1,
+                            "type": "string"
+                          },
+                          "url": {
+                            "description": "`https://`, `ssh://` or `user@host:path`.",
+                            "maxLength": 2048,
+                            "minLength": 1,
+                            "type": "string"
+                          }
+                        },
+                        "required": [
+                          "url"
+                        ],
+                        "type": "object"
+                      },
+                      "githubApp": {
+                        "description": "Reach the repository through an installation of the cluster's GitHub App, which a cluster\nadmin has allowed for this namespace.",
+                        "nullable": true,
+                        "properties": {
+                          "installationId": {
+                            "description": "The installation's id, from `https://github.com/settings/installations/<id>`.",
+                            "format": "int64",
+                            "minimum": 1.0,
+                            "type": "integer"
+                          }
+                        },
+                        "required": [
+                          "installationId"
+                        ],
+                        "type": "object"
+                      }
+                    },
+                    "required": [
+                      "git"
+                    ],
+                    "type": "object",
+                    "x-kubernetes-validations": [
+                      {
+                        "message": "set at most one of credentialsRef and githubApp",
+                        "rule": "!(has(self.credentialsRef) && has(self.githubApp))"
+                      },
+                      {
+                        "message": "a githubApp source needs an https URL",
+                        "rule": "!has(self.githubApp) || self.git.url.startsWith('https://')"
+                      }
+                    ]
+                  },
+                  "suspend": {
+                    "description": "Stop automatic builds. `BuildRun`s created by hand still run.",
+                    "type": "boolean"
+                  },
+                  "triggers": {
+                    "default": {},
+                    "description": "What starts a build.",
+                    "properties": {
+                      "onBaseImageChange": {
+                        "description": "Rebuild when a base image's digest changes.",
+                        "type": "boolean"
+                      },
+                      "pollInterval": {
+                        "description": "How often to check the ref. Default `1m`; `10m`, as a safety net, for a `githubApp`\nsource when the controller receives webhooks.",
+                        "maxLength": 32,
+                        "nullable": true,
+                        "pattern": "^([0-9]{1,6}(\\.[0-9]{1,3})?(ms|s|m|h))+$",
+                        "type": "string"
+                      },
+                      "webhook": {
+                        "description": "Push events from a repository webhook, signed with a secret this `Build` names. A\n`githubApp` source also wakes on the App's push events, without this.",
+                        "nullable": true,
+                        "properties": {
+                          "secretRef": {
+                            "description": "The shared secret, in a Secret in the same namespace: the webhook's secret on GitHub,\nGitea, Forgejo and Bitbucket, its secret token or signing token on GitLab, and a\n`whsec_` key for the generic form.",
+                            "properties": {
+                              "key": {
+                                "description": "The key.",
+                                "maxLength": 253,
+                                "minLength": 1,
+                                "type": "string"
+                              },
+                              "name": {
+                                "description": "The Secret's name.",
+                                "maxLength": 253,
+                                "minLength": 1,
+                                "type": "string"
+                              }
+                            },
+                            "required": [
+                              "key",
+                              "name"
+                            ],
+                            "type": "object"
+                          }
+                        },
+                        "required": [
+                          "secretRef"
+                        ],
+                        "type": "object"
+                      }
+                    },
+                    "type": "object"
+                  }
+                },
+                "required": [
+                  "builderRef",
+                  "source"
+                ],
+                "type": "object"
+              },
+              "status": {
+                "description": "What the controller knows about a `Build`.",
+                "nullable": true,
+                "properties": {
+                  "baseImages": {
+                    "description": "Base images of the newest successful build, `name@sha256:…`.",
+                    "items": {
+                      "maxLength": 1024,
+                      "type": "string"
+                    },
+                    "maxItems": 10,
+                    "type": "array"
+                  },
+                  "conditions": {
+                    "description": "`SourceReady`, `BuilderReady`, `Ready` and `PlanApprovalPending`.",
+                    "items": {
+                      "description": "A status condition, as `metav1.Condition`.",
+                      "properties": {
+                        "lastTransitionTime": {
+                          "description": "When the status last changed (RFC 3339).",
+                          "format": "date-time",
+                          "type": "string"
+                        },
+                        "message": {
+                          "description": "A human-readable message.",
+                          "maxLength": 32768,
+                          "type": "string"
+                        },
+                        "observedGeneration": {
+                          "description": "The `metadata.generation` the condition was computed from.",
+                          "format": "int64",
+                          "minimum": 0.0,
+                          "nullable": true,
+                          "type": "integer"
+                        },
+                        "reason": {
+                          "description": "A `CamelCase` reason.",
+                          "maxLength": 1024,
+                          "minLength": 1,
+                          "type": "string"
+                        },
+                        "status": {
+                          "description": "`True`, `False` or `Unknown`.",
+                          "enum": [
+                            "True",
+                            "False",
+                            "Unknown"
+                          ],
+                          "type": "string"
+                        },
+                        "type": {
+                          "description": "`Ready`, `SourceReady`, `BuilderReady`, `PlanApprovalPending` or `AwaitingApproval`.",
+                          "maxLength": 316,
+                          "minLength": 1,
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "lastTransitionTime",
+                        "reason",
+                        "status",
+                        "type"
+                      ],
+                      "type": "object"
+                    },
+                    "maxItems": 8,
+                    "type": "array"
+                  },
+                  "lastBuildRunRef": {
+                    "description": "The newest `BuildRun`.",
+                    "maxLength": 253,
+                    "nullable": true,
+                    "type": "string"
+                  },
+                  "lastResolvedAt": {
+                    "description": "When the ref was last resolved.",
+                    "format": "date-time",
+                    "nullable": true,
+                    "type": "string"
+                  },
+                  "lastWebhookAt": {
+                    "description": "When a webhook last woke this `Build`; written by the receiver only. Later than\n`lastResolvedAt`: the ref is asked again.",
+                    "format": "date-time",
+                    "nullable": true,
+                    "type": "string"
+                  },
+                  "latestImage": {
+                    "description": "Its image, `<repository>:<tag>@<digest>`.",
+                    "maxLength": 1024,
+                    "nullable": true,
+                    "type": "string"
+                  },
+                  "latestRevision": {
+                    "description": "The commit of the newest successful build.",
+                    "maxLength": 40,
+                    "nullable": true,
+                    "pattern": "^[0-9a-f]{40}$",
+                    "type": "string"
+                  },
+                  "observedGeneration": {
+                    "description": "The generation last acted on.",
+                    "format": "int64",
+                    "nullable": true,
+                    "type": "integer"
+                  },
+                  "pinnedPlanDigest": {
+                    "description": "The plan reused by the next build.",
+                    "maxLength": 71,
+                    "nullable": true,
+                    "pattern": "^sha256:[0-9a-f]{64}$",
+                    "type": "string"
+                  },
+                  "remoteRevision": {
+                    "description": "The commit the ref points at.",
+                    "maxLength": 40,
+                    "nullable": true,
+                    "pattern": "^[0-9a-f]{40}$",
+                    "type": "string"
+                  },
+                  "resolvedRef": {
+                    "description": "The full name of the ref `remoteRevision` came from, such as `refs/heads/master` when\n`ref` is `HEAD`.",
+                    "maxLength": 1024,
+                    "nullable": true,
+                    "type": "string"
+                  },
+                  "sourceMode": {
+                    "description": "How the source is reached.",
+                    "enum": [
+                      "GitHubApp",
+                      "PlainGit"
+                    ],
+                    "nullable": true,
+                    "type": "string"
+                  }
+                },
+                "type": "object"
+              }
+            },
+            "required": [
+              "spec"
+            ],
+            "title": "Build",
+            "type": "object"
+          }
+        },
+        "served": true,
+        "storage": true,
+        "subresources": {
+          "status": {}
+        }
+      }
+    ]
+  }
+}
+---
+{
+  "apiVersion": "apiextensions.k8s.io/v1",
+  "kind": "CustomResourceDefinition",
+  "metadata": {
+    "name": "buildruns.builder.zeabur.com"
+  },
+  "spec": {
+    "group": "builder.zeabur.com",
+    "names": {
+      "categories": [
+        "zeabur-builder"
+      ],
+      "kind": "BuildRun",
+      "plural": "buildruns",
+      "shortNames": [
+        "zbrun"
+      ],
+      "singular": "buildrun"
+    },
+    "scope": "Namespaced",
+    "versions": [
+      {
+        "additionalPrinterColumns": [
+          {
+            "jsonPath": ".spec.buildRef",
+            "name": "Build",
+            "type": "string"
+          },
+          {
+            "jsonPath": ".spec.revision",
+            "name": "Revision",
+            "priority": 1,
+            "type": "string"
+          },
+          {
+            "jsonPath": ".status.phase",
+            "name": "Phase",
+            "type": "string"
+          },
+          {
+            "jsonPath": ".status.reason",
+            "name": "Reason",
+            "type": "string"
+          },
+          {
+            "jsonPath": ".status.startTime",
+            "name": "Started",
+            "type": "date"
+          },
+          {
+            "jsonPath": ".status.completionTime",
+            "name": "Finished",
+            "type": "date"
+          },
+          {
+            "jsonPath": ".metadata.creationTimestamp",
+            "name": "Age",
+            "type": "date"
+          }
+        ],
+        "name": "v1alpha1",
+        "schema": {
+          "openAPIV3Schema": {
+            "description": "One build of one Git commit by Zeabur Builder.",
+            "properties": {
+              "spec": {
+                "description": "One build of one commit. The spec is immutable: to build again, create another.",
+                "properties": {
+                  "buildRef": {
+                    "description": "The `Build`.",
+                    "maxLength": 253,
+                    "minLength": 1,
+                    "type": "string"
+                  },
+                  "forceReplan": {
+                    "description": "Ignore the pinned plan and plan again.",
+                    "type": "boolean"
+                  },
+                  "planDigest": {
+                    "description": "Build with this plan instead of following the `Build`'s plan policy.",
+                    "maxLength": 71,
+                    "nullable": true,
+                    "pattern": "^sha256:[0-9a-f]{64}$",
+                    "type": "string"
+                  },
+                  "ref": {
+                    "description": "The full name of the ref `revision` was resolved from, such as `refs/heads/master`.",
+                    "maxLength": 1024,
+                    "nullable": true,
+                    "type": "string"
+                  },
+                  "revision": {
+                    "description": "The full commit SHA.",
+                    "maxLength": 40,
+                    "pattern": "^[0-9a-f]{40}$",
+                    "type": "string"
+                  },
+                  "trigger": {
+                    "description": "What started a `BuildRun`.",
+                    "enum": [
+                      "webhook",
+                      "poll",
+                      "manual",
+                      "baseImage",
+                      "replan"
+                    ],
+                    "nullable": true,
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "buildRef",
+                  "revision"
+                ],
+                "type": "object",
+                "x-kubernetes-validations": [
+                  {
+                    "message": "a BuildRun's spec is immutable; create another",
+                    "rule": "self == oldSelf"
+                  }
+                ]
+              },
+              "status": {
+                "description": "Progress and result.",
+                "nullable": true,
+                "properties": {
+                  "baseImages": {
+                    "description": "Base images, `name@sha256:…`.",
+                    "items": {
+                      "maxLength": 1024,
+                      "type": "string"
+                    },
+                    "maxItems": 10,
+                    "type": "array"
+                  },
+                  "buildkitdInstance": {
+                    "description": "The namespace's buildkitd Pod, such as `buildkitd-team-a-0`.",
+                    "maxLength": 253,
+                    "nullable": true,
+                    "type": "string"
+                  },
+                  "cacheStats": {
+                    "description": "Build steps and cache hits.",
+                    "nullable": true,
+                    "properties": {
+                      "cached": {
+                        "description": "Steps answered from cache.",
+                        "format": "int64",
+                        "minimum": 0.0,
+                        "type": "integer"
+                      },
+                      "total": {
+                        "description": "Distinct steps.",
+                        "format": "int64",
+                        "minimum": 0.0,
+                        "type": "integer"
+                      }
+                    },
+                    "required": [
+                      "cached",
+                      "total"
+                    ],
+                    "type": "object"
+                  },
+                  "checkRunID": {
+                    "description": "The GitHub check run.",
+                    "format": "int64",
+                    "nullable": true,
+                    "type": "integer"
+                  },
+                  "completionTime": {
+                    "description": "When it finished.",
+                    "format": "date-time",
+                    "nullable": true,
+                    "type": "string"
+                  },
+                  "conditions": {
+                    "description": "`AwaitingApproval`, when the run only planned.",
+                    "items": {
+                      "description": "A status condition, as `metav1.Condition`.",
+                      "properties": {
+                        "lastTransitionTime": {
+                          "description": "When the status last changed (RFC 3339).",
+                          "format": "date-time",
+                          "type": "string"
+                        },
+                        "message": {
+                          "description": "A human-readable message.",
+                          "maxLength": 32768,
+                          "type": "string"
+                        },
+                        "observedGeneration": {
+                          "description": "The `metadata.generation` the condition was computed from.",
+                          "format": "int64",
+                          "minimum": 0.0,
+                          "nullable": true,
+                          "type": "integer"
+                        },
+                        "reason": {
+                          "description": "A `CamelCase` reason.",
+                          "maxLength": 1024,
+                          "minLength": 1,
+                          "type": "string"
+                        },
+                        "status": {
+                          "description": "`True`, `False` or `Unknown`.",
+                          "enum": [
+                            "True",
+                            "False",
+                            "Unknown"
+                          ],
+                          "type": "string"
+                        },
+                        "type": {
+                          "description": "`Ready`, `SourceReady`, `BuilderReady`, `PlanApprovalPending` or `AwaitingApproval`.",
+                          "maxLength": 316,
+                          "minLength": 1,
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "lastTransitionTime",
+                        "reason",
+                        "status",
+                        "type"
+                      ],
+                      "type": "object"
+                    },
+                    "maxItems": 8,
+                    "type": "array"
+                  },
+                  "imageDigest": {
+                    "description": "The pushed manifest's digest.",
+                    "maxLength": 71,
+                    "nullable": true,
+                    "pattern": "^sha256:[0-9a-f]{64}$",
+                    "type": "string"
+                  },
+                  "jobRef": {
+                    "description": "The Job.",
+                    "maxLength": 253,
+                    "nullable": true,
+                    "type": "string"
+                  },
+                  "message": {
+                    "description": "Details for people, at most 1 KiB from the Job.",
+                    "maxLength": 4096,
+                    "nullable": true,
+                    "type": "string"
+                  },
+                  "notifiedAt": {
+                    "description": "When the `Build`'s notify targets were sent this run's image, whatever they answered.\nSet once; a run with it is not sent again.",
+                    "format": "date-time",
+                    "nullable": true,
+                    "type": "string"
+                  },
+                  "phase": {
+                    "description": "The phases: `Pending → Planning → Building → Succeeded | Failed | Cancelled`.",
+                    "enum": [
+                      "Pending",
+                      "Planning",
+                      "Building",
+                      "Succeeded",
+                      "Failed",
+                      "Cancelled"
+                    ],
+                    "nullable": true,
+                    "type": "string"
+                  },
+                  "phaseDurations": {
+                    "additionalProperties": {
+                      "maxLength": 32,
+                      "type": "string"
+                    },
+                    "description": "Time per phase (`fetch`, `plan`, `build`, `push`), as durations such as `82.0s`.",
+                    "maxProperties": 8,
+                    "type": "object"
+                  },
+                  "planDigest": {
+                    "description": "The plan used.",
+                    "maxLength": 71,
+                    "nullable": true,
+                    "pattern": "^sha256:[0-9a-f]{64}$",
+                    "type": "string"
+                  },
+                  "planSource": {
+                    "description": "Where a plan came from.",
+                    "enum": [
+                      "pinned",
+                      "generated",
+                      "none"
+                    ],
+                    "nullable": true,
+                    "type": "string"
+                  },
+                  "reason": {
+                    "description": "Why a `BuildRun` waits or failed.",
+                    "enum": [
+                      "QuotaExceeded",
+                      "BuildkitdStarting",
+                      "RegistryCredentialsMissing",
+                      "SourceFailed",
+                      "PlanFailed",
+                      "BuildFailed",
+                      "PushFailed",
+                      "Timeout",
+                      "Cancelled",
+                      "InfraError"
+                    ],
+                    "nullable": true,
+                    "type": "string"
+                  },
+                  "startTime": {
+                    "description": "When the Job was created.",
+                    "format": "date-time",
+                    "nullable": true,
+                    "type": "string"
+                  },
+                  "tags": {
+                    "description": "The tags pushed.",
+                    "items": {
+                      "maxLength": 128,
+                      "type": "string"
+                    },
+                    "maxItems": 16,
+                    "type": "array"
+                  }
+                },
+                "type": "object"
+              }
+            },
+            "required": [
+              "spec"
+            ],
+            "title": "BuildRun",
+            "type": "object"
+          }
+        },
+        "selectableFields": [
+          {
+            "jsonPath": ".spec.buildRef"
+          },
+          {
+            "jsonPath": ".status.phase"
+          }
+        ],
+        "served": true,
+        "storage": true,
+        "subresources": {
+          "status": {}
+        }
+      }
+    ]
+  }
+}

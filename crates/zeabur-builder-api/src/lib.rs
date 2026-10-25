@@ -1,8 +1,7 @@
 //! Custom resources in the `builder.zeabur.com` API group.
 //!
 //! - [`cluster_builder::ClusterBuilder`]: how to plan and which `BuildKit` frontend to build with.
-//!   Cluster-scoped and written by admins; `deploy/examples/controller.yaml` has `dockerfile` and
-//!   `railpack`.
+//!   Cluster-scoped and written by admins; the chart installs `dockerfile` and `railpack`.
 //! - [`build::Build`]: what to build, written by a team. The desired state: follow a Git ref and
 //!   keep an image of its newest commit.
 //! - [`build_run::BuildRun`]: one build of one commit. Its spec is immutable; the controller
@@ -78,19 +77,18 @@ pub fn definitions() -> Vec<CustomResourceDefinition> {
     ]
 }
 
-/// Renders all definitions as a Kubernetes `List`, ready for `kubectl apply -f -`, without a
-/// trailing newline.
+/// Renders all definitions as a YAML stream of JSON documents, without a trailing newline. Both
+/// `kubectl apply -f -` and the `crds/` directory of a Helm chart read it; Helm refuses a `List`.
 ///
 /// # Errors
 ///
 /// Returns an error if serialization fails.
-pub fn definitions_json() -> serde_json::Result<String> {
-    let list = serde_json::json!({
-        "apiVersion": "v1",
-        "kind": "List",
-        "items": definitions(),
-    });
-    serde_json::to_string_pretty(&list)
+pub fn definitions_yaml() -> serde_json::Result<String> {
+    let documents = definitions()
+        .iter()
+        .map(serde_json::to_string_pretty)
+        .collect::<serde_json::Result<Vec<_>>>()?;
+    Ok(format!("---\n{}", documents.join("\n---\n")))
 }
 
 #[cfg(test)]
@@ -98,14 +96,19 @@ mod tests {
     use super::*;
 
     /// The committed manifest must match the code. Regenerate with
-    /// `cargo run -q -- crds > deploy/crds.json`.
+    /// `cargo run -q -- crds > deploy/chart/crds/crds.yaml`.
     #[test]
     fn committed_manifest_is_current() {
-        let committed = include_str!("../../../deploy/crds.json");
-        let parse = |s: &str| serde_json::from_str::<serde_json::Value>(s).unwrap();
+        let committed = include_str!("../../../deploy/chart/crds/crds.yaml");
+        let parse = |s: &str| -> Vec<serde_json::Value> {
+            s.split("---\n")
+                .filter(|d| !d.trim().is_empty())
+                .map(|d| serde_json::from_str(d).unwrap())
+                .collect()
+        };
         assert!(
-            committed.ends_with('\n') && parse(committed) == parse(&definitions_json().unwrap()),
-            "deploy/crds.json is stale: run `cargo run -q -- crds > deploy/crds.json`"
+            committed.ends_with('\n') && parse(committed) == parse(&definitions_yaml().unwrap()),
+            "deploy/chart/crds/crds.yaml is stale: run `cargo run -q -- crds > deploy/chart/crds/crds.yaml`"
         );
     }
 

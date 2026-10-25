@@ -1,9 +1,10 @@
 #!/usr/bin/env bash
-# Lints the chart and checks that webhooks stay off unless enabled.
+# Lints the chart and checks what an install needs: the ClusterBuilders, the buildkitd config and
+# egress policy, images pinned by digest when a digest is set, and webhooks off unless enabled.
 set -euo pipefail
 
 chart="$(dirname "$0")/../deploy/chart"
-base=(--set defaultRegistry=registry.example:5000)
+base=(--set registry.host=registry.example:5000)
 
 helm lint --strict "$chart" "${base[@]}"
 helm lint --strict "$chart" "${base[@]}" --set webhooks.enabled=true \
@@ -26,4 +27,36 @@ for want in 'kind: Ingress' '--webhook-path=/git$' 'path: /git/$' 'host: "hooks.
     exit 1
   fi
 done
+require() { # $1 = rendered chart, $2 = what is checked, then patterns it must hold
+  local out=$1 what=$2
+  shift 2
+  for want in "$@"; do
+    if ! grep -qE -- "$want" <<<"$out"; then
+      echo "$what: the chart lacks $want" >&2
+      exit 1
+    fi
+  done
+}
+
+plain=$(helm template builder "$chart" "${base[@]}")
+require "$plain" "default install" 'name: dockerfile$' 'name: railpack$' 'name: buildkitd$' \
+  'name: buildkitd-egress$' '- 169.254.0.0/16$' 'ghcr.io/railwayapp/railpack-frontend",$' \
+  'image: "ghcr.io/zeabur-oss/builder:0.0.1"$' 'value: "registry-push-"'
+if grep -qE '^\s+\[registry\.' <<<"$plain"; then
+  echo "default install: buildkitd.toml has a registry section without http or a CA" >&2
+  exit 1
+fi
+
+digest=sha256:$(printf '0%.0s' {1..64})
+pinned=$(helm template builder "$chart" "${base[@]}" --set image.digest="$digest" \
+  --set jobImage.digest="$digest" --set railpackImage.digest="$digest" \
+  --set registry.ca=CA --set registry.authPrefix= \
+  --set registry.inCluster.namespace=zot --set registry.inCluster.podLabels.app=zot)
+require "$pinned" "pinned install" "image: \"ghcr.io/zeabur-oss/builder@$digest\"" \
+  "value: \"ghcr.io/zeabur-oss/builder-job@$digest\"" "image: \"ghcr.io/zeabur-oss/builder-railpack@$digest\"" \
+  'ca = \["/etc/buildkit/registry-ca.crt"\]' 'registry-ca.crt: \|' 'kubernetes.io/metadata.name: zot'
+if grep -q ZEABUR_BUILDER_REGISTRY_AUTH_PREFIX <<<"$pinned"; then
+  echo "pinned install: an empty registry.authPrefix still sets a prefix" >&2
+  exit 1
+fi
 echo "chart ok"

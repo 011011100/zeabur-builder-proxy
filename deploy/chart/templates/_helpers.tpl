@@ -8,10 +8,30 @@ app.kubernetes.io/name: zeabur-builder
 app.kubernetes.io/instance: {{ .Release.Name }}
 {{- end }}
 
-{{- define "builder.tag" -}}
-{{ .Values.image.tag | default .Chart.AppVersion }}
-{{- end }}
-
 {{- define "builder.webhookPath" -}}
 {{ .Values.webhooks.path | trimSuffix "/" }}
+{{- end }}
+
+{{- /* An image reference: repository@digest, else repository:tag, else repository:appVersion. */ -}}
+{{- define "builder.image" -}}
+{{- $image := index . 0 -}}
+{{- $chart := index . 1 -}}
+{{- if $image.digest -}}
+{{ $image.repository }}@{{ $image.digest }}
+{{- else -}}
+{{ $image.repository }}:{{ $image.tag | default $chart.AppVersion }}
+{{- end -}}
+{{- end }}
+
+{{- /* The registry's CA: registry.ca, else the key of registry.caFrom's Secret, else nothing. */ -}}
+{{- define "builder.registryCA" -}}
+{{- $registry := .Values.registry -}}
+{{- if $registry.ca -}}
+{{ $registry.ca }}
+{{- else if and $registry.caFrom.namespace $registry.caFrom.secret -}}
+{{- $secret := lookup "v1" "Secret" $registry.caFrom.namespace $registry.caFrom.secret -}}
+{{- if $secret -}}
+{{ index $secret.data $registry.caFrom.key | default "" | b64dec }}
+{{- end -}}
+{{- end -}}
 {{- end }}

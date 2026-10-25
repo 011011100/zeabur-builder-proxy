@@ -1,11 +1,13 @@
-# What every namespace's buildkitd shares: its config, and the egress policy of its
-# RUN steps. The controller creates each namespace's StatefulSet, headless Service and ingress
-# NetworkPolicy in builder-system the first time the namespace builds.
+# What every namespace's buildkitd shares: its config, and the egress policy of its RUN steps.
+# The controller creates each namespace's StatefulSet, headless Service and ingress NetworkPolicy
+# in this namespace the first time the namespace builds.
+{{- $registry := .Values.registry }}
+{{- $ca := include "builder.registryCA" . }}
 apiVersion: v1
 kind: ConfigMap
 metadata:
   name: buildkitd
-  namespace: builder-system
+  labels: {{- include "builder.labels" . | nindent 4 }}
 data:
   buildkitd.toml: |
     # RUN --network=host and --security=insecure stay refused.
@@ -28,26 +30,35 @@ data:
       enabled = false
 
     # Gateway frontends, including those a Dockerfile names in `# syntax=`, only from these
-    # repositories. The Railpack ClusterBuilder's frontend must be listed.
+    # repositories.
     [frontend."gateway.v0"]
       allowedRepositories = [
-        "docker.io/docker/dockerfile",
-        "docker.io/docker/dockerfile-upstream",
-        "ghcr.io/railwayapp/railpack-frontend",
+        {{- range .Values.buildkitd.allowedFrontends }}
+        {{ . | quote }},
+        {{- end }}
+        {{ (splitList ":" .Values.railpackFrontend | first) | quote }},
       ]
+    {{- if or $registry.http $ca }}
 
-    [registry."registry.builder-registry.svc.cluster.local:5000"]
+    [registry.{{ required "registry.host is required" $registry.host | quote }}]
+      {{- if $registry.http }}
       http = true
+      {{- end }}
+      {{- if $ca }}
+      ca = ["/etc/buildkit/registry-ca.crt"]
+      {{- end }}
+    {{- end }}
+  {{- if $ca }}
+  registry-ca.crt: | {{- $ca | nindent 4 }}
+  {{- end }}
 ---
-# RUN steps leave through the buildkitd Pod's address. They may resolve names, push to and pull
-# from the registry, and reach public addresses; not Pods, Services, nodes or the cloud metadata
-# endpoint. The private ranges cover k3s's Pod (10.42.0.0/16) and Service (10.43.0.0/16) CIDRs and
-# most node networks; a cluster on public addresses must add its own CIDRs. IPv4 only.
+# buildkitd may resolve names, reach the registry and reach public addresses; not Pods,
+# Services, nodes or the cloud metadata endpoint.
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
   name: buildkitd-egress
-  namespace: builder-system
+  labels: {{- include "builder.labels" . | nindent 4 }}
 spec:
   podSelector:
     matchLabels: {app.kubernetes.io/name: buildkitd}
@@ -59,19 +70,19 @@ spec:
           podSelector:
             matchLabels: {k8s-app: kube-dns}
       ports: [{port: 53, protocol: UDP}, {port: 53, protocol: TCP}]
+    {{- with $registry.inCluster }}
+    {{- if .namespace }}
     - to:
         - namespaceSelector:
-            matchLabels: {kubernetes.io/metadata.name: builder-registry}
+            matchLabels: {kubernetes.io/metadata.name: {{ .namespace }}}
+          {{- with .podLabels }}
           podSelector:
-            matchLabels: {app.kubernetes.io/name: registry}
-      ports: [{port: 5000, protocol: TCP}]
+            matchLabels: {{- toYaml . | nindent 14 }}
+          {{- end }}
+      ports: [{port: {{ .port }}, protocol: TCP}]
+    {{- end }}
+    {{- end }}
     - to:
         - ipBlock:
             cidr: 0.0.0.0/0
-            except:
-              - 10.0.0.0/8
-              - 100.64.0.0/10
-              - 127.0.0.0/8
-              - 169.254.0.0/16
-              - 172.16.0.0/12
-              - 192.168.0.0/16
+            except: {{- toYaml .Values.buildkitd.blockedCidrs | nindent 14 }}

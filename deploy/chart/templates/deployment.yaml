@@ -19,7 +19,7 @@ spec:
         seccompProfile: {type: RuntimeDefault}
       containers:
         - name: controller
-          image: "{{ .Values.image.repository }}:{{ include "builder.tag" . }}"
+          image: {{ include "builder.image" (list .Values.image .Chart) | quote }}
           imagePullPolicy: {{ .Values.image.pullPolicy }}
           args:
             - controller
@@ -41,10 +41,12 @@ spec:
             - name: POD_NAME
               valueFrom: {fieldRef: {fieldPath: metadata.name}}
             - name: ZEABUR_BUILDER_DEFAULT_REGISTRY
-              value: {{ required "defaultRegistry is required" .Values.defaultRegistry | quote }}
+              value: {{ required "registry.host is required" .Values.registry.host | quote }}
             - name: ZEABUR_BUILDER_JOB_IMAGE
-              value: {{ .Values.jobImage | default (printf "%s-job:%s" .Values.image.repository (include "builder.tag" .)) | quote }}
-            - {name: ZEABUR_BUILDER_REGISTRY_AUTH_PREFIX, value: {{ .Values.registryAuthPrefix | quote }}}
+              value: {{ include "builder.image" (list .Values.jobImage .Chart) | quote }}
+            {{- with .Values.registry.authPrefix }}
+            - {name: ZEABUR_BUILDER_REGISTRY_AUTH_PREFIX, value: {{ . | quote }}}
+            {{- end }}
             {{- if .Values.webhooks.enabled }}
           ports:
             - {name: webhooks, containerPort: {{ .Values.webhooks.port }}}

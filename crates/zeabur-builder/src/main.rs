@@ -33,7 +33,7 @@ struct Cli {
 #[expect(clippy::large_enum_variant, reason = "parsed once at start")]
 #[derive(Debug, Subcommand)]
 enum Command {
-    /// Print the custom resource definitions as a Kubernetes List, for `kubectl apply -f -`.
+    /// Print the custom resource definitions as a YAML stream, for `kubectl apply -f -`.
     Crds,
     /// Run the controller.
     Controller(ControllerArgs),
@@ -187,7 +187,7 @@ async fn run_controller(args: ControllerArgs) -> Result<(), String> {
 fn main() -> ExitCode {
     let cli = Cli::parse();
     let result = match cli.command {
-        Command::Crds => zeabur_builder_api::definitions_json()
+        Command::Crds => zeabur_builder_api::definitions_yaml()
             .map(Some)
             .map_err(|e| e.to_string()),
         Command::Controller(args) => tokio::runtime::Builder::new_multi_thread()
