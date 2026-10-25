@@ -11,7 +11,7 @@ use kube::{CustomResource, KubeSchema};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-use crate::common::{Condition, DIGEST_PATTERN, MAX_NAME, REVISION_PATTERN};
+use crate::common::{DIGEST_PATTERN, MAX_NAME, REVISION_PATTERN};
 
 /// One build of one commit. The spec is immutable: to build again, create another.
 #[expect(
@@ -64,13 +64,6 @@ pub struct BuildRunSpec {
     #[serde(default, rename = "ref", skip_serializing_if = "Option::is_none")]
     #[schemars(length(max = crate::build::MAX_RESOLVED_REF))]
     pub git_ref: Option<String>,
-    /// Build with this plan instead of following the `Build`'s plan policy.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[schemars(length(max = 71), regex(pattern = DIGEST_PATTERN))]
-    pub plan_digest: Option<String>,
-    /// Ignore the pinned plan and plan again.
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    pub force_replan: bool,
     /// What started it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub trigger: Option<Trigger>,
@@ -86,8 +79,6 @@ pub enum Trigger {
     Poll,
     /// A person.
     Manual,
-    /// A pinned plan failed and the controller planned again.
-    Replan,
 }
 
 /// Progress and result.
@@ -158,10 +149,6 @@ pub struct BuildRunStatus {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schemars(extend("format" = "date-time"))]
     pub notified_at: Option<String>,
-    /// `AwaitingApproval`, when the run only planned.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    #[schemars(length(max = 8))]
-    pub conditions: Vec<Condition>,
 }
 
 /// The phases: `Pending → Planning → Building → Succeeded | Failed | Cancelled`.
@@ -210,8 +197,6 @@ pub enum Reason {
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub enum PlanSource {
-    /// Reused.
-    Pinned,
     /// Planned in this run.
     Generated,
     /// The builder needs no plan.

@@ -637,7 +637,6 @@ fn from_result(result: BuildResult) -> Observed {
         image_digest: result.digest,
         plan_digest: result.plan_digest,
         plan_source: result.plan_source.map(|p| match p {
-            result::PlanSource::Pinned => PlanSource::Pinned,
             result::PlanSource::Generated => PlanSource::Generated,
             result::PlanSource::None => PlanSource::None,
         }),

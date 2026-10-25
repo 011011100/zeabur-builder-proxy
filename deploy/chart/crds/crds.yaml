@@ -41,7 +41,7 @@
         "name": "v1alpha1",
         "schema": {
           "openAPIV3Schema": {
-            "description": "How Zeabur Builder plans and builds: Dockerfile, Railpack or zbplan.",
+            "description": "How Zeabur Builder plans and builds: Dockerfile or Railpack.",
             "properties": {
               "spec": {
                 "description": "A way to build. Every builder reduces to the same shape: an optional planner that writes files\ninto `/workspace/plan`, then a `BuildKit` frontend with options that reads them.",
@@ -88,35 +88,11 @@
                     "description": "The planner; absent when the builder needs no plan.",
                     "nullable": true,
                     "properties": {
-                      "credentialsRef": {
-                        "description": "A Secret in the controller's namespace, mounted only into the plan container (an LLM API\nkey, for one). The controller copies it into a short-lived Secret owned by the `BuildRun`.",
-                        "nullable": true,
-                        "properties": {
-                          "name": {
-                            "description": "The Secret's name.",
-                            "maxLength": 253,
-                            "minLength": 1,
-                            "type": "string"
-                          }
-                        },
-                        "required": [
-                          "name"
-                        ],
-                        "type": "object"
-                      },
-                      "deterministic": {
-                        "description": "Whether the same source always gives the same plan. Deterministic planners (Railpack) run\nevery time; others (zbplan) have their plan pinned and reused.",
-                        "type": "boolean"
-                      },
                       "image": {
                         "description": "The planner image, pinned by digest in production.",
                         "maxLength": 512,
                         "minLength": 1,
                         "type": "string"
-                      },
-                      "needsBuildkit": {
-                        "description": "Whether planning builds on buildkitd (zbplan), so the plan container gets the client\ncertificate and the same instance as the build.",
-                        "type": "boolean"
                       },
                       "resources": {
                         "description": "CPU and memory for the plan container.",
@@ -172,7 +148,6 @@
                       }
                     },
                     "required": [
-                      "deterministic",
                       "image"
                     ],
                     "type": "object"
@@ -181,8 +156,7 @@
                     "description": "What the planning step does.",
                     "enum": [
                       "dockerfile",
-                      "railpack",
-                      "zbplan"
+                      "railpack"
                     ],
                     "type": "string"
                   }
@@ -194,7 +168,7 @@
                 "type": "object",
                 "x-kubernetes-validations": [
                   {
-                    "message": "planner is required for railpack and zbplan, and forbidden for dockerfile",
+                    "message": "planner is required for railpack, and forbidden for dockerfile",
                     "rule": "self.type == 'dockerfile' ? !has(self.planner) : has(self.planner)"
                   }
                 ]
@@ -456,27 +430,6 @@
                     },
                     "type": "object"
                   },
-                  "plan": {
-                    "default": {},
-                    "description": "Plan pinning, for planners that are not deterministic.",
-                    "properties": {
-                      "autoReplanOnFailure": {
-                        "description": "When a pinned plan fails to build, plan again once. Default true.",
-                        "nullable": true,
-                        "type": "boolean"
-                      },
-                      "pin": {
-                        "description": "Reuse the last successful plan. Default true; ignored for deterministic planners.",
-                        "nullable": true,
-                        "type": "boolean"
-                      },
-                      "requireApproval": {
-                        "description": "New plans wait for `builder.zeabur.com/approve-plan`.",
-                        "type": "boolean"
-                      }
-                    },
-                    "type": "object"
-                  },
                   "source": {
                     "description": "Where the source comes from.",
                     "properties": {
@@ -635,7 +588,7 @@
                     "type": "array"
                   },
                   "conditions": {
-                    "description": "`SourceReady`, `BuilderReady`, `Ready` and `PlanApprovalPending`.",
+                    "description": "`SourceReady`, `BuilderReady` and `Ready`.",
                     "items": {
                       "description": "A status condition, as `metav1.Condition`.",
                       "properties": {
@@ -672,7 +625,7 @@
                           "type": "string"
                         },
                         "type": {
-                          "description": "`Ready`, `SourceReady`, `BuilderReady`, `PlanApprovalPending` or `AwaitingApproval`.",
+                          "description": "`Ready`, `SourceReady` or `BuilderReady`.",
                           "maxLength": 316,
                           "minLength": 1,
                           "type": "string"
@@ -725,13 +678,6 @@
                     "format": "int64",
                     "nullable": true,
                     "type": "integer"
-                  },
-                  "pinnedPlanDigest": {
-                    "description": "The plan reused by the next build.",
-                    "maxLength": 71,
-                    "nullable": true,
-                    "pattern": "^sha256:[0-9a-f]{64}$",
-                    "type": "string"
                   },
                   "remoteRevision": {
                     "description": "The commit the ref points at.",
@@ -850,17 +796,6 @@
                     "minLength": 1,
                     "type": "string"
                   },
-                  "forceReplan": {
-                    "description": "Ignore the pinned plan and plan again.",
-                    "type": "boolean"
-                  },
-                  "planDigest": {
-                    "description": "Build with this plan instead of following the `Build`'s plan policy.",
-                    "maxLength": 71,
-                    "nullable": true,
-                    "pattern": "^sha256:[0-9a-f]{64}$",
-                    "type": "string"
-                  },
                   "ref": {
                     "description": "The full name of the ref `revision` was resolved from, such as `refs/heads/master`.",
                     "maxLength": 1024,
@@ -878,8 +813,7 @@
                     "enum": [
                       "webhook",
                       "poll",
-                      "manual",
-                      "replan"
+                      "manual"
                     ],
                     "nullable": true,
                     "type": "string"
@@ -951,61 +885,6 @@
                     "nullable": true,
                     "type": "string"
                   },
-                  "conditions": {
-                    "description": "`AwaitingApproval`, when the run only planned.",
-                    "items": {
-                      "description": "A status condition, as `metav1.Condition`.",
-                      "properties": {
-                        "lastTransitionTime": {
-                          "description": "When the status last changed (RFC 3339).",
-                          "format": "date-time",
-                          "type": "string"
-                        },
-                        "message": {
-                          "description": "A human-readable message.",
-                          "maxLength": 32768,
-                          "type": "string"
-                        },
-                        "observedGeneration": {
-                          "description": "The `metadata.generation` the condition was computed from.",
-                          "format": "int64",
-                          "minimum": 0.0,
-                          "nullable": true,
-                          "type": "integer"
-                        },
-                        "reason": {
-                          "description": "A `CamelCase` reason.",
-                          "maxLength": 1024,
-                          "minLength": 1,
-                          "type": "string"
-                        },
-                        "status": {
-                          "description": "`True`, `False` or `Unknown`.",
-                          "enum": [
-                            "True",
-                            "False",
-                            "Unknown"
-                          ],
-                          "type": "string"
-                        },
-                        "type": {
-                          "description": "`Ready`, `SourceReady`, `BuilderReady`, `PlanApprovalPending` or `AwaitingApproval`.",
-                          "maxLength": 316,
-                          "minLength": 1,
-                          "type": "string"
-                        }
-                      },
-                      "required": [
-                        "lastTransitionTime",
-                        "reason",
-                        "status",
-                        "type"
-                      ],
-                      "type": "object"
-                    },
-                    "maxItems": 8,
-                    "type": "array"
-                  },
                   "imageDigest": {
                     "description": "The pushed manifest's digest.",
                     "maxLength": 71,
@@ -1063,7 +942,6 @@
                   "planSource": {
                     "description": "Where a plan came from.",
                     "enum": [
-                      "pinned",
                       "generated",
                       "none"
                     ],

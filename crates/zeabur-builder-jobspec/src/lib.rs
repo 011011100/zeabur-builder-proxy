@@ -6,7 +6,7 @@
 //! | container | image | does |
 //! |---|---|---|
 //! | `fetch` (init) | job image | `git fetch --depth=1 <url> <sha>` into `/workspace/src`, then checks `HEAD` |
-//! | `plan` (init) | planner image | Railpack or zbplan writes `/workspace/plan`; absent for `dockerfile` |
+//! | `plan` (init) | planner image | Railpack writes `/workspace/plan`; absent for `dockerfile` |
 //! | `build` | job image | `zeabur-builder-job -- buildctl build …` |
 //!
 //! A Railpack build runs `buildctl` twice: Railpack's image, pushed by digest only, then a
@@ -34,9 +34,9 @@ use std::collections::BTreeMap;
 
 use k8s_openapi::api::batch::v1::{Job, JobSpec};
 use k8s_openapi::api::core::v1::{
-    Capabilities, Container, EmptyDirVolumeSource, EnvFromSource, EnvVar, EnvVarSource, KeyToPath,
-    PodSecurityContext, PodSpec, PodTemplateSpec, SeccompProfile, SecretEnvSource,
-    SecretKeySelector, SecretVolumeSource, SecurityContext, Volume, VolumeMount,
+    Capabilities, Container, EmptyDirVolumeSource, EnvVar, EnvVarSource, KeyToPath,
+    PodSecurityContext, PodSpec, PodTemplateSpec, SeccompProfile, SecretKeySelector,
+    SecretVolumeSource, SecurityContext, Volume, VolumeMount,
 };
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::{ObjectMeta, OwnerReference};
 use zeabur_builder_api::build::{Build, EnvVar as BuildEnvVar};
@@ -54,7 +54,6 @@ const SRC: &str = "/workspace/src";
 const PLAN: &str = "/workspace/plan";
 const OUT: &str = "/workspace/out";
 const GIT_CREDENTIALS: &str = "/etc/zeabur-builder/git";
-const PLANNER_CREDENTIALS: &str = "/etc/zeabur-builder/planner";
 const BUILDKIT_TLS: &str = "/etc/zeabur-builder/buildkit";
 const REGISTRY_AUTH: &str = "/etc/zeabur-builder/registry";
 /// Prefix of the build container's variables that carry `Build.spec.env`, so a variable named
@@ -100,8 +99,6 @@ pub struct JobInputs<'a> {
     pub job_image: &'a str,
     /// How `fetch` authenticates.
     pub git_auth: GitAuth<'a>,
-    /// The `BuildRun`-owned copy of the planner's credentials.
-    pub planner_credentials: Option<&'a str>,
     /// The client certificate Secret: `ca.pem`, `cert.pem`, `key.pem` (`buildctl --tlsdir`).
     pub buildkit_tls_secret: &'a str,
     /// The `kubernetes.io/dockerconfigjson` Secret to push with.
@@ -294,13 +291,6 @@ start=$(date +%s)
 echo "{\"plan\":$(( $(date +%s) - start ))}" > /workspace/out/plan.json
 "#;
 
-/// zbplan writes the Dockerfile on stdout and logs on stderr.
-const ZBPLAN_SCRIPT: &str = r#"set -eu
-start=$(date +%s)
-zbplan --buildkit-addr "$1" --context-dir "$2" > /workspace/plan/Dockerfile
-echo "{\"plan\":$(( $(date +%s) - start ))}" > /workspace/out/plan.json
-"#;
-
 fn plan_container(inputs: &JobInputs<'_>) -> Result<Option<Container>, JobError> {
     let builder = inputs.builder;
     let planner = match (builder.kind, &builder.planner) {
@@ -308,62 +298,40 @@ fn plan_container(inputs: &JobInputs<'_>) -> Result<Option<Container>, JobError>
         (BuilderType::Dockerfile, Some(_)) => {
             return Err(JobError::Builder("dockerfile with a planner"));
         }
-        (BuilderType::Railpack | BuilderType::Zbplan, None) => {
+        (BuilderType::Railpack, None) => {
             return Err(JobError::Builder("planner missing"));
         }
-        (BuilderType::Railpack | BuilderType::Zbplan, Some(planner)) => planner,
+        (BuilderType::Railpack, Some(planner)) => planner,
     };
     let context = context_path(inputs);
-    let mut mounts = workspace_mounts();
+    let mounts = workspace_mounts();
     let mut env_vars = vec![env("HOME", "/tmp")];
-    let (script, args) = if builder.kind == BuilderType::Railpack {
-        let mut args = vec![
-            "railpack".to_owned(),
-            "prepare".to_owned(),
-            literal(&context),
-            "--plan-out".to_owned(),
-            format!("{PLAN}/railpack-plan.json"),
-            "--info-out".to_owned(),
-            format!("{PLAN}/railpack-info.json"),
-        ];
-        // Railpack records only the names in the plan; values come from the build's secrets.
-        for var in &inputs.build.spec.env {
-            args.push("--env".to_owned());
-            args.push(format!("{}=$({SECRET_ENV_PREFIX}{})", var.name, var.name));
-            env_vars.push(secret_env(var));
-        }
-        (PLAN_SCRIPT, args)
-    } else {
-        (
-            ZBPLAN_SCRIPT,
-            vec![literal(inputs.buildkitd_addr), literal(&context)],
-        )
-    };
-    if planner.needs_buildkit {
-        mounts.push(mount("buildkit-client-tls", BUILDKIT_TLS));
+    let mut args = vec![
+        "railpack".to_owned(),
+        "prepare".to_owned(),
+        literal(&context),
+        "--plan-out".to_owned(),
+        format!("{PLAN}/railpack-plan.json"),
+        "--info-out".to_owned(),
+        format!("{PLAN}/railpack-info.json"),
+    ];
+    // Railpack records only the names in the plan; values come from the build's secrets.
+    for var in &inputs.build.spec.env {
+        args.push("--env".to_owned());
+        args.push(format!("{}=$({SECRET_ENV_PREFIX}{})", var.name, var.name));
+        env_vars.push(secret_env(var));
     }
-    let env_from = inputs.planner_credentials.map(|secret| {
-        mounts.push(mount("planner-credentials", PLANNER_CREDENTIALS));
-        vec![EnvFromSource {
-            secret_ref: Some(SecretEnvSource {
-                name: secret.to_owned(),
-                optional: Some(false),
-            }),
-            ..EnvFromSource::default()
-        }]
-    });
     Ok(Some(Container {
         name: "plan".to_owned(),
         image: Some(planner.image.clone()),
         command: Some(vec![
             "sh".to_owned(),
             "-c".to_owned(),
-            script.to_owned(),
+            PLAN_SCRIPT.to_owned(),
             "plan".to_owned(),
         ]),
         args: Some(args),
         env: Some(env_vars),
-        env_from,
         volume_mounts: Some(mounts),
         termination_message_policy: Some("FallbackToLogsOnError".to_owned()),
         ..hardened()
@@ -483,7 +451,7 @@ fn frontend_args(
             buildctl.extend(["--local".to_owned(), format!("dockerfile={dir}")]);
             buildctl.extend(["--opt".to_owned(), format!("filename={file}")]);
         }
-        (FrontendType::Dockerfile, BuilderType::Zbplan | BuilderType::Railpack) => {
+        (FrontendType::Dockerfile, BuilderType::Railpack) => {
             buildctl.extend(["--frontend".to_owned(), "dockerfile.v0".to_owned()]);
             buildctl.extend(["--local".to_owned(), format!("dockerfile={PLAN}")]);
             buildctl.extend(["--opt".to_owned(), "filename=Dockerfile".to_owned()]);
@@ -627,9 +595,6 @@ fn volumes(inputs: &JobInputs<'_>) -> Vec<Volume> {
         GitAuth::Basic { secret } | GitAuth::Ssh { secret } => {
             volumes.push(secret_volume("git-credentials", secret, None));
         }
-    }
-    if let Some(secret) = inputs.planner_credentials {
-        volumes.push(secret_volume("planner-credentials", secret, None));
     }
     volumes.push(secret_volume(
         "buildkit-client-tls",

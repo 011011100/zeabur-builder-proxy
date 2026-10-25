@@ -38,7 +38,7 @@ pub struct SecretKeyRef {
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct Condition {
-    /// `Ready`, `SourceReady`, `BuilderReady`, `PlanApprovalPending` or `AwaitingApproval`.
+    /// `Ready`, `SourceReady` or `BuilderReady`.
     #[serde(rename = "type")]
     #[schemars(length(min = 1, max = 316))]
     pub kind: String,

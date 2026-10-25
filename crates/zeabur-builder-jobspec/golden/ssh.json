@@ -8,7 +8,7 @@
     "labels": {
       "app.kubernetes.io/managed-by": "zeabur-builder",
       "builder.zeabur.com/build": "api",
-      "builder.zeabur.com/builder": "zbplan",
+      "builder.zeabur.com/builder": "dockerfile",
       "builder.zeabur.com/buildrun": "api-x7k2p"
     },
     "name": "api-x7k2p",
@@ -35,7 +35,7 @@
         "labels": {
           "app.kubernetes.io/managed-by": "zeabur-builder",
           "builder.zeabur.com/build": "api",
-          "builder.zeabur.com/builder": "zbplan",
+          "builder.zeabur.com/builder": "dockerfile",
           "builder.zeabur.com/buildrun": "api-x7k2p"
         }
       },
@@ -61,7 +61,7 @@
               "--frontend",
               "dockerfile.v0",
               "--local",
-              "dockerfile=/workspace/plan",
+              "dockerfile=/workspace/src",
               "--opt",
               "filename=Dockerfile",
               "--output",
@@ -174,64 +174,6 @@
                 "readOnly": true
               }
             ]
-          },
-          {
-            "args": [
-              "tcp://buildkitd-team-a-0.buildkitd-team-a.builder-system.svc:1234",
-              "/workspace/src"
-            ],
-            "command": [
-              "sh",
-              "-c",
-              "set -eu\nstart=$(date +%s)\nzbplan --buildkit-addr \"$1\" --context-dir \"$2\" > /workspace/plan/Dockerfile\necho \"{\\\"plan\\\":$(( $(date +%s) - start ))}\" > /workspace/out/plan.json\n",
-              "plan"
-            ],
-            "env": [
-              {
-                "name": "HOME",
-                "value": "/tmp"
-              }
-            ],
-            "envFrom": [
-              {
-                "secretRef": {
-                  "name": "api-x7k2p-planner",
-                  "optional": false
-                }
-              }
-            ],
-            "image": "ghcr.io/zeabur-oss/builder-zbplan:v0.3.0",
-            "name": "plan",
-            "securityContext": {
-              "allowPrivilegeEscalation": false,
-              "capabilities": {
-                "drop": [
-                  "ALL"
-                ]
-              },
-              "readOnlyRootFilesystem": true
-            },
-            "terminationMessagePolicy": "FallbackToLogsOnError",
-            "volumeMounts": [
-              {
-                "mountPath": "/workspace",
-                "name": "workspace"
-              },
-              {
-                "mountPath": "/tmp",
-                "name": "tmp"
-              },
-              {
-                "mountPath": "/etc/zeabur-builder/buildkit",
-                "name": "buildkit-client-tls",
-                "readOnly": true
-              },
-              {
-                "mountPath": "/etc/zeabur-builder/planner",
-                "name": "planner-credentials",
-                "readOnly": true
-              }
-            ]
           }
         ],
         "restartPolicy": "Never",
@@ -259,14 +201,6 @@
               "defaultMode": 288,
               "optional": false,
               "secretName": "deploy-key"
-            }
-          },
-          {
-            "name": "planner-credentials",
-            "secret": {
-              "defaultMode": 288,
-              "optional": false,
-              "secretName": "api-x7k2p-planner"
             }
           },
           {

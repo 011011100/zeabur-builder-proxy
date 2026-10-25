@@ -6,8 +6,8 @@ use k8s_openapi::api::core::v1::{
 };
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::Time;
 use zeabur_builder_api::build::{
-    BuildSpec, GitHubAppSource, GitSource, NotifyTarget, NotifyType, OutputSpec, PlanPolicy,
-    SourceSpec, TriggerSpec,
+    BuildSpec, GitHubAppSource, GitSource, NotifyTarget, NotifyType, OutputSpec, SourceSpec,
+    TriggerSpec,
 };
 use zeabur_builder_api::build_run::BuildRunSpec;
 
@@ -39,7 +39,6 @@ fn build() -> Build {
             output: None,
             env: Vec::new(),
             triggers: TriggerSpec::default(),
-            plan: PlanPolicy::default(),
             concurrency: Concurrency::default(),
             history_limit: None,
             notify: Vec::new(),
@@ -57,8 +56,6 @@ fn run(name: &str, revision: &str, phase: Option<Phase>, at: &str) -> BuildRun {
             build_ref: "api".to_owned(),
             revision: revision.to_owned(),
             git_ref: None,
-            plan_digest: None,
-            force_replan: false,
             trigger: None,
         },
     );

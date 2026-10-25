@@ -6,11 +6,11 @@ use std::collections::BTreeMap;
 
 use pretty_assertions::assert_eq;
 use zeabur_builder_api::build::{
-    BuildSpec, Concurrency, EnvVarSource, GitSource, PlanPolicy, SourceSpec, TriggerSpec,
+    BuildSpec, Concurrency, EnvVarSource, GitSource, SourceSpec, TriggerSpec,
 };
 use zeabur_builder_api::build_run::{BuildRunSpec, Trigger};
 use zeabur_builder_api::cluster_builder::{FrontendSpec, PlannerSpec};
-use zeabur_builder_api::common::{SecretKeyRef, SecretRef};
+use zeabur_builder_api::common::SecretKeyRef;
 
 use super::*;
 
@@ -35,7 +35,6 @@ fn build(url: &str, context_dir: Option<&str>, env: Vec<BuildEnvVar>) -> Build {
             output: None,
             env,
             triggers: TriggerSpec::default(),
-            plan: PlanPolicy::default(),
             concurrency: Concurrency::default(),
             history_limit: None,
             notify: Vec::new(),
@@ -53,8 +52,6 @@ fn build_run() -> BuildRun {
             build_ref: "api".to_owned(),
             revision: SHA.to_owned(),
             git_ref: None,
-            plan_digest: None,
-            force_replan: false,
             trigger: Some(Trigger::Webhook),
         },
     );
@@ -80,36 +77,12 @@ fn railpack() -> ClusterBuilderSpec {
         kind: BuilderType::Railpack,
         planner: Some(PlannerSpec {
             image: format!("ghcr.io/zeabur-oss/builder-railpack:{RAILPACK}"),
-            deterministic: true,
-            needs_buildkit: false,
-            credentials_ref: None,
             timeout: None,
             resources: None,
         }),
         frontend: FrontendSpec {
             kind: FrontendType::Gateway,
             source: Some(format!("ghcr.io/railwayapp/railpack-frontend:{RAILPACK}")),
-            opts: BTreeMap::new(),
-        },
-    }
-}
-
-fn zbplan() -> ClusterBuilderSpec {
-    ClusterBuilderSpec {
-        kind: BuilderType::Zbplan,
-        planner: Some(PlannerSpec {
-            image: "ghcr.io/zeabur-oss/builder-zbplan:v0.3.0".to_owned(),
-            deterministic: false,
-            needs_buildkit: true,
-            credentials_ref: Some(SecretRef {
-                name: "zbplan-llm".to_owned(),
-            }),
-            timeout: Some("10m".to_owned()),
-            resources: None,
-        }),
-        frontend: FrontendSpec {
-            kind: FrontendType::Dockerfile,
-            source: None,
             opts: BTreeMap::new(),
         },
     }
@@ -133,7 +106,6 @@ fn inputs<'a>(
         buildkitd_addr: "tcp://buildkitd-team-a-0.buildkitd-team-a.builder-system.svc:1234",
         job_image: "ghcr.io/zeabur-oss/builder-job:v0.0.1",
         git_auth,
-        planner_credentials: None,
         buildkit_tls_secret: "zeabur-builder-buildkit-client",
         registry_auth_secret: "api-x7k2p-registry",
         deadline_seconds: 3600,
@@ -213,24 +185,16 @@ fn railpack_with_secrets() {
 }
 
 #[test]
-fn zbplan_over_ssh() {
+fn dockerfile_over_ssh() {
     let run = build_run();
     let build = build("git@git.example.com:team/api.git", None, Vec::new());
-    let builder = zbplan();
+    let builder = dockerfile();
     let tags = tags();
-    let mut inputs = inputs(
-        &run,
-        &build,
-        "zbplan",
-        &builder,
-        &tags,
-        GitAuth::Ssh {
-            secret: "deploy-key",
-        },
-    );
-    inputs.planner_credentials = Some("api-x7k2p-planner");
-    let job = job(&inputs).unwrap();
-    golden("zbplan", include_str!("../golden/zbplan.json"), &job);
+    let auth = GitAuth::Ssh {
+        secret: "deploy-key",
+    };
+    let job = job(&inputs(&run, &build, "dockerfile", &builder, &tags, auth)).unwrap();
+    golden("ssh", include_str!("../golden/ssh.json"), &job);
 }
 
 #[test]

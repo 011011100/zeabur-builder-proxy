@@ -17,7 +17,6 @@ spec:
   type: railpack
   planner:
     image: {{ include "builder.image" (list .Values.railpackImage .Chart) | quote }}
-    deterministic: true
   frontend:
     type: gateway.v0
     source: {{ .Values.railpackFrontend | quote }}

@@ -203,9 +203,6 @@ In unit tests, and against a local SSH server for SSH: private repositories with
 
 Not built yet:
 
-- The `zbplan` builder type: the Job runs [zbplan](https://github.com/zeabur/zbplan), which
-  writes a Dockerfile with an LLM, but plan pinning and approval (`spec.plan`) are not
-  implemented and no zbplan image is built.
 - Prometheus metrics.
 
 ## Contributing

@@ -40,7 +40,7 @@ pub struct BuildResult {
     /// The tags pushed.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub tags: Vec<String>,
-    /// The plan's digest, when a planner ran or a pinned plan was used.
+    /// The plan's digest, when a planner ran.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub plan_digest: Option<String>,
     /// Where the plan came from.
@@ -92,8 +92,6 @@ pub enum FailureReason {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum PlanSource {
-    /// A pinned plan was pulled; the planner did not run.
-    Pinned,
     /// The planner produced it in this run.
     Generated,
     /// The builder needs no plan.
@@ -208,7 +206,7 @@ mod tests {
     fn reads_the_documented_example() {
         let message = format!(
             r#"{{"result":"succeeded","digest":"{DIGEST}","tags":["main-1761058800-3e1a9c2"],
-            "planSource":"pinned","baseImages":["docker.io/library/node:24-alpine@{DIGEST}"],
+            "planSource":"generated","baseImages":["docker.io/library/node:24-alpine@{DIGEST}"],
             "phases":{{"fetch":3.1,"plan":0.4,"build":82.0,"push":6.2}},"cache":{{"total":41,"cached":37}}}}"#
         );
         let result = BuildResult::decode(&message).unwrap();
@@ -220,7 +218,7 @@ mod tests {
                 cached: 37
             })
         );
-        assert_eq!(result.plan_source, Some(PlanSource::Pinned));
+        assert_eq!(result.plan_source, Some(PlanSource::Generated));
         assert_eq!(BuildResult::decode(&result.encode()).unwrap(), result);
     }
 

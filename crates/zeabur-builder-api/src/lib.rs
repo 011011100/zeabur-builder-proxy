@@ -56,10 +56,6 @@ pub mod annotations {
     /// On a `Build`: a new value rebuilds the ref's current commit. On a `BuildRun` the
     /// controller created: the `Build`'s value when it was created, the request it answered.
     pub const REBUILD: &str = "builder.zeabur.com/rebuild";
-    /// On a `Build`: a new value drops the pinned plan and plans again.
-    pub const REPLAN: &str = "builder.zeabur.com/replan";
-    /// On a `Build`: the digest of the plan to approve.
-    pub const APPROVE_PLAN: &str = "builder.zeabur.com/approve-plan";
     /// On a Namespace: overrides the controller's limit of concurrent builds, and with it how many
     /// builds its buildkitd runs at once.
     pub const MAX_CONCURRENT_BUILDS: &str = "builder.zeabur.com/max-concurrent-builds";

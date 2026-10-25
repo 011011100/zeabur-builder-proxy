@@ -104,9 +104,6 @@ pub struct BuildSpec {
     /// What starts a build.
     #[serde(default)]
     pub triggers: TriggerSpec,
-    /// Plan pinning, for planners that are not deterministic.
-    #[serde(default)]
-    pub plan: PlanPolicy,
     /// What a new commit does to a running build.
     #[serde(default)]
     pub concurrency: Concurrency,
@@ -259,21 +256,6 @@ pub struct WebhookTrigger {
     pub secret_ref: SecretKeyRef,
 }
 
-/// Plan pinning.
-#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq, JsonSchema, Default)]
-#[serde(rename_all = "camelCase")]
-pub struct PlanPolicy {
-    /// Reuse the last successful plan. Default true; ignored for deterministic planners.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub pin: Option<bool>,
-    /// New plans wait for `builder.zeabur.com/approve-plan`.
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    pub require_approval: bool,
-    /// When a pinned plan fails to build, plan again once. Default true.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub auto_replan_on_failure: Option<bool>,
-}
-
 /// What a new commit does to a build in progress.
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq, JsonSchema, Default)]
 pub enum Concurrency {
@@ -347,15 +329,11 @@ pub struct BuildStatus {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schemars(length(max = MAX_NAME))]
     pub last_build_run_ref: Option<String>,
-    /// The plan reused by the next build.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[schemars(length(max = 71), regex(pattern = crate::common::DIGEST_PATTERN))]
-    pub pinned_plan_digest: Option<String>,
     /// Base images of the newest successful build, `name@sha256:…`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     #[schemars(length(max = MAX_BASE_IMAGES), inner(length(max = 1024)))]
     pub base_images: Vec<String>,
-    /// `SourceReady`, `BuilderReady`, `Ready` and `PlanApprovalPending`.
+    /// `SourceReady`, `BuilderReady` and `Ready`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     #[schemars(length(max = MAX_CONDITIONS))]
     pub conditions: Vec<Condition>,

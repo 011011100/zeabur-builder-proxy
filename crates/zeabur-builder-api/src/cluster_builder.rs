@@ -11,7 +11,7 @@ use kube::{CustomResource, KubeSchema};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-use crate::common::{DURATION_PATTERN, SecretRef};
+use crate::common::DURATION_PATTERN;
 
 /// Longest image reference.
 pub const MAX_IMAGE: usize = 512;
@@ -38,11 +38,11 @@ pub const MAX_OPTS: usize = 32;
         type_ = "date",
         json_path = ".metadata.creationTimestamp"
     ),
-    doc = "How Zeabur Builder plans and builds: Dockerfile, Railpack or zbplan."
+    doc = "How Zeabur Builder plans and builds: Dockerfile or Railpack."
 )]
 #[x_kube(
     validation = Rule::new("self.type == 'dockerfile' ? !has(self.planner) : has(self.planner)")
-        .message("planner is required for railpack and zbplan, and forbidden for dockerfile")
+        .message("planner is required for railpack, and forbidden for dockerfile")
 )]
 #[serde(rename_all = "camelCase")]
 pub struct ClusterBuilderSpec {
@@ -64,8 +64,6 @@ pub enum BuilderType {
     Dockerfile,
     /// Railpack plans; its gateway frontend builds.
     Railpack,
-    /// zbplan writes a Dockerfile with an LLM, trying builds on the same buildkitd.
-    Zbplan,
 }
 
 /// The planning step.
@@ -75,17 +73,6 @@ pub struct PlannerSpec {
     /// The planner image, pinned by digest in production.
     #[schemars(length(min = 1, max = MAX_IMAGE))]
     pub image: String,
-    /// Whether the same source always gives the same plan. Deterministic planners (Railpack) run
-    /// every time; others (zbplan) have their plan pinned and reused.
-    pub deterministic: bool,
-    /// Whether planning builds on buildkitd (zbplan), so the plan container gets the client
-    /// certificate and the same instance as the build.
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    pub needs_buildkit: bool,
-    /// A Secret in the controller's namespace, mounted only into the plan container (an LLM API
-    /// key, for one). The controller copies it into a short-lived Secret owned by the `BuildRun`.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub credentials_ref: Option<SecretRef>,
     /// How long planning may take. Default `10m`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schemars(length(max = 32), regex(pattern = DURATION_PATTERN))]
