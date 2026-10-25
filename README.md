@@ -198,21 +198,33 @@ With kubectl and [ORAS](https://oras.land), as anyone who may edit the `Build`:
 ```sh
 kubectl -n team-a annotate build/api --overwrite builder.zeabur.com/upload-token-request=u1
 kubectl -n team-a wait build/api --for=jsonpath='{.status.uploadToken.request}'=u1
-oras push --registry-token "$(kubectl -n team-a get secret api-upload -o jsonpath='{.data.token}' | base64 -d)" \
-  zot.zot.svc:5000/team-a/api/source:upload-1 --artifact-type application/vnd.zeabur.source.v1+tar \
+kubectl -n team-a get secret api-upload -o jsonpath='{.data.\.dockerconfigjson}' |
+  base64 -d > auth.json
+oras push --registry-config auth.json zot.zot.svc:5000/team-a/api/source:upload-1 \
+  --artifact-type application/vnd.zeabur.source.v1+tar \
   source.tar.gz:application/vnd.oci.image.layer.v1.tar+gzip
 ```
 
-Then set `archive.digest` to the digest `oras push` prints. The Secret's `.dockerconfigjson`
-also works as `DOCKER_CONFIG` for ORAS. The registry must be reachable from where ORAS runs, such
-as through `kubectl port-forward`.
+Then set `archive.digest` to the digest `oras push` prints. ORAS must reach `zot.zot.svc:5000`
+and trust the CA in the Secret `zot/zot-tls`. From outside the cluster, through
+`kubectl -n zot port-forward svc/zot 5000:5000`, give the Secret's `token` key to
+`localhost:5000` and keep TLS:
+
+```sh
+printf '{"auths":{"localhost:5000":{"registrytoken":"%s"}}}' \
+  "$(kubectl -n team-a get secret api-upload -o jsonpath='{.data.token}' | base64 -d)" > auth.json
+kubectl -n zot get secret zot-tls -o jsonpath='{.data.ca\.crt}' | base64 -d > ca.crt
+oras push --registry-config auth.json --plain-http=false --ca-file ca.crt \
+  localhost:5000/team-a/api/source:upload-1 ...
+```
 
 An admin can push an image without a `Build` with a token from the controller's Pod:
 
 ```sh
 TOKEN=$(kubectl -n builder-system exec deploy/zeabur-builder -- \
-  zeabur-builder registry-token --repository zeabur_admin/tools --push)
-oras push --registry-token "$TOKEN" zot.zot.svc:5000/zeabur_admin/tools:v1 ./file
+  /zeabur-builder registry-token --repository zeabur_admin/tools --push)
+printf '{"auths":{"zot.zot.svc:5000":{"registrytoken":"%s"}}}' "$TOKEN" > auth.json
+oras push --registry-config auth.json zot.zot.svc:5000/zeabur_admin/tools:v1 ./file
 ```
 
 Keep such images out of the `<namespace>/<name>` layout, for example with a first segment that

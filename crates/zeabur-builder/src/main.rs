@@ -42,7 +42,8 @@ enum Command {
     #[command(subcommand)]
     GithubApp(github_app::Command),
     /// Print a token for the default registry, signed with the registry token key. Run it in
-    /// the controller's Pod: `kubectl exec deploy/zeabur-builder -- zeabur-builder registry-token`.
+    /// the controller's Pod:
+    /// `kubectl exec deploy/zeabur-builder -- /zeabur-builder registry-token`.
     RegistryToken(RegistryTokenArgs),
 }
 

@@ -65,11 +65,13 @@ in the form `oras push` writes:
 The `digest` in the `Build` is the manifest's digest. The Job checks the manifest and the layer
 against their digests, and refuses a manifest of another type or with more than one layer.
 
-With [ORAS](https://oras.land), from the folder:
+With [ORAS](https://oras.land), from the folder, and `auth.json` from the `Build`'s upload
+Secret ([README](../README.md#registry-tokens)):
 
 ```sh
 tar -czf /tmp/source.tar.gz .
-cd /tmp && oras push zot.zot.svc:5000/team-a/api/source:upload-$(date +%s) \
+cd /tmp && oras push --registry-config auth.json \
+  zot.zot.svc:5000/team-a/api/source:upload-$(date +%s) \
   --artifact-type application/vnd.zeabur.source.v1+tar \
   source.tar.gz:application/vnd.oci.image.layer.v1.tar+gzip
 ```
