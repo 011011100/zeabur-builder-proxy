@@ -72,6 +72,7 @@
               rustToolchain
 
               # Quality and supply chain
+              cargo-auditable
               cargo-deny
               cargo-nextest
               kache
@@ -85,6 +86,12 @@
               kubectl
               kubernetes-helm
               buildkit
+
+              # Releases: signatures and image copies by digest
+              cosign
+              skopeo
+              gh
+              yq-go
 
               self.formatter.${system}
             ];
