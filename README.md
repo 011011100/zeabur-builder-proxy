@@ -206,7 +206,6 @@ Not built yet:
 - The `zbplan` builder type: the Job runs [zbplan](https://github.com/zeabur/zbplan), which
   writes a Dockerfile with an LLM, but plan pinning and approval (`spec.plan`) are not
   implemented and no zbplan image is built.
-- `flux-receiver` and `generic` notify targets; the controller logs and skips them.
 - `spec.triggers.onBaseImageChange`.
 - Prometheus metrics.
 

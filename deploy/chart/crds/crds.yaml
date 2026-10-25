@@ -389,9 +389,7 @@
                         "type": {
                           "description": "The receiver.",
                           "enum": [
-                            "keel",
-                            "flux-receiver",
-                            "generic"
+                            "keel"
                           ],
                           "type": "string"
                         },

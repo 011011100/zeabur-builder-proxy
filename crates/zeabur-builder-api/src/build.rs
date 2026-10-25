@@ -308,12 +308,6 @@ pub enum NotifyType {
     /// Keel's native webhook, `{"name", "tag"}`.
     #[serde(rename = "keel")]
     Keel,
-    /// A Flux `Receiver` of type `generic-hmac`.
-    #[serde(rename = "flux-receiver")]
-    FluxReceiver,
-    /// A JSON document, signed when a key is given.
-    #[serde(rename = "generic")]
-    Generic,
 }
 
 /// What the controller knows about a `Build`.

@@ -20,8 +20,6 @@
 //!
 //! Only the holder of the Lease reconciles ([`crate::leader`]). The other replicas watch and
 //! receive webhooks.
-//!
-//! Not yet: `flux-receiver` and `generic` notify targets.
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -847,10 +845,6 @@ async fn notify_targets(
     for target in &build.spec.notify {
         let sent = match target.kind {
             NotifyType::Keel => send_keel(ctx, &namespace, target, image, run).await,
-            NotifyType::FluxReceiver | NotifyType::Generic => {
-                tracing::warn!(build = %build.name_any(), %namespace, kind = ?target.kind, url = %target.url, "notify type not supported yet; skipped");
-                continue;
-            }
         };
         match sent {
             Ok(tag) => {
