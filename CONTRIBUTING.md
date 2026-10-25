@@ -29,7 +29,7 @@ cargo deny --locked check
 Generated files are committed and checked by tests. Regenerate them with:
 
 ```sh
-cargo run -q -p zeabur-builder -- crds > deploy/crds.json
+cargo run -q -p zeabur-builder -- crds > deploy/chart/crds/crds.yaml
 ZEABUR_BUILDER_BLESS=1 cargo nextest run -p zeabur-builder-jobspec   # build Job golden files
 ```
 
@@ -73,22 +73,27 @@ Shared with [Zeabur Identity](https://github.com/zeabur-oss/identity):
 
 ## Tests against a cluster
 
-Use a disposable cluster with its own kubeconfig, never your normal context. The example in
-`deploy/examples/` runs the controller, an in-cluster registry and four sample Builds:
+`scripts/ci.sh kubernetes` is the cluster job of CI. It creates the k3d cluster `zeabur-builder`
+with its own kubeconfig (`target/ci/kubeconfig`), builds the images, installs the chart from
+`deploy/chart`, builds the sample Builds from Git (a Dockerfile in `team-a` and `team-b`, Railpack
+in `team-a`), waits for the two samples that fail on purpose, runs `scripts/example-isolation.sh`
+and deletes the cluster. Run it on a Linux machine with Docker; `ZEABUR_CI_KEEP=1` keeps the
+cluster.
+
+To work against a cluster by hand, use a disposable one with its own kubeconfig, never your normal
+context:
 
 ```sh
 export KUBECONFIG=$(mktemp -d)/kubeconfig
 k3d cluster create zeabur-builder
 scripts/build-images.sh zeabur-builder dev
-K3D_CLUSTER=zeabur-builder scripts/deploy-example.sh k3d-zeabur-builder whoami hello-python
+K3D_CLUSTER=zeabur-builder scripts/deploy-example.sh k3d-zeabur-builder team-a/whoami team-a/hello-python
 ```
 
-`scripts/deploy-example.sh` applies `deploy/crds.json` and `deploy/examples/`, gives each namespace
-in `NAMESPACES` (default `team-a`) its own registry account, and waits for each named Build's
+`scripts/deploy-example.sh` starts the test registry in `deploy/examples/registry.yaml`, gives
+each namespace in `NAMESPACES` (default `team-a team-b`) its own registry account, installs the
+chart, applies `deploy/examples/builds.yaml` and waits for each named Build's
 `status.latestImage`. It stops at the first failed `BuildRun`.
-
-To check the isolation between two namespaces, deploy with `NAMESPACES="team-a team-b"`, let each
-namespace build once, then run `scripts/example-isolation.sh k3d-zeabur-builder`.
 
 ```sh
 kubectl -n team-a get build -o wide        # Ready, Revision, Image
