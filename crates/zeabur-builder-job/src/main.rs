@@ -105,16 +105,6 @@ fn flag_value<'a>(command: &'a [String], flag: &str) -> Option<&'a str> {
         .map(String::as_str)
 }
 
-/// A failed push is the registry's fault: report it as `PushFailed`.
-fn classify(error: &str) -> FailureReason {
-    let error = error.to_ascii_lowercase();
-    if error.contains("failed to push") || error.contains("pushing") {
-        FailureReason::PushFailed
-    } else {
-        FailureReason::BuildFailed
-    }
-}
-
 /// The seconds `fetch` and `plan` recorded in `/workspace/out/<phase>.json`.
 fn phase_seconds(phases: &mut BTreeMap<String, f64>) {
     for phase in ["fetch", "plan"] {
@@ -224,11 +214,11 @@ fn build(
             .last_error
             .take()
             .unwrap_or_else(|| format!("buildctl failed: {status:?}"));
-        return Err((classify(&message), message));
+        return Err((FailureReason::BuildFailed, message));
     }
     digest(flag_value(command, "--metadata-file")).ok_or_else(|| {
         (
-            FailureReason::PushFailed,
+            FailureReason::BuildFailed,
             String::from("buildctl succeeded but reported no image digest"),
         )
     })
@@ -451,17 +441,5 @@ mod tests {
         ]);
         assert_eq!(tags(&single), ["v1"]);
         assert_eq!(tags(&strings(&["build"])), Vec::<String>::new());
-    }
-
-    #[test]
-    fn push_failures_are_told_apart() {
-        assert_eq!(
-            classify("failed to solve: failed to push registry.local/a/api:v1: unexpected status"),
-            FailureReason::PushFailed
-        );
-        assert_eq!(
-            classify("[2/2] RUN make: exit code: 2"),
-            FailureReason::BuildFailed
-        );
     }
 }

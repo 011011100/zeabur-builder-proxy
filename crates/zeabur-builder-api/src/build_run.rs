@@ -181,10 +181,8 @@ pub enum Reason {
     SourceFailed,
     /// The planner failed.
     PlanFailed,
-    /// A build step failed.
+    /// `buildctl` failed, in the build or in the push.
     BuildFailed,
-    /// The registry refused the push.
-    PushFailed,
     /// The Job ran past its deadline.
     Timeout,
     /// Replaced or cancelled.

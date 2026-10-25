@@ -957,7 +957,6 @@
                       "SourceFailed",
                       "PlanFailed",
                       "BuildFailed",
-                      "PushFailed",
                       "Timeout",
                       "Cancelled",
                       "InfraError"

@@ -659,7 +659,6 @@ fn from_result(result: BuildResult) -> Observed {
             status.reason = Some(match result.reason {
                 Some(FailureReason::SourceFailed) => Reason::SourceFailed,
                 Some(FailureReason::PlanFailed) => Reason::PlanFailed,
-                Some(FailureReason::PushFailed) => Reason::PushFailed,
                 Some(FailureReason::BuildFailed) | None => Reason::BuildFailed,
             });
         }

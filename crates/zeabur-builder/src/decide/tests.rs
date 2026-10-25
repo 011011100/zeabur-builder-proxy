@@ -695,14 +695,14 @@ fn failures_name_their_phase() {
             "build",
             terminated(
                 1,
-                Some(r#"{"result":"failed","reason":"PushFailed","message":"denied"}"#),
+                Some(r#"{"result":"failed","reason":"BuildFailed","message":"denied"}"#),
             ),
         )],
     );
     let Observed::Finished(status) = observe(&failed_job, Some(&build)) else {
         panic!()
     };
-    assert_eq!(status.reason, Some(Reason::PushFailed));
+    assert_eq!(status.reason, Some(Reason::BuildFailed));
     assert_eq!(status.message.as_deref(), Some("denied"));
 
     let Observed::Finished(status) =
