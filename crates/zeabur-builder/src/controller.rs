@@ -1511,7 +1511,9 @@ async fn sweep_registry(ctx: &Context) -> Result<(), String> {
 }
 
 /// Deletes the repositories of deleted `Build`s: on each delete event, and by a sweep at start and
-/// every [`SWEEP`], which also catches events missed while the controller was down.
+/// every [`SWEEP`], which also catches events missed while the controller was down. A failed
+/// sweep, such as one a network policy refuses while it does not yet admit a new Pod, tries again
+/// after [`PENDING_RETRY`].
 async fn janitor(ctx: Arc<Context>) {
     if ctx.settings.registry_token_key.is_none() {
         return std::future::pending().await;
@@ -1544,10 +1546,14 @@ async fn janitor(ctx: Arc<Context>) {
                     next_sweep += PENDING_RETRY;
                     continue;
                 }
-                if let Err(error) = sweep_registry(&ctx).await {
-                    tracing::warn!(%error, "sweeping the registry");
-                }
-                next_sweep = tokio::time::Instant::now() + SWEEP;
+                let wait = match sweep_registry(&ctx).await {
+                    Ok(()) => SWEEP,
+                    Err(error) => {
+                        tracing::warn!(%error, "sweeping the registry; trying again soon");
+                        PENDING_RETRY
+                    }
+                };
+                next_sweep = tokio::time::Instant::now() + wait;
             }
         }
     }
