@@ -40,11 +40,7 @@ and trusts the registry CA of `registry.ca` or `registry.caFrom`.
   `builder.zeabur.com/upload-token-request` and pushes with it
   ([README](../README.md#registry-tokens)). A new `Build` may leave `digest` unset until then.
   The run's token reads only its own `Build`'s archives.
-- With `registry.authPrefix`: the client pushes with the namespace's own registry credentials,
-  the `kubernetes.io/dockerconfigjson` Secret `<registry.authPrefix><namespace>` in the
-  controller's namespace (`registry-push-team-a`), which may write only below
-  `<registry.host>/<namespace>/`.
-- With `registry.authPrefix: ""` and no token key, the push and the download are anonymous.
+- Without a token key, the push and the download are anonymous: only for a test registry.
 
 Push the manifest with a tag, not only by digest. A registry that deletes untagged manifests,
 such as the [Zeabur Catalog](https://github.com/zeabur-oss/catalog)'s Zot, may otherwise remove

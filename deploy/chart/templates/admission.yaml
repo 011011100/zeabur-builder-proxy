@@ -1,0 +1,128 @@
+{{- $images := concat (list (include "builder.image" (list .Values.jobImage .Chart)) (include "builder.image" (list .Values.railpackImage .Chart))) .Values.admissionPolicy.extraImages | uniq }}
+{{- $registry := .Values.registry }}
+{{- $denied := concat (list .Release.Namespace $registry.tokenKey.namespace $registry.caFrom.namespace $registry.inCluster.namespace) .Values.admissionPolicy.extraDeniedNamespaces | compact | uniq }}
+{{- $user := printf "system:serviceaccount:%s:zeabur-builder" .Release.Namespace }}
+# The controller can create Jobs in every namespace. A Job it creates must be a build Job: the
+# chart's images, no privilege, no host namespace, port or path, the default ServiceAccount
+# without a token, and not in a system namespace or one that holds the registry's keys.
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: {{ .Release.Name }}-zeabur-builder-jobs
+  labels: {{- include "builder.labels" . | nindent 4 }}
+spec:
+  failurePolicy: Fail
+  matchConstraints:
+    resourceRules:
+      - apiGroups: [batch]
+        apiVersions: ["*"]
+        operations: [CREATE, UPDATE]
+        resources: [jobs]
+  matchConditions:
+    - name: controller
+      expression: request.userInfo.username == '{{ $user }}'
+  variables:
+    - name: pod
+      expression: object.spec.template.spec
+    - name: containers
+      expression: >-
+        has(variables.pod.initContainers) ? variables.pod.containers + variables.pod.initContainers
+        : variables.pod.containers
+  validations:
+    - expression: >-
+        !request.namespace.startsWith('kube-') &&
+        !(request.namespace in {{ include "builder.celList" $denied }})
+      message: the controller may not create Jobs in this namespace
+    - expression: >-
+        variables.containers.all(c, c.image in {{ include "builder.celList" $images }})
+      message: a build Job runs only the chart's images
+    - expression: >-
+        variables.containers.all(c, has(c.securityContext) &&
+        has(c.securityContext.allowPrivilegeEscalation) &&
+        !c.securityContext.allowPrivilegeEscalation &&
+        !(has(c.securityContext.privileged) && c.securityContext.privileged) &&
+        !(has(c.securityContext.capabilities) && has(c.securityContext.capabilities.add)))
+      message: a build Job runs without privilege
+    - expression: >-
+        has(variables.pod.securityContext) && has(variables.pod.securityContext.runAsNonRoot) &&
+        variables.pod.securityContext.runAsNonRoot
+      message: a build Job runs as non-root
+    - expression: >-
+        !(has(variables.pod.hostNetwork) && variables.pod.hostNetwork) &&
+        !(has(variables.pod.hostPID) && variables.pod.hostPID) &&
+        !(has(variables.pod.hostIPC) && variables.pod.hostIPC) &&
+        variables.containers.all(c, !has(c.ports) || c.ports.all(p, !has(p.hostPort) || p.hostPort == 0))
+      message: a build Job uses no host network, PID, IPC or port
+    - expression: >-
+        !has(variables.pod.volumes) || variables.pod.volumes.all(v, has(v.emptyDir) || has(v.secret))
+      message: a build Job mounts only emptyDir and Secret volumes
+    - expression: >-
+        (!has(variables.pod.serviceAccountName) || variables.pod.serviceAccountName == 'default') &&
+        (!has(variables.pod.serviceAccount) || variables.pod.serviceAccount == 'default') &&
+        has(variables.pod.automountServiceAccountToken) && !variables.pod.automountServiceAccountToken
+      message: a build Job runs as the default ServiceAccount without its token
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
+  name: {{ .Release.Name }}-zeabur-builder-jobs
+  labels: {{- include "builder.labels" . | nindent 4 }}
+spec:
+  policyName: {{ .Release.Name }}-zeabur-builder-jobs
+  validationActions: [Deny]
+---
+# The controller can create StatefulSets in this namespace, which allows privileged Pods. A
+# StatefulSet it creates must be a buildkitd: buildkitdImage only, no host namespace, port or
+# path, the default ServiceAccount without a token.
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: {{ .Release.Name }}-zeabur-builder-buildkitd
+  labels: {{- include "builder.labels" . | nindent 4 }}
+spec:
+  failurePolicy: Fail
+  matchConstraints:
+    resourceRules:
+      - apiGroups: [apps]
+        apiVersions: ["*"]
+        operations: [CREATE, UPDATE]
+        resources: [statefulsets]
+  matchConditions:
+    - name: controller
+      expression: request.userInfo.username == '{{ $user }}'
+  variables:
+    - name: pod
+      expression: object.spec.template.spec
+    - name: containers
+      expression: >-
+        has(variables.pod.initContainers) ? variables.pod.containers + variables.pod.initContainers
+        : variables.pod.containers
+  validations:
+    - expression: request.namespace == '{{ .Release.Namespace }}'
+      message: the controller creates StatefulSets only in its own namespace
+    - expression: variables.containers.all(c, c.image == '{{ .Values.buildkitdImage }}')
+      message: a buildkitd StatefulSet runs only buildkitdImage
+    - expression: >-
+        !(has(variables.pod.hostNetwork) && variables.pod.hostNetwork) &&
+        !(has(variables.pod.hostPID) && variables.pod.hostPID) &&
+        !(has(variables.pod.hostIPC) && variables.pod.hostIPC) &&
+        variables.containers.all(c, !has(c.ports) || c.ports.all(p, !has(p.hostPort) || p.hostPort == 0))
+      message: a buildkitd StatefulSet uses no host network, PID, IPC or port
+    - expression: >-
+        !has(variables.pod.volumes) ||
+        variables.pod.volumes.all(v, has(v.emptyDir) || has(v.secret) || has(v.configMap))
+      message: a buildkitd StatefulSet mounts only emptyDir, Secret and ConfigMap volumes
+    - expression: >-
+        (!has(variables.pod.serviceAccountName) || variables.pod.serviceAccountName == 'default') &&
+        (!has(variables.pod.serviceAccount) || variables.pod.serviceAccount == 'default') &&
+        has(variables.pod.automountServiceAccountToken) && !variables.pod.automountServiceAccountToken
+      message: a buildkitd StatefulSet runs as the default ServiceAccount without its token
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
+  name: {{ .Release.Name }}-zeabur-builder-buildkitd
+  labels: {{- include "builder.labels" . | nindent 4 }}
+spec:
+  policyName: {{ .Release.Name }}-zeabur-builder-buildkitd
+  validationActions: [Deny]

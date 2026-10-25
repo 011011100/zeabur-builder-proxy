@@ -405,6 +405,22 @@
                         "pattern": "^[a-z0-9]([a-z0-9._:/-]*[a-z0-9])?$",
                         "type": "string"
                       },
+                      "pushSecretRef": {
+                        "description": "Push credentials for an image outside the default registry: a\n`kubernetes.io/dockerconfigjson` Secret in the same namespace, labelled\n`builder.zeabur.com/push-credentials: \"true\"`. When the controller signs registry\ntokens, the default registry gets a token instead.",
+                        "nullable": true,
+                        "properties": {
+                          "name": {
+                            "description": "The Secret's name.",
+                            "maxLength": 253,
+                            "minLength": 1,
+                            "type": "string"
+                          }
+                        },
+                        "required": [
+                          "name"
+                        ],
+                        "type": "object"
+                      },
                       "tagTemplate": {
                         "description": "The tag: `{{.Field}}` with `.Branch`, `.ShortSHA`, `.SHA`, `.UnixTime` and `.BuildRun`.\nDefault `{{.Branch}}-{{.UnixTime}}-{{.ShortSHA}}`.",
                         "maxLength": 256,

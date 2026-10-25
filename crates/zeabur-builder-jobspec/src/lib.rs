@@ -411,7 +411,6 @@ fn build_container(inputs: &JobInputs<'_>, repo: Option<&RepoKey>) -> Result<Con
     } else {
         buildctl.extend(output(inputs, repo, &tagged(inputs), false));
     }
-    buildctl.extend(cache_args(inputs));
     if non_root {
         wrapper.extend(["--non-root".to_owned(), PLAN.to_owned()]);
     }
@@ -585,19 +584,6 @@ fn output(
             .map(|field| csv_field(field))
             .collect::<Vec<_>>()
             .join(","),
-    ]
-}
-
-/// The registry cache.
-fn cache_args(inputs: &JobInputs<'_>) -> [String; 4] {
-    [
-        "--import-cache".to_owned(),
-        format!("type=registry,ref={}:buildcache", inputs.image),
-        "--export-cache".to_owned(),
-        format!(
-            "type=registry,ref={}:buildcache,mode=max,ignore-error=true",
-            inputs.image
-        ),
     ]
 }
 

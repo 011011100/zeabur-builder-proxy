@@ -96,11 +96,13 @@ const UPLOAD_TTL: Duration = Duration::from_mins(15);
 /// How long a token for deleting repositories lasts.
 const DELETE_TTL: Duration = Duration::from_mins(5);
 const EMPTY_DOCKER_CONFIG: &[u8] = br#"{"auths":{}}"#;
+/// The tag where earlier builds pushed their registry cache.
+const OLD_CACHE_TAG: &str = "buildcache";
 
 /// Settings, from the command line.
 #[derive(Debug, Clone)]
 pub(crate) struct Settings {
-    /// The controller's namespace, where the push credentials are kept.
+    /// The controller's namespace.
     pub(crate) namespace: String,
     /// How each namespace's buildkitd runs.
     pub(crate) daemon: Arc<daemon::Settings>,
@@ -108,9 +110,6 @@ pub(crate) struct Settings {
     pub(crate) max_concurrent: u32,
     /// The registry for `Build`s without `spec.output.image`.
     pub(crate) default_registry: String,
-    /// With a prefix, the `kubernetes.io/dockerconfigjson` Secret `<prefix><namespace>` in the
-    /// controller's namespace holds a namespace's push credentials; without, pushes are anonymous.
-    pub(crate) registry_auth_prefix: Option<String>,
     /// The default registry's CA, PEM, for the `fetch` container of an archive source.
     pub(crate) registry_ca: Option<String>,
     /// Whether the default registry speaks plain HTTP.
@@ -1246,52 +1245,21 @@ async fn start(ctx: &Context, run: &BuildRun, status: BuildRunStatus) -> Result<
     Ok(Action::await_change())
 }
 
-/// A run's registry credentials: the namespace's own Secret when the controller is given a
-/// prefix, else an empty Docker config. With a token key, a token for the `Build`'s image
-/// repository and archive repository replaces any entry for the default registry. The message
-/// says what is missing.
+/// A run's registry credentials: the Secret of `spec.output.pushSecretRef`, else an empty Docker
+/// config. With a token key, a token for the `Build`'s image repository and archive repository
+/// replaces any entry for the default registry. The message says what is missing.
 async fn registry_auth(
     ctx: &Context,
     build: &Build,
     owned: Option<&decide::Owned>,
 ) -> Result<Result<ByteString, String>, Error> {
     let settings = &ctx.settings;
-    let namespace = build.namespace().unwrap_or_default();
-    let base = match &settings.registry_auth_prefix {
-        None => Some(EMPTY_DOCKER_CONFIG.to_vec()),
-        Some(prefix) => {
-            let name = format!("{prefix}{namespace}");
-            match Api::<Secret>::namespaced(ctx.client.clone(), &settings.namespace)
-                .get_opt(&name)
-                .await?
-            {
-                None => None,
-                Some(secret) => Some(
-                    secret
-                        .data
-                        .and_then(|mut d| d.remove(".dockerconfigjson"))
-                        .ok_or_else(|| {
-                            Error::Invalid(format!("Secret `{name}` has no .dockerconfigjson"))
-                        })?
-                        .0,
-                ),
-            }
-        }
-    };
-    let missing = || {
-        format!(
-            "no Secret `{}{namespace}` with push credentials in `{}`",
-            settings.registry_auth_prefix.as_deref().unwrap_or_default(),
-            settings.namespace
-        )
+    let base = match push_credentials(ctx, build).await? {
+        Ok(base) => base,
+        Err(message) => return Ok(Err(message)),
     };
     let Some(owned) = owned else {
-        return Ok(base.map(ByteString).ok_or_else(missing));
-    };
-    let base = match base {
-        Some(base) => base,
-        None if owned.image.is_some() => EMPTY_DOCKER_CONFIG.to_vec(),
-        None => return Ok(Err(missing())),
+        return Ok(Ok(ByteString(base)));
     };
     let mut grants = Vec::new();
     if let Some(image) = &owned.image {
@@ -1312,6 +1280,29 @@ async fn registry_auth(
     registry::with_token(&base, &owned.host, &token)
         .map(|config| Ok(ByteString(config)))
         .map_err(Error::Invalid)
+}
+
+/// The `.dockerconfigjson` of the Secret that `spec.output.pushSecretRef` names, in the `Build`'s
+/// namespace. It must carry the label `builder.zeabur.com/push-credentials: "true"`, so a
+/// `Build` cannot point the controller at any Secret.
+async fn push_credentials(ctx: &Context, build: &Build) -> Result<Result<Vec<u8>, String>, Error> {
+    let Some(secret_ref) = build
+        .spec
+        .output
+        .as_ref()
+        .and_then(|o| o.push_secret_ref.as_ref())
+    else {
+        return Ok(Ok(EMPTY_DOCKER_CONFIG.to_vec()));
+    };
+    let name = &secret_ref.name;
+    let namespace = build.namespace().unwrap_or_default();
+    let Some(secret) = Api::<Secret>::namespaced(ctx.client.clone(), &namespace)
+        .get_opt(name)
+        .await?
+    else {
+        return Ok(Err(format!("no Secret `{name}` in `{namespace}`")));
+    };
+    Ok(registry::push_config(name, &secret))
 }
 
 /// The `Build`'s repositories in the default registry, when the controller signs tokens.
@@ -1485,8 +1476,9 @@ async fn all_builds(client: &Client) -> Result<std::collections::HashSet<(String
     }
 }
 
-/// Deletes the repositories of every `Build` that no longer exists.
-async fn sweep_registry(ctx: &Context) -> Result<(), String> {
+/// Deletes the repositories of every `Build` that no longer exists. With `purge_cache`, also
+/// deletes the old build cache tags.
+async fn sweep_registry(ctx: &Context, purge_cache: bool) -> Result<(), String> {
     let signer = signer(ctx).await?;
     let token = signer.token(
         &[(registry::CATALOG, registry::Access::PULL)],
@@ -1494,6 +1486,9 @@ async fn sweep_registry(ctx: &Context) -> Result<(), String> {
         DELETE_TTL,
     );
     let repositories = ctx.registry.catalog(&token).await?;
+    if purge_cache {
+        purge_build_cache(ctx, &signer, &repositories).await?;
+    }
     let builds = all_builds(&ctx.client).await.map_err(|e| e.to_string())?;
     let mut gone = std::collections::BTreeSet::new();
     for repository in &repositories {
@@ -1506,6 +1501,42 @@ async fn sweep_registry(ctx: &Context) -> Result<(), String> {
     }
     for (namespace, name) in gone {
         clear_if_gone(ctx, namespace, name).await?;
+    }
+    Ok(())
+}
+
+/// Deletes the tag `buildcache` of each image repository. Earlier builds pushed their full build
+/// cache there, and anyone who may pull images could read it. Remove after v0.1.
+async fn purge_build_cache(
+    ctx: &Context,
+    signer: &Signer,
+    repositories: &[String],
+) -> Result<(), String> {
+    let registry = &ctx.settings.default_registry;
+    let mut purged = 0_usize;
+    for repository in repositories {
+        let image =
+            decide::repository_owner(repository, registry).is_some_and(|(namespace, name)| {
+                decide::repositories(registry, namespace, name)[1] == *repository
+            });
+        if !image {
+            continue;
+        }
+        let token = signer.token(
+            &[(repository.as_str(), registry::Access::DELETE)],
+            now(),
+            DELETE_TTL,
+        );
+        if ctx
+            .registry
+            .delete_tag(repository, OLD_CACHE_TAG, &token)
+            .await?
+        {
+            purged += 1;
+        }
+    }
+    if purged > 0 {
+        tracing::info!(purged, "deleted old build cache tags");
     }
     Ok(())
 }
@@ -1524,6 +1555,7 @@ async fn janitor(ctx: Arc<Context>) {
     );
     let mut events = std::pin::pin!(events);
     let mut next_sweep = tokio::time::Instant::now();
+    let mut cache_purged = false;
     loop {
         tokio::select! {
             event = events.next() => match event {
@@ -1546,8 +1578,11 @@ async fn janitor(ctx: Arc<Context>) {
                     next_sweep += PENDING_RETRY;
                     continue;
                 }
-                let wait = match sweep_registry(&ctx).await {
-                    Ok(()) => SWEEP,
+                let wait = match sweep_registry(&ctx, !cache_purged).await {
+                    Ok(()) => {
+                        cache_purged = true;
+                        SWEEP
+                    }
                     Err(error) => {
                         tracing::warn!(%error, "sweeping the registry; trying again soon");
                         PENDING_RETRY

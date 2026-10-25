@@ -251,6 +251,12 @@ pub struct OutputSpec {
         inner(length(max = 128), regex(pattern = r"^[A-Za-z0-9_][A-Za-z0-9._-]{0,127}$"))
     )]
     pub extra_tags: Vec<String>,
+    /// Push credentials for an image outside the default registry: a
+    /// `kubernetes.io/dockerconfigjson` Secret in the same namespace, labelled
+    /// `builder.zeabur.com/push-credentials: "true"`. When the controller signs registry
+    /// tokens, the default registry gets a token instead.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub push_secret_ref: Option<SecretRef>,
 }
 
 /// A build variable.

@@ -20,12 +20,14 @@ use k8s_openapi::api::core::v1::Secret;
 use kube::{Api, Client};
 use serde::Deserialize;
 use serde_json::json;
+use zeabur_builder_api::labels;
 
 use crate::remote::HttpClient;
 
 const TIMEOUT: Duration = Duration::from_secs(30);
 const MAX_ANSWER: usize = 4 << 20;
 const CATALOG_PAGE: usize = 1000;
+const DOCKER_CONFIG_JSON: &str = "kubernetes.io/dockerconfigjson";
 const USER_AGENT: &str = concat!("zeabur-builder/", env!("CARGO_PKG_VERSION"));
 const INDEX_TYPES: [&str; 2] = [
     "application/vnd.oci.image.index.v1+json",
@@ -184,6 +186,40 @@ pub(crate) fn with_token(config: &[u8], host: &str, token: &str) -> Result<Vec<u
     });
     auths.insert(host.to_owned(), json!({"registrytoken": token}));
     Ok(config.to_string().into_bytes())
+}
+
+/// The Docker config of `secret`, named `name`: a `kubernetes.io/dockerconfigjson` Secret with the
+/// label `builder.zeabur.com/push-credentials: "true"`. The message says what is wrong.
+pub(crate) fn push_config(name: &str, secret: &Secret) -> Result<Vec<u8>, String> {
+    let labelled = secret
+        .metadata
+        .labels
+        .as_ref()
+        .and_then(|l| l.get(labels::PUSH_CREDENTIALS))
+        .is_some_and(|v| v == "true");
+    if !labelled {
+        return Err(format!(
+            "Secret `{name}` needs the label `{}: \"true\"`",
+            labels::PUSH_CREDENTIALS
+        ));
+    }
+    if secret.type_.as_deref() != Some(DOCKER_CONFIG_JSON) {
+        return Err(format!(
+            "Secret `{name}` is of type `{}`; use {DOCKER_CONFIG_JSON}",
+            secret.type_.as_deref().unwrap_or("Opaque")
+        ));
+    }
+    let config = secret
+        .data
+        .as_ref()
+        .and_then(|d| d.get(".dockerconfigjson"))
+        .ok_or_else(|| format!("Secret `{name}` has no .dockerconfigjson"))?;
+    match serde_json::from_slice::<serde_json::Value>(&config.0) {
+        Ok(serde_json::Value::Object(_)) => Ok(config.0.clone()),
+        _ => Err(format!(
+            "Secret `{name}`: .dockerconfigjson is not a Docker config"
+        )),
+    }
 }
 
 /// The registry API of one host.
@@ -351,6 +387,28 @@ impl Registry {
         Ok(())
     }
 
+    /// Deletes `tag` of `repository` and leaves other tags of the same manifest. Returns whether
+    /// there was one.
+    pub(crate) async fn delete_tag(
+        &self,
+        repository: &str,
+        tag: &str,
+        token: &str,
+    ) -> Result<bool, String> {
+        let (status, ..) = self
+            .send(
+                Method::DELETE,
+                &format!("{repository}/manifests/{tag}"),
+                token,
+            )
+            .await?;
+        match status {
+            StatusCode::NOT_FOUND => Ok(false),
+            s if s.is_success() => Ok(true),
+            s => Err(format!("deleting {repository}:{tag}: {s}")),
+        }
+    }
+
     async fn delete_manifest(
         &self,
         repository: &str,
@@ -458,5 +516,39 @@ mod tests {
             config,
             json!({"auths": {"zot.zot.svc:5000": {"registrytoken": "t"}}})
         );
+    }
+
+    #[test]
+    fn push_credentials_need_the_label_and_the_type() {
+        let secret = |label: Option<&str>, type_: &str, config: &str| Secret {
+            metadata: kube::api::ObjectMeta {
+                labels: label.map(|v| {
+                    std::collections::BTreeMap::from([(
+                        labels::PUSH_CREDENTIALS.to_owned(),
+                        v.to_owned(),
+                    )])
+                }),
+                ..Default::default()
+            },
+            type_: Some(type_.to_owned()),
+            data: Some(std::collections::BTreeMap::from([(
+                ".dockerconfigjson".to_owned(),
+                k8s_openapi::ByteString(config.as_bytes().to_vec()),
+            )])),
+            ..Secret::default()
+        };
+        let config = r#"{"auths":{"ghcr.io":{"auth":"Z2g6cA=="}}}"#;
+        assert_eq!(
+            push_config("push", &secret(Some("true"), DOCKER_CONFIG_JSON, config)).unwrap(),
+            config.as_bytes()
+        );
+        for refused in [
+            secret(None, DOCKER_CONFIG_JSON, config),
+            secret(Some("false"), DOCKER_CONFIG_JSON, config),
+            secret(Some("true"), "Opaque", config),
+            secret(Some("true"), DOCKER_CONFIG_JSON, "[]"),
+        ] {
+            assert!(push_config("push", &refused).is_err(), "{refused:?}");
+        }
     }
 }

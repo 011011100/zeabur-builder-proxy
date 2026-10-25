@@ -13,15 +13,25 @@ The unit of isolation is the namespace. Teams that share a cluster cannot read e
 source, secrets or build cache, and cannot push to each other's images:
 
 - Each build namespace has its own buildkitd and cache, its own certificate authority and client
-  certificate. With `registry.tokenKey`, each run pushes with a short-lived token for its own
-  `Build`'s repository only; with `registry.authPrefix`, with a namespace account that pushes
-  only below `<registry.host>/<namespace>/`.
+  certificate. The build cache stays on buildkitd's volume and never goes to the registry. With
+  `registry.tokenKey`, each run pushes with a short-lived token for its own `Build`'s repository
+  only. A push to another registry uses a push Secret in the `Build`'s own namespace.
 - An archive source is read only from `<registry.host>/<namespace>/<build>/source`, with the
   run's registry credentials. The registry decides who else may read it: the Zeabur Catalog's
-  Zot lets only a token for that repository read it; the test registry shows every upload to
-  anyone who can reach it. The Job unpacks the archive without writing outside the source folder.
+  Zot and the test registry let only a token for that repository read it. The Job unpacks the archive without writing outside the source folder.
 - Whoever reads the registry token key can push to and delete any repository. Only the
   controller may read it.
+- A token cannot be revoked. When a namespace is deleted and another team creates one of the
+  same name, a token of the old namespace can push to the new one's repositories until it
+  expires, at most 70 minutes with the default Job deadline.
+- Images in the registry are readable by anyone who can reach it, as the nodes need. Keep
+  secrets out of images.
+- The controller is as powerful as a cluster administrator: it creates Jobs in every namespace,
+  writes Secrets in every namespace and creates privileged buildkitd StatefulSets. The chart's
+  ValidatingAdmissionPolicies allow its ServiceAccount only build Jobs (the chart's images, no
+  privilege, no host access, no ServiceAccount token, not in `kube-*`, its own or the registry's
+  namespaces) and buildkitd StatefulSets with the chart's buildkitd image. A stolen token can
+  still read the Secrets of any namespace where builds may run (README, Controller permissions).
 - Builds in one namespace trust each other. They share a buildkitd, so a `RUN` step can read the
   cache mounts of other builds in the same namespace.
 - Each `RUN` step has its own network namespace. It reaches the internet and the registry; the

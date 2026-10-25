@@ -27,18 +27,29 @@ railpackImage:
 # The Railpack frontend. Its version must match the railpack in railpackImage.
 railpackFrontend: ghcr.io/railwayapp/railpack-frontend:v0.43.0
 
+# Each namespace's buildkitd, rootful. The admission policy below allows only this image.
+buildkitdImage: docker.io/moby/buildkit:v0.34.1@sha256:99368f3e46177c6405b9740e4461d91cee004128daeecca78d4ceac50ec1da5c
+
+# A ValidatingAdmissionPolicy that limits what the controller's ServiceAccount may create: Jobs
+# only in the shape of a build Job, and StatefulSets only with buildkitdImage, in this namespace.
+# Read or change it with `kubectl get validatingadmissionpolicy`.
+admissionPolicy:
+  # Images a build Job may run besides jobImage and railpackImage, such as the planner of a
+  # ClusterBuilder of your own.
+  extraImages: []
+  # Namespaces where the controller may not create Jobs, besides kube-*, this namespace and the
+  # registry's namespaces.
+  extraDeniedNamespaces: []
+
 registry:
   # Where images go when a Build names no image, such as zot.zot.svc:5000. Required.
   host: ""
-  # Each namespace pushes images and pulls archive sources with the kubernetes.io/dockerconfigjson
-  # Secret <authPrefix><namespace> in this namespace, and its builds wait while it is missing.
-  # Empty: anonymous pushes, for a registry that takes them. With tokenKey, used only for images
-  # outside registry.host.
-  authPrefix: registry-push-
   # The Secret whose tls.key (PKCS#8 Ed25519) signs tokens that registry.host trusts, such as the
   # catalog Zot's zot-token-signer in zot. Set: each run pushes with a short-lived token for its
   # own Build's repositories only, clients ask a Build for an upload token, and the repositories
-  # of deleted Builds are deleted. The chart lets the controller read this one Secret.
+  # of deleted Builds are deleted. The chart lets the controller read this one Secret. Empty:
+  # pushes to registry.host are anonymous, for a test registry that takes them. An image on
+  # another registry uses the Build's spec.output.pushSecretRef.
   tokenKey:
     namespace: ""
     secret: ""

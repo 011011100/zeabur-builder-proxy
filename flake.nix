@@ -86,6 +86,7 @@
               kubectl
               kubernetes-helm
               buildkit
+              openssl
 
               # Releases: signatures and image copies by digest
               cosign

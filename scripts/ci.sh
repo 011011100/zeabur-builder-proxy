@@ -82,8 +82,8 @@ case "$job" in
   levels) ./scripts/check-levels.sh ;;
   chart) ./scripts/check-chart.sh ;;
   # The chart from this checkout on k3s, with the images built here: a Dockerfile build in two
-  # namespaces and a Railpack build, the two failures the samples make on purpose, and the
-  # isolation between the namespaces.
+  # namespaces and a Railpack build, the two failures the samples make on purpose, the isolation
+  # between the namespaces and the admission policy.
   kubernetes)
     tag="${ZEABUR_CI_IMAGE_TAG:-ci}"
     start_cluster
@@ -96,6 +96,7 @@ case "$job" in
         kubectl -n team-a wait buildrun -l builder.zeabur.com/build=no-such-dockerfile --timeout 600s \
           --for 'jsonpath={.status.phase}=Failed' &&
         TAG="$tag" ./scripts/example-isolation.sh k3d-zeabur-builder &&
+        TAG="$tag" ./scripts/example-admission.sh k3d-zeabur-builder &&
         ./scripts/example-archive.sh k3d-zeabur-builder
     }; then
       cluster_failure_context

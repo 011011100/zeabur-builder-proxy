@@ -175,7 +175,8 @@ pub enum Reason {
     QuotaExceeded,
     /// The namespace's buildkitd is starting, from zero replicas or after a restart.
     BuildkitdStarting,
-    /// The namespace has no push credentials for the default registry.
+    /// The Secret of `spec.output.pushSecretRef` is missing or unusable, or the registry token
+    /// key cannot be read.
     RegistryCredentialsMissing,
     /// Clone, checkout or the archive download failed.
     SourceFailed,

@@ -65,11 +65,7 @@
               "--opt",
               "filename=Dockerfile",
               "--output",
-              "type=image,name=registry.internal/team-a/api:archive-1761058800-5d2a8f1,push=true,oci-mediatypes=true,annotation.org.opencontainers.image.revision=sha256:5d2a8f1c0b9e7d6a4c3b2a1f0e9d8c7b6a5f4e3d2c1b0a9f8e7d6c5b4a3f2e1d",
-              "--import-cache",
-              "type=registry,ref=registry.internal/team-a/api:buildcache",
-              "--export-cache",
-              "type=registry,ref=registry.internal/team-a/api:buildcache,mode=max,ignore-error=true"
+              "type=image,name=registry.internal/team-a/api:archive-1761058800-5d2a8f1,push=true,oci-mediatypes=true,annotation.org.opencontainers.image.revision=sha256:5d2a8f1c0b9e7d6a4c3b2a1f0e9d8c7b6a5f4e3d2c1b0a9f8e7d6c5b4a3f2e1d"
             ],
             "env": [
               {

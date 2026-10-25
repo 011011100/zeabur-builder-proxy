@@ -33,8 +33,9 @@ commit that finishes later does not replace `status.latestImage`.
 - **Tags rollout tools can sort.** `main-1761058800-3e1a9c2` (branch, Unix time, commit), one per
   build, newest last. `spec.output.tagTemplate` and `extraTags` change them.
 - **One buildkitd per namespace.** Each namespace that builds gets its own buildkitd, cache,
-  certificate authority and registry path. The cache stays between builds, so
-  `RUN --mount=type=cache` keeps its contents. An idle buildkitd scales to zero after 10 minutes.
+  certificate authority and registry path. The cache stays on buildkitd's volume between builds,
+  so `RUN --mount=type=cache` keeps its contents; it never goes to the registry. An idle
+  buildkitd scales to zero after 10 minutes.
 - **Build variables as secrets.** `spec.env` reaches the build as BuildKit secrets, from a value
   or a Secret key.
 - **Uploaded folders.** `spec.source.archive` builds a folder that a client pushed to the
@@ -136,8 +137,9 @@ Requirements: Kubernetes 1.33 or later for buildkitd's user namespace (older clu
 disk space on the nodes for each namespace's build cache (20 GiB by default). buildkitd runs
 privileged, so its namespace must allow the Pod Security level `privileged`.
 
-The chart installs the CRDs, the controller, the buildkitd config and egress policy, and the
-`dockerfile` and `railpack` ClusterBuilders. A released chart pins its three images by digest
+The chart installs the CRDs, the controller, the buildkitd config and egress policy, the
+`dockerfile` and `railpack` ClusterBuilders, and the admission policy that limits the controller
+([Controller permissions](#controller-permissions)). A released chart pins its three images by digest
 (see [Releases](#releases)):
 
 ```sh
@@ -150,11 +152,6 @@ helm install builder oci://ghcr.io/zeabur-oss/charts/zeabur-builder --version <v
 - `registry.host`: where images go, as `<host>/<namespace>/<build>`.
 - `registry.tokenKey`: the Secret whose key signs tokens the registry trusts. See
   [Registry tokens](#registry-tokens).
-- `registry.authPrefix`: for each namespace that builds, create a
-  `kubernetes.io/dockerconfigjson` Secret named `registry-push-<namespace>` in `builder-system`,
-  allowed to push below `<registry>/<namespace>/`. Archive sources are read with it too. Set it
-  to `""` for a registry that takes anonymous pushes. With `registry.tokenKey`, it is used only
-  for images outside `registry.host`.
 - `registry.ca` or `registry.caFrom`: the CA of a registry with a private certificate.
 - `registry.inCluster`: the registry's namespace, Pod labels and port, when it runs in the
   cluster, so that the egress policy lets buildkitd reach it.
@@ -165,14 +162,17 @@ with a token signed by `zot-token-signer`:
 ```sh
 helm install builder oci://ghcr.io/zeabur-oss/charts/zeabur-builder --version <version> \
   -n builder-system --create-namespace --set registry.host=zot.zot.svc:5000 \
-  --set registry.authPrefix= --set registry.caFrom.namespace=zot \
-  --set registry.caFrom.secret=zot-tls --set registry.inCluster.namespace=zot \
+  --set registry.caFrom.namespace=zot --set registry.caFrom.secret=zot-tls \
+  --set registry.inCluster.namespace=zot \
   --set registry.inCluster.podLabels.app\\.kubernetes\\.io/name=zot \
   --set registry.tokenKey.namespace=zot --set registry.tokenKey.secret=zot-token-signer
 ```
 
 The controller itself must reach the registry too, to delete repositories: allow it in any
 NetworkPolicy of the registry's namespace.
+
+Without `registry.tokenKey`, pushes to `registry.host` are anonymous: only for a test registry
+that takes them.
 
 Helm does not upgrade CRDs. Before `helm upgrade`, apply the new chart's `crds/crds.yaml`.
 
@@ -187,7 +187,7 @@ The controller signs a token for each use; the token names each repository exact
 - **A run** gets push and pull on its image repository, `<namespace>/<build>`, and pull on its
   archive repository, `<namespace>/<build>/source`. The token lasts the Job's deadline plus ten
   minutes. A `Build` whose image is on `registry.host` but not at its own repository fails.
-  Images on other registries use `registry.authPrefix`.
+  Images on other registries use a push Secret ([External registries](#external-registries)).
 - **An upload** to an archive source: a new value of the annotation
   `builder.zeabur.com/upload-token-request` on the `Build` gets the Secret `<build>-upload`, with
   a token that pushes to `<namespace>/<build>/source` for 15 minutes. `archive.digest` may stay
@@ -240,6 +240,10 @@ images or sources. If the controller is not installed, images stay until it is i
 its first sweep deletes them. While it runs, an admin deletes an image by hand with a token from
 `registry-token --delete` and `DELETE /v2/<repository>/manifests/<digest>`.
 
+Earlier versions pushed each build's full cache to the tag `buildcache` of the image repository,
+where anyone who may pull could read it. The first sweep after each start deletes that tag in
+every image repository; the registry's garbage collection then removes the layers.
+
 Deleting every tag of an image repository by hand also deletes the repositories below it in Zot,
 such as its archives in `<repository>/source`.
 
@@ -251,6 +255,70 @@ the old key stop working at once; running builds fail and can be rebuilt.
 **Permissions.** With `registry.tokenKey`, the chart adds a Role in the key's namespace: `get` on
 that one Secret. The controller also writes the `<build>-upload` Secrets with its existing
 Secret permissions.
+
+**Known limits.**
+
+- A token stays valid until it expires, even after its `Build` is deleted. A run's token can push
+  again after the cleanup; the next sweep deletes what it pushed.
+- A token names repositories, not namespace UIDs. If a namespace is deleted and someone creates
+  a namespace of the same name, a run token of the old namespace can push to the new one's
+  repositories until it expires: at most 70 minutes with the default Job deadline (60 minutes
+  plus 10). Wait that long before you give a deleted namespace's name to another team.
+- Anyone in the cluster who can reach the registry can pull every image, as the nodes do. Keep
+  secrets out of images and give them to the workload as Secrets.
+
+### External registries
+
+An image outside `registry.host` (`spec.output.image: ghcr.io/acme/api`) is pushed with a push
+Secret in the `Build`'s own namespace. Create a `kubernetes.io/dockerconfigjson` Secret with the
+label `builder.zeabur.com/push-credentials: "true"` and name it in `spec.output.pushSecretRef`:
+
+```sh
+kubectl -n team-a create secret docker-registry ghcr-push \
+  --docker-server=ghcr.io --docker-username=acme --docker-password=<token>
+kubectl -n team-a label secret ghcr-push builder.zeabur.com/push-credentials=true
+```
+
+```yaml
+spec:
+  output:
+    image: ghcr.io/acme/api
+    pushSecretRef: {name: ghcr-push}
+```
+
+A run waits with `RegistryCredentialsMissing` while the Secret is missing or has no label. Who may
+push where is up to the external registry's account. With `registry.tokenKey`, the entry for
+`registry.host` in the Secret is replaced by the run's token.
+
+### Controller permissions
+
+Treat the controller as a cluster administrator. Its ServiceAccount can create Jobs in every
+namespace, read and write Secrets in every namespace, and create StatefulSets in `builder-system`,
+where Pods may be privileged. Whoever takes over the controller or its token can do the same.
+
+The chart's ValidatingAdmissionPolicies (`<release>-zeabur-builder-jobs` and
+`<release>-zeabur-builder-buildkitd`) limit what that ServiceAccount may create:
+
+- A Job only in the shape of a build Job: the images `jobImage`, `railpackImage` and
+  `admissionPolicy.extraImages`; no privilege, added capabilities, host network, PID, IPC, port
+  or path; the namespace's `default` ServiceAccount without a token; and never in a `kube-*`
+  namespace, the controller's namespace, the registry's namespaces or
+  `admissionPolicy.extraDeniedNamespaces`.
+- A StatefulSet only in the controller's namespace and only with `buildkitdImage`, without host
+  namespaces, ports or paths.
+
+The policies stop a stolen token from running a privileged Pod, from using another
+ServiceAccount, and from building in a system namespace. They do not stop it from reading the
+Secrets of a namespace where builds may run: a build Job can mount any of them. They are plain
+Kubernetes objects:
+
+```sh
+kubectl get validatingadmissionpolicy,validatingadmissionpolicybinding
+kubectl edit validatingadmissionpolicy builder-zeabur-builder-jobs
+```
+
+A `helm upgrade` writes them again from the chart values. A ClusterBuilder of your own with
+another planner image needs that image in `admissionPolicy.extraImages`.
 
 ### Releases
 
@@ -270,17 +338,21 @@ cosign verify ghcr.io/zeabur-oss/builder@sha256:<digest> \
 
 Zeabur Builder has no release yet. The API is `v1alpha1`.
 
-On a k3s 1.36 cluster, with `scripts/deploy-example.sh`, `scripts/example-isolation.sh` and
-`scripts/example-archive.sh` (CI runs them, `scripts/ci.sh kubernetes`):
+On a k3s 1.36 cluster, with `scripts/deploy-example.sh`, `scripts/example-isolation.sh`,
+`scripts/example-admission.sh` and `scripts/example-archive.sh` (CI runs them,
+`scripts/ci.sh kubernetes`):
 
 - Dockerfile and Railpack builds of public repositories, started by polling.
 - Failures for a missing ref and a missing Dockerfile, in `SourceReady` and the `BuildRun`.
 - One buildkitd per namespace, started on demand and scaled to zero when idle.
 - Isolation between namespaces: another namespace's client certificate, registry path and Pods
-  are refused. `RUN` reaches the internet and the registry; it cannot reach Services, the
+  are refused, and so is a push without a token. `RUN` reaches the internet and the registry; it cannot reach Services, the
   Kubernetes API or `169.254.169.254`.
 - An archive source built from its digest; the same digest in a `Build` of another namespace or
   of another name fails at the source.
+- The admission policy: the controller's ServiceAccount creates build Jobs and buildkitd, and a
+  privileged Job, a Job in `kube-system`, with another image, a host path, the host network or
+  another ServiceAccount, or another StatefulSet is refused (`scripts/example-admission.sh`).
 
 In unit tests, and against a local SSH server for SSH: private repositories with
 `credentialsRef`, push webhooks for every provider, the GitHub App, Keel notifications and
@@ -292,11 +364,10 @@ Not built yet:
 
 Open issues:
 
-- The controller's ClusterRole has `get` on Secrets in every namespace, to read the Secrets
-  Builds name. It needs only the Secrets labelled `builder.zeabur.com/git-credentials` and its
+- The controller's ClusterRole has `get`, `create`, `update` and `delete` on Secrets in every
+  namespace, to read the Secrets Builds name and write its copies. It needs only the Secrets
+  labelled `builder.zeabur.com/git-credentials` or `builder.zeabur.com/push-credentials` and its
   own copies.
-- A token stays valid until it expires, even after its `Build` is deleted. A run's token can
-  push again after the cleanup; the next sweep deletes what it pushed.
 
 ## Contributing
 

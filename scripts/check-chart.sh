@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Lints the chart and checks what an install needs: the ClusterBuilders, the buildkitd config and
-# egress policy, images pinned by digest when a digest is set, and webhooks off unless enabled.
+# egress policy, the admission policy, images pinned by digest when a digest is set, and webhooks
+# off unless enabled.
 set -euo pipefail
 
 chart="$(dirname "$0")/../deploy/chart"
@@ -41,7 +42,11 @@ require() { # $1 = rendered chart, $2 = what is checked, then patterns it must h
 plain=$(helm template builder "$chart" "${base[@]}")
 require "$plain" "default install" 'name: dockerfile$' 'name: railpack$' 'name: buildkitd$' \
   'name: buildkitd-egress$' '- 169.254.0.0/16$' 'ghcr.io/railwayapp/railpack-frontend",$' \
-  'image: "ghcr.io/zeabur-oss/builder:0.0.1"$' 'value: "registry-push-"'
+  'image: "ghcr.io/zeabur-oss/builder:0.0.1"$' 'kind: ValidatingAdmissionPolicy$' \
+  "request.userInfo.username == 'system:serviceaccount:default:zeabur-builder'" \
+  "c.image in \['ghcr.io/zeabur-oss/builder-job:0.0.1', 'ghcr.io/zeabur-oss/builder-railpack:0.0.1'\]" \
+  '--buildkitd-image=docker.io/moby/buildkit:' "c.image == 'docker.io/moby/buildkit:" \
+  "request.namespace in \['default'\]"
 if grep -qE '^\s+\[registry\.|ZEABUR_BUILDER_REGISTRY_(CA|HTTP)' <<<"$plain"; then
   echo "default install: the chart sets registry http or a CA that nobody asked for" >&2
   exit 1
@@ -50,22 +55,20 @@ fi
 digest=sha256:$(printf '0%.0s' {1..64})
 pinned=$(helm template builder "$chart" "${base[@]}" --set image.digest="$digest" \
   --set jobImage.digest="$digest" --set railpackImage.digest="$digest" \
-  --set registry.ca=CA --set registry.authPrefix= \
+  --set registry.ca=CA --set 'admissionPolicy.extraImages[0]=example.com/planner:1' \
   --set registry.inCluster.namespace=zot --set registry.inCluster.podLabels.app=zot)
 require "$pinned" "pinned install" "image: \"ghcr.io/zeabur-oss/builder@$digest\"" \
   "value: \"ghcr.io/zeabur-oss/builder-job@$digest\"" "image: \"ghcr.io/zeabur-oss/builder-railpack@$digest\"" \
   'ca = \["/etc/buildkit/registry-ca.crt"\]' 'registry-ca.crt: \|' 'kubernetes.io/metadata.name: zot' \
-  'name: ZEABUR_BUILDER_REGISTRY_CA$' 'value: "CA"$'
-if grep -q ZEABUR_BUILDER_REGISTRY_AUTH_PREFIX <<<"$pinned"; then
-  echo "pinned install: an empty registry.authPrefix still sets a prefix" >&2
-  exit 1
-fi
+  'name: ZEABUR_BUILDER_REGISTRY_CA$' 'value: "CA"$' \
+  "c.image in \['ghcr.io/zeabur-oss/builder-job@$digest', 'ghcr.io/zeabur-oss/builder-railpack@$digest', 'example.com/planner:1'\]" \
+  "request.namespace in \['default', 'zot'\]"
 http=$(helm template builder "$chart" "${base[@]}" --set registry.http=true)
 require "$http" "plain HTTP registry" 'http = true$' 'name: ZEABUR_BUILDER_REGISTRY_HTTP, value: "true"'
 tokens=$(helm template builder "$chart" "${base[@]}" --set registry.tokenKey.namespace=zot \
   --set registry.tokenKey.secret=zot-token-signer)
 require "$tokens" "registry tokens" 'value: "zot/zot-token-signer"$' 'namespace: zot$' \
-  'resourceNames: \[zot-token-signer\]$'
+  'resourceNames: \[zot-token-signer\]$' "request.namespace in \['default', 'zot'\]"
 if grep -qE 'ZEABUR_BUILDER_REGISTRY_TOKEN_KEY|resourceNames: \[zot-token-signer\]' <<<"$plain"; then
   echo "default install: the chart reads a token key nobody named" >&2
   exit 1

@@ -76,8 +76,8 @@ Shared with [Zeabur Identity](https://github.com/zeabur-oss/identity):
 `scripts/ci.sh kubernetes` is the cluster job of CI. It creates the k3d cluster `zeabur-builder`
 with its own kubeconfig (`target/ci/kubeconfig`), builds the images, installs the chart from
 `deploy/chart`, builds the sample Builds from Git (a Dockerfile in `team-a` and `team-b`, Railpack
-in `team-a`), waits for the two samples that fail on purpose, runs `scripts/example-isolation.sh`
-and `scripts/example-archive.sh`, and deletes the cluster. Run it on a Linux machine with Docker; `ZEABUR_CI_KEEP=1` keeps the
+in `team-a`), waits for the two samples that fail on purpose, runs `scripts/example-isolation.sh`,
+`scripts/example-admission.sh` and `scripts/example-archive.sh`, and deletes the cluster. Run it on a Linux machine with Docker; `ZEABUR_CI_KEEP=1` keeps the
 cluster.
 
 To work against a cluster by hand, use a disposable one with its own kubeconfig, never your normal
@@ -90,8 +90,8 @@ scripts/build-images.sh zeabur-builder dev
 K3D_CLUSTER=zeabur-builder scripts/deploy-example.sh k3d-zeabur-builder team-a/whoami team-a/hello-python
 ```
 
-`scripts/deploy-example.sh` starts the test registry in `deploy/examples/registry.yaml`, gives
-each namespace in `NAMESPACES` (default `team-a team-b`) its own registry account, installs the
+`scripts/deploy-example.sh` starts the test registry in `deploy/examples/registry.yaml` with a
+new token key, creates the namespaces in `NAMESPACES` (default `team-a team-b`), installs the
 chart, applies `deploy/examples/builds.yaml` and waits for each named Build's
 `status.latestImage`. It stops at the first failed `BuildRun`.
 

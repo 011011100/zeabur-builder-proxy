@@ -7,7 +7,7 @@
 #   K3D_CLUSTER           when set, imports the images into this k3d cluster first
 #   HOST_USERS            buildkitd's hostUsers (false: a user namespace per buildkitd)
 #   IDLE                  seconds before an idle buildkitd scales to zero (600)
-#   NAMESPACES            build namespaces given push credentials (team-a team-b)
+#   NAMESPACES            build namespaces to create (team-a team-b)
 #   TIMEOUT               seconds to wait for each Build (900)
 set -euo pipefail
 
@@ -35,36 +35,20 @@ fi
 
 for ns in builder-system builder-registry "${namespaces[@]}"; do ensure_namespace "$ns"; done
 
-# One registry user per build namespace, allowed to push only below `<namespace>/`; the
-# controller hands each namespace's builds the Secret registry-push-<namespace>.
-htpasswd=""
-repositories='{"**": {"anonymousPolicy": ["read"]}}'
-for ns in "${namespaces[@]}"; do
-  # A rerun keeps the password: Zot sees a new htpasswd only once kubelet syncs the Secret.
-  password=$(k -n builder-system get secret "registry-push-$ns" --ignore-not-found \
-    -o jsonpath='{.data.\.dockerconfigjson}' | base64 -d | jq -r '.auths[].password' 2>/dev/null || true)
-  [[ -n $password ]] || password=$(head -c 24 /dev/urandom | base64 | tr -d '/+=')
-  htpasswd+=$(docker run --rm docker.io/library/httpd:2.4.65-alpine htpasswd -nbB "$ns" "$password")
-  htpasswd+=$'\n'
-  repositories=$(jq --arg ns "$ns" '. + {($ns + "/**"): {
-    "policies": [{"users": [$ns], "actions": ["read", "create", "update", "delete"]}],
-    "anonymousPolicy": ["read"]}}' <<<"$repositories")
-  k -n builder-system create secret docker-registry "registry-push-$ns" --docker-server="$registry" \
-    --docker-username="$ns" --docker-password="$password" --dry-run=client -o yaml | k apply -f - >/dev/null
-done
-config=$(jq -n --argjson repositories "$repositories" '{
-  storage: {rootDirectory: "/var/lib/registry"},
-  http: {address: "0.0.0.0", port: "5000", auth: {htpasswd: {path: "/etc/zot/auth/htpasswd"}},
-    accessControl: {repositories: $repositories}},
-  log: {level: "info"}}')
-k -n builder-registry create configmap zot --from-literal=config.json="$config" \
-  --dry-run=client -o yaml | k apply -f - >/dev/null
-k -n builder-registry create secret generic zot-htpasswd --from-literal=htpasswd="$htpasswd" \
-  --dry-run=client -o yaml | k apply -f - >/dev/null
+# The key that signs registry tokens, as the Zeabur Catalog's zot-token-signer: the controller
+# reads tls.key, the registry checks tokens with tls.crt. A rerun keeps it.
+if ! k -n builder-registry get secret zot-token-signer >/dev/null 2>&1; then
+  keys=$(mktemp -d)
+  openssl genpkey -algorithm ed25519 -out "$keys/tls.key"
+  openssl req -x509 -key "$keys/tls.key" -subj /CN=zot-token-signer -days 3650 -out "$keys/tls.crt"
+  k -n builder-registry create secret tls zot-token-signer --cert "$keys/tls.crt" \
+    --key "$keys/tls.key" >/dev/null
+  rm -rf "$keys"
+fi
 k apply -f "$manifests/registry.yaml"
-# A changed config needs a restart; a changed htpasswd is reloaded by Zot.
+# A changed config needs a restart.
 k -n builder-registry patch deployment registry --type merge -p \
-  "{\"spec\":{\"template\":{\"metadata\":{\"annotations\":{\"zot-config\":\"$(sha256sum <<<"$config" | cut -c1-16)\"}}}}}"
+  "{\"spec\":{\"template\":{\"metadata\":{\"annotations\":{\"zot-config\":\"$(sha256sum "$manifests/registry.yaml" | cut -c1-16)\"}}}}}"
 
 # Helm installs the CRDs only on the first install; a rerun applies them itself.
 if helm --kube-context "$context" -n builder-system status builder >/dev/null 2>&1; then
@@ -77,6 +61,7 @@ helm --kube-context "$context" upgrade --install builder "$root/deploy/chart" -n
   --set registry.host="$registry" --set registry.http=true \
   --set registry.inCluster.namespace=builder-registry \
   --set registry.inCluster.podLabels.app\\.kubernetes\\.io/name=registry \
+  --set registry.tokenKey.namespace=builder-registry --set registry.tokenKey.secret=zot-token-signer \
   --set-json "extraArgs=[\"--buildkitd-cache-size=10Gi\",\"--buildkitd-host-users=$host_users\",\"--buildkitd-idle=$idle\"]"
 # The controller restarts so that a new image with the same tag is picked up.
 k -n builder-system rollout restart deployment/zeabur-builder

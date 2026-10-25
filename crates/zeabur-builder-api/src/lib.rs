@@ -42,6 +42,8 @@ pub mod labels {
     /// Marks a Secret the controller may read as Git credentials. Its informer watches only
     /// Secrets with this label set to `"true"`.
     pub const GIT_CREDENTIALS: &str = "builder.zeabur.com/git-credentials";
+    /// Marks a Secret the controller may read as push credentials (`spec.output.pushSecretRef`).
+    pub const PUSH_CREDENTIALS: &str = "builder.zeabur.com/push-credentials";
     /// On a buildkitd and its objects: the build namespace it serves.
     pub const NAMESPACE: &str = "builder.zeabur.com/namespace";
     /// `app.kubernetes.io/managed-by`.

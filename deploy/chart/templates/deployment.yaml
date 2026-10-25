@@ -25,6 +25,7 @@ spec:
             - controller
             - --github-app-secret={{ .Values.githubApp.secretName }}
             - --github-app-grants={{ .Values.githubApp.grantsName }}
+            - --buildkitd-image={{ .Values.buildkitdImage }}
             {{- if .Values.webhooks.enabled }}
             - --webhook-addr=0.0.0.0:{{ .Values.webhooks.port }}
             - --webhook-path={{ include "builder.webhookPath" . }}
@@ -44,9 +45,6 @@ spec:
               value: {{ required "registry.host is required" .Values.registry.host | quote }}
             - name: ZEABUR_BUILDER_JOB_IMAGE
               value: {{ include "builder.image" (list .Values.jobImage .Chart) | quote }}
-            {{- with .Values.registry.authPrefix }}
-            - {name: ZEABUR_BUILDER_REGISTRY_AUTH_PREFIX, value: {{ . | quote }}}
-            {{- end }}
             {{- with include "builder.registryCA" . }}
             - name: ZEABUR_BUILDER_REGISTRY_CA
               value: {{ . | quote }}

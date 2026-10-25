@@ -35,3 +35,10 @@ app.kubernetes.io/instance: {{ .Release.Name }}
 {{- end -}}
 {{- end -}}
 {{- end }}
+
+{{- /* A list of strings as a CEL list literal: ['a', 'b']. */ -}}
+{{- define "builder.celList" -}}
+{{- $items := list -}}
+{{- range . }}{{ $items = append $items (printf "'%s'" .) }}{{ end -}}
+[{{ join ", " $items }}]
+{{- end }}

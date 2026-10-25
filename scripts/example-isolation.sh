@@ -78,10 +78,12 @@ EOF
 k -n "$a" get secret zeabur-builder-buildkit-client -o json |
   jq --arg n "stolen-from-$a" '{apiVersion, kind, type, data, metadata: {name: $n}}' |
   k -n "$b" apply -f - >/dev/null
-# A's push credentials, as its builds' Secret carries them.
-k -n builder-system get secret "registry-push-$a" -o json |
-  jq '{apiVersion, kind, type, data, metadata: {name: "probe-push"}}' |
-  k -n "$a" apply -f - >/dev/null
+# A token for $a/probe only, as an admin gets one from the controller (README, Registry tokens).
+token=$(k -n builder-system exec deploy/zeabur-builder -- \
+  /zeabur-builder registry-token --repository "$a/probe" --push)
+k -n "$a" create secret generic probe-push --type kubernetes.io/dockerconfigjson \
+  --from-literal=.dockerconfigjson="{\"auths\":{\"$registry\":{\"registrytoken\":\"$token\"}}}" \
+  --dry-run=client -o yaml | k apply -f - >/dev/null
 
 k apply -f - >/dev/null <<EOF
 apiVersion: v1
@@ -141,18 +143,22 @@ check fail "$a's certificate is refused by $b's buildkitd" \
 check fail "a Pod in $a cannot reach $b's buildkitd at all" \
   k -n "$a" exec probe -- timeout 10 buildctl --addr "$(addr "$b")" --tlsdir /tls/own debug workers
 
-# Builds in A's buildkitd with A's certificate and A's push credentials, as a member of A could.
-build() {
-  local name=$1 dockerfile=$2
-  k -n "$a" exec probe -- sh -c "mkdir -p /tmp/ctx && printf '%s\n' \"\$1\" > /tmp/ctx/Dockerfile &&
-    buildctl --addr $(addr "$a") --tlsdir /tls/own build --progress plain --no-cache \
+# Builds in a namespace's buildkitd with its certificate, as a member could: in A with the token
+# for $a/probe, in B with no registry credentials.
+build_in() {
+  local ns=$1 name=$2 dockerfile=$3
+  k -n "$ns" exec probe -- sh -c "mkdir -p /tmp/ctx && printf '%s\n' \"\$1\" > /tmp/ctx/Dockerfile &&
+    buildctl --addr $(addr "$ns") --tlsdir /tls/own build --progress plain --no-cache \
       --frontend dockerfile.v0 --local context=/tmp/ctx --local dockerfile=/tmp/ctx $name" build "$dockerfile"
 }
+build() { build_in "$a" "$@"; }
 echo "== registry"
-check pass "$a's credentials push to $registry/$a/" \
+check pass "a token for $a/probe pushes to $registry/$a/probe" \
   build "--output type=image,name=$registry/$a/probe:isolation,push=true" "FROM busybox:1.37.0"
-check fail "$a's credentials cannot push to $registry/$b/" \
+check fail "a token for $a/probe cannot push to $registry/$b/probe" \
   build "--output type=image,name=$registry/$b/probe:isolation,push=true" "FROM busybox:1.37.0"
+check fail "a push without a token is refused" \
+  build_in "$b" "--output type=image,name=$registry/$b/probe:isolation,push=true" "FROM busybox:1.37.0"
 
 echo "== RUN network"
 reach() { echo "wget -S -T 10 -O /dev/null $1 2>&1 | grep -q HTTP/"; }

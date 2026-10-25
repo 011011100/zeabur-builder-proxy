@@ -102,17 +102,12 @@ async fn registry_token(args: RegistryTokenArgs) -> Result<String, String> {
 
 #[derive(Debug, Args)]
 struct ControllerArgs {
-    /// The controller's namespace, where it keeps push credentials.
+    /// The controller's namespace.
     #[arg(long, env = "POD_NAMESPACE")]
     namespace: String,
     /// The registry for `Build`s without `spec.output.image`, such as `registry.internal:5000`.
     #[arg(long, env = "ZEABUR_BUILDER_DEFAULT_REGISTRY")]
     default_registry: String,
-    /// Each namespace pushes with the `kubernetes.io/dockerconfigjson` Secret
-    /// `<prefix><namespace>` in the controller's namespace, and waits while it is missing. Unset:
-    /// anonymous pushes.
-    #[arg(long, env = "ZEABUR_BUILDER_REGISTRY_AUTH_PREFIX")]
-    registry_auth_prefix: Option<String>,
     /// The default registry's CA, PEM, when a public CA did not sign its certificate. The `fetch`
     /// container of an archive source trusts it.
     #[arg(long, env = "ZEABUR_BUILDER_REGISTRY_CA")]
@@ -229,7 +224,6 @@ impl ControllerArgs {
             daemon: Arc::new(daemon),
             max_concurrent: self.max_concurrent_builds,
             default_registry: self.default_registry,
-            registry_auth_prefix: self.registry_auth_prefix,
             registry_ca: self.registry_ca.filter(|ca| !ca.trim().is_empty()),
             registry_http: self.registry_http,
             registry_token_key: self.registry_token_key,

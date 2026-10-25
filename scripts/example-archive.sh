@@ -2,8 +2,8 @@
 # Builds an uploaded archive and checks that only its own Build can read it:
 #   scripts/deploy-example.sh <context>
 #   scripts/example-archive.sh <context>
-# Pushes a small Dockerfile app as A's registry user to <registry>/A/app/source, as
-# docs/archive-source.md describes, and builds it in A. A Build of the same name in B and another
+# Asks A/app for an upload token, pushes a small Dockerfile app with it to
+# <registry>/A/app/source, as docs/archive-source.md describes, and builds it in A. A Build of the same name in B and another
 # Build in A name the same digest and must fail at the source. Removes its Builds at the end.
 # Environment: A and B (team-a, team-b), TIMEOUT (600).
 set -euo pipefail
@@ -28,12 +28,27 @@ cleanup() {
 }
 trap cleanup EXIT
 
-auth=$(k -n builder-system get secret "registry-push-$a" -o jsonpath='{.data.\.dockerconfigjson}' |
-  base64 -d | jq -r '.auths[] | "\(.username):\(.password)"')
+build() { # $1 = namespace, $2 = name, $3 = source
+  cat <<EOF
+apiVersion: builder.zeabur.com/v1alpha1
+kind: Build
+metadata: {name: $2, namespace: $1}
+spec:
+  source: $3
+  builderRef: dockerfile
+EOF
+}
+
+# A Build without a digest waits for its upload. Anyone who may edit it asks for a token.
+build "$a" app "{archive: {}}" | k apply -f - >/dev/null
+k -n "$a" annotate build/app --overwrite builder.zeabur.com/upload-token-request=archive-test >/dev/null
+k -n "$a" wait build/app --timeout 60s --for=jsonpath='{.status.uploadToken.request}'=archive-test >/dev/null
+token=$(k -n "$a" get secret app-upload -o jsonpath='{.data.token}' | base64 -d)
 
 # The client side: pack the folder, push the empty config and the layer, then the manifest.
 push=$(k -n "$a" run archive-push --rm -i --quiet --restart Never \
-  --image docker.io/curlimages/curl:8.11.1 --env "AUTH=$auth" --env "BASE=http://$registry" \
+  --image docker.io/curlimages/curl:8.11.1 --env "AUTH=Authorization: Bearer $token" \
+  --env "BASE=http://$registry" \
   --env "REPO=$a/app/source" --command -- sh -eu -s <<'EOF'
 cd /tmp && mkdir -p app/static
 printf 'hello from an archive\n' > app/static/hello.txt
@@ -43,11 +58,11 @@ tar -czf app.tar.gz -C app .
 printf '{}' > config.json
 blob() { # $1 = file; prints its digest
   digest="sha256:$(sha256sum "$1" | cut -d' ' -f1)"
-  location=$(curl -fsS -u "$AUTH" -X POST -o /dev/null -D - "$BASE/v2/$REPO/blobs/uploads/" |
+  location=$(curl -fsS -H "$AUTH" -X POST -o /dev/null -D - "$BASE/v2/$REPO/blobs/uploads/" |
     tr -d '\r' | sed -n 's/^[Ll]ocation: //p')
   case $location in /*) location="$BASE$location" ;; esac
   case $location in *\?*) sep='&' ;; *) sep='?' ;; esac
-  curl -fsS -u "$AUTH" -X PUT -H 'Content-Type: application/octet-stream' \
+  curl -fsS -H "$AUTH" -X PUT -H 'Content-Type: application/octet-stream' \
     --data-binary "@$1" "$location${sep}digest=$digest" -o /dev/null
   echo "$digest"
 }
@@ -56,7 +71,7 @@ layer=$(blob app.tar.gz)
 size=$(wc -c < app.tar.gz | tr -d ' ')
 printf '{"schemaVersion":2,"mediaType":"application/vnd.oci.image.manifest.v1+json","artifactType":"application/vnd.zeabur.source.v1+tar","config":{"mediaType":"application/vnd.oci.empty.v1+json","digest":"%s","size":2},"layers":[{"mediaType":"application/vnd.oci.image.layer.v1.tar+gzip","digest":"%s","size":%s}]}' \
   "$config" "$layer" "$size" > manifest.json
-curl -fsS -u "$AUTH" -X PUT -H 'Content-Type: application/vnd.oci.image.manifest.v1+json' \
+curl -fsS -H "$AUTH" -X PUT -H 'Content-Type: application/vnd.oci.image.manifest.v1+json' \
   --data-binary @manifest.json "$BASE/v2/$REPO/manifests/upload-$(date +%s)" -o /dev/null
 echo "digest=sha256:$(sha256sum manifest.json | cut -d' ' -f1)"
 EOF
@@ -68,16 +83,6 @@ digest=$(sed -n 's/^digest=//p' <<<"$push")
 }
 echo "pushed $registry/$a/app/source@$digest"
 
-build() { # $1 = namespace, $2 = name, $3 = source
-  cat <<EOF
-apiVersion: builder.zeabur.com/v1alpha1
-kind: Build
-metadata: {name: $2, namespace: $1}
-spec:
-  source: $3
-  builderRef: dockerfile
-EOF
-}
 archive="{archive: {digest: $digest}}"
 
 echo "== admission"
