@@ -32,13 +32,19 @@ digest: the registry does not find the manifest there, and the run fails with `S
 
 ## Who pushes it
 
-The client that has the folder, such as Zeabur or `zeaburctl`, pushes it before it creates or
-changes the `Build`. It pushes with the namespace's own registry credentials: the
-`kubernetes.io/dockerconfigjson` Secret `<registry.authPrefix><namespace>` in the controller's
-namespace (`registry-push-team-a`), which may write only below `<registry.host>/<namespace>/`.
-The Job reads the archive with a copy of the same Secret, and trusts the registry CA of
-`registry.ca` or `registry.caFrom`. With `registry.authPrefix: ""` the push and the download are
-anonymous.
+The client that has the folder, such as Zeabur or `zeaburctl`, pushes it before it sets the
+digest in the `Build`. The Job reads the archive with a copy of the run's registry credentials,
+and trusts the registry CA of `registry.ca` or `registry.caFrom`.
+
+- With `registry.tokenKey`: the client asks the `Build` for an upload token with the annotation
+  `builder.zeabur.com/upload-token-request` and pushes with it
+  ([README](../README.md#registry-tokens)). A new `Build` may leave `digest` unset until then.
+  The run's token reads only its own `Build`'s archives.
+- With `registry.authPrefix`: the client pushes with the namespace's own registry credentials,
+  the `kubernetes.io/dockerconfigjson` Secret `<registry.authPrefix><namespace>` in the
+  controller's namespace (`registry-push-team-a`), which may write only below
+  `<registry.host>/<namespace>/`.
+- With `registry.authPrefix: ""` and no token key, the push and the download are anonymous.
 
 Push the manifest with a tag, not only by digest. A registry that deletes untagged manifests,
 such as the [Zeabur Catalog](https://github.com/zeabur-oss/catalog)'s Zot, may otherwise remove
@@ -91,7 +97,8 @@ The `BuildRun`'s `revision` and the `Build`'s `status.remoteRevision` and
 
 ## Old archives
 
-Each upload stays in the registry until the registry removes it. Zot in the Zeabur Catalog
+Each upload stays in the registry until the registry removes it, or until its `Build` is
+deleted ([cleanup](../README.md#registry-tokens)). Zot in the Zeabur Catalog
 keeps the 20 most recently pushed tags of each repository and deletes untagged manifests after
 two hours, so `<namespace>/<build>/source` keeps the last 20 uploads. For another registry, set
 a retention policy for `*/*/source`.

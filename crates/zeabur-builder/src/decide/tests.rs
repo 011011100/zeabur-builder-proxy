@@ -475,7 +475,7 @@ fn archive_tags_use_the_digest() {
     let mut build = build();
     build.spec.source.git = None;
     build.spec.source.archive = Some(ArchiveSource {
-        digest: DIGEST.to_owned(),
+        digest: Some(DIGEST.to_owned()),
         context_dir: None,
         dockerfile: None,
     });
@@ -866,4 +866,87 @@ fn a_ref_that_does_not_resolve_is_asked_less_often() {
     for (case, status, interval, expected) in cases {
         assert_eq!(next_poll(&status, interval, now()), expected, "{case}");
     }
+}
+
+#[test]
+fn a_build_owns_its_default_image_and_archives() {
+    let mut build = build();
+    let found = owned(&build, "zot.zot.svc:5000/").unwrap();
+    assert_eq!(
+        found,
+        Owned {
+            host: "zot.zot.svc:5000".to_owned(),
+            image: Some("team-a/api".to_owned()),
+            source: "team-a/api/source".to_owned(),
+        }
+    );
+    build.spec.output = Some(OutputSpec {
+        image: Some("zot.zot.svc:5000/team-a/api:v1".to_owned()),
+        ..OutputSpec::default()
+    });
+    assert_eq!(
+        owned(&build, "zot.zot.svc:5000").unwrap().image.as_deref(),
+        Some("team-a/api")
+    );
+}
+
+#[test]
+fn a_build_cannot_claim_another_repository_on_the_registry() {
+    let mut build = build();
+    for image in [
+        "zot.zot.svc:5000/team-b/api",
+        "zot.zot.svc:5000/team/api",
+        "zot.zot.svc:5000/team-a/api-x",
+        "zot.zot.svc:5000/team-a/api/source",
+        "zot.zot.svc:5000/team-a/other",
+    ] {
+        build.spec.output = Some(OutputSpec {
+            image: Some(image.to_owned()),
+            ..OutputSpec::default()
+        });
+        assert!(owned(&build, "zot.zot.svc:5000").is_err(), "{image}");
+    }
+}
+
+#[test]
+fn an_image_elsewhere_is_not_owned() {
+    let mut build = build();
+    build.spec.output = Some(OutputSpec {
+        image: Some("ghcr.io/acme/api".to_owned()),
+        ..OutputSpec::default()
+    });
+    let found = owned(&build, "registry.local:5000/builds").unwrap();
+    assert_eq!(found.image, None);
+    assert_eq!(found.source, "builds/team-a/api/source");
+}
+
+#[test]
+fn only_the_controllers_layout_has_an_owner() {
+    let registry = "zot.zot.svc:5000";
+    assert_eq!(
+        repository_owner("team-a/api", registry),
+        Some(("team-a", "api"))
+    );
+    assert_eq!(
+        repository_owner("team-a/api.v2/source", registry),
+        Some(("team-a", "api.v2"))
+    );
+    for other in [
+        "team-a",
+        "team-a/api/web",
+        "team-a/api/source/x",
+        "zeabur_admin/tools",
+        "admin.images/tools",
+        "team-a/Api",
+        "-a/api",
+    ] {
+        assert_eq!(repository_owner(other, registry), None, "{other}");
+    }
+    let registry = "registry.local:5000/builds/";
+    assert_eq!(
+        repository_owner("builds/team-a/api", registry),
+        Some(("team-a", "api"))
+    );
+    assert_eq!(repository_owner("team-a/api", registry), None);
+    assert_eq!(repository_owner("buildsx/team-a/api", registry), None);
 }

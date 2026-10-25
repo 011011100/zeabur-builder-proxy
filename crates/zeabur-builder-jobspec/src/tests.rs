@@ -52,7 +52,7 @@ fn archive_build(namespace: &str) -> Build {
     build.spec.source = SourceSpec {
         git: None,
         archive: Some(ArchiveSource {
-            digest: DIGEST.to_owned(),
+            digest: Some(DIGEST.to_owned()),
             context_dir: Some("app".to_owned()),
             dockerfile: None,
         }),

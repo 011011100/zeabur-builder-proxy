@@ -15,9 +15,8 @@
 //! also catch a field being removed, which a rule on the field itself would not: a transition
 //! rule does not run when the field is absent from the new object.
 //!
-//! The namespace rules (a `Build` pushes only below its own namespace's path in the default
-//! registry) are a `ValidatingAdmissionPolicy` in the chart, since they depend on configuration,
-//! not on the object alone.
+//! The namespace rule (a `Build` pushes only to its own repositories in the default registry) is
+//! kept by the registry: the controller gives each run a token for those repositories only.
 //!
 //! [CRD validation]: https://kubernetes.io/docs/tasks/extend-kubernetes/custom-resources/custom-resource-definitions/#validation-rules
 
@@ -61,6 +60,9 @@ pub mod annotations {
     pub const MAX_CONCURRENT_BUILDS: &str = "builder.zeabur.com/max-concurrent-builds";
     /// On a Job and Pod: the commit built.
     pub const REVISION: &str = "builder.zeabur.com/revision";
+    /// On a `Build` with an archive source: a new value asks for an upload token
+    /// (`status.uploadToken`).
+    pub const UPLOAD_TOKEN_REQUEST: &str = "builder.zeabur.com/upload-token-request";
 }
 
 /// Every custom resource definition, in a stable order.

@@ -444,6 +444,107 @@ pub(crate) fn image(build: &Build, default_registry: &str) -> String {
     )
 }
 
+/// A `Build`'s repositories in the default registry, by their names there.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct Owned {
+    /// The registry's host.
+    pub(crate) host: String,
+    /// The image repository, when the image is in the default registry.
+    pub(crate) image: Option<String>,
+    /// The archive repository, `<namespace>/<name>/source`.
+    pub(crate) source: String,
+}
+
+/// The default registry's host.
+pub(crate) fn registry_host(default_registry: &str) -> &str {
+    let registry = default_registry.trim_end_matches('/');
+    registry.split_once('/').map_or(registry, |(host, _)| host)
+}
+
+/// The archive repository and the image repository of the `Build` `name`, by their names in the
+/// default registry: `<namespace>/<name>/source` and `<namespace>/<name>`, below the registry's
+/// path.
+pub(crate) fn repositories(default_registry: &str, namespace: &str, name: &str) -> [String; 2] {
+    let registry = default_registry.trim_end_matches('/');
+    let image = match registry.split_once('/') {
+        Some((_, prefix)) => format!("{prefix}/{namespace}/{name}"),
+        None => format!("{namespace}/{name}"),
+    };
+    [
+        format!(
+            "{image}/{}",
+            zeabur_builder_core::archive::REPOSITORY_SUFFIX
+        ),
+        image,
+    ]
+}
+
+/// The repositories of `build` in `default_registry`. An image on the default registry's host
+/// must be the default one, `<namespace>/<name>`: tokens and deletion cover that repository only,
+/// so a `Build` cannot push to or delete another's.
+pub(crate) fn owned(build: &Build, default_registry: &str) -> Result<Owned, String> {
+    let registry = default_registry.trim_end_matches('/');
+    let host = registry_host(registry);
+    let namespace = build.metadata.namespace.as_deref().unwrap_or_default();
+    let name = build.metadata.name.as_deref().unwrap_or_default();
+    let [source, own] = repositories(registry, namespace, name);
+    let reference = image(build, registry);
+    let reference = reference
+        .split_once('@')
+        .map_or(reference.as_str(), |(r, _)| r);
+    let (image_host, repository) = reference.split_once('/').unwrap_or(("", reference));
+    let repository = match repository.rsplit_once('/') {
+        Some((head, last)) => format!("{head}/{}", last.split(':').next().unwrap_or(last)),
+        None => repository
+            .split(':')
+            .next()
+            .unwrap_or(repository)
+            .to_owned(),
+    };
+    let image = if image_host != host {
+        None
+    } else if repository == own {
+        Some(repository)
+    } else {
+        return Err(format!(
+            "an image on {host} must be {host}/{own}, the Build's own repository"
+        ));
+    };
+    Ok(Owned {
+        host: host.to_owned(),
+        image,
+        source,
+    })
+}
+
+/// The namespace and `Build` a repository of the default registry belongs to, when it has the
+/// layout the controller writes: `<namespace>/<name>` or `<namespace>/<name>/source`, below the
+/// default registry's path. Any other repository is not the controller's.
+pub(crate) fn repository_owner<'a>(
+    repository: &'a str,
+    default_registry: &str,
+) -> Option<(&'a str, &'a str)> {
+    let registry = default_registry.trim_end_matches('/');
+    let rest = match registry.split_once('/') {
+        Some((_, prefix)) => repository.strip_prefix(prefix)?.strip_prefix('/')?,
+        None => repository,
+    };
+    let mut parts = rest.split('/');
+    let (namespace, name) = (parts.next()?, parts.next()?);
+    match (parts.next(), parts.next()) {
+        (None | Some(zeabur_builder_core::archive::REPOSITORY_SUFFIX), None) => {}
+        _ => return None,
+    }
+    let dns = |s: &str| {
+        s.bytes()
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
+            && s.starts_with(|c: char| c.is_ascii_alphanumeric())
+            && s.ends_with(|c: char| c.is_ascii_alphanumeric())
+    };
+    let name_ok = name.len() <= 253 && name.split('.').all(|label| !label.is_empty() && dns(label));
+    (namespace.len() <= 63 && dns(namespace) && name_ok).then_some((namespace, name))
+}
+
 /// A ref without its `refs/heads/` or `refs/tags/` prefix.
 pub(crate) fn short_ref(git_ref: &str) -> &str {
     git_ref

@@ -351,15 +351,15 @@ fn fetch_archive(args: &FetchArgs) -> Result<(), String> {
         "{}/config.json",
         std::env::var("DOCKER_CONFIG").unwrap_or_default()
     );
-    let basic = match std::fs::read(&config_path) {
-        Ok(config) => registry::basic_auth(&config, host)?,
+    let credentials = match std::fs::read(&config_path) {
+        Ok(config) => registry::credentials(&config, host)?,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
         Err(e) => return Err(format!("cannot read {config_path}: {e}")),
     };
     let ca = std::env::var(REGISTRY_CA_ENV).ok();
     let client = registry::client(ca.as_deref())?;
     let mut repository =
-        registry::Repository::new(client, &args.repository, args.plain_http, basic)?;
+        registry::Repository::new(client, &args.repository, args.plain_http, credentials)?;
     let file = std::path::Path::new(WORKSPACE).join("archive.tar.gz");
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()

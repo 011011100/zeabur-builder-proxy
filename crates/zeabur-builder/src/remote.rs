@@ -16,6 +16,8 @@ use hyper_util::client::legacy::Client;
 use hyper_util::client::legacy::connect::HttpConnector;
 use hyper_util::rt::TokioExecutor;
 use rustls::ClientConfig;
+use rustls::pki_types::CertificateDer;
+use rustls::pki_types::pem::PemObject as _;
 use thiserror::Error;
 use zeabur_builder_core::git::{self, Advertisement, GitError, MAX_RESPONSE_BYTES};
 use zeabur_builder_core::ssh::SshRemote;
@@ -80,10 +82,23 @@ pub(crate) type HttpClient = Client<HttpsConnector<HttpConnector>, Full<Bytes>>;
 
 /// A client that trusts the system's CA bundle (`SSL_CERT_FILE` or `/etc/ssl/certs`).
 pub(crate) fn http_client() -> Result<HttpClient, String> {
+    http_client_with(None)
+}
+
+/// A client that trusts the system's CA bundle and `ca`, a PEM bundle.
+pub(crate) fn http_client_with(ca: Option<&str>) -> Result<HttpClient, String> {
     let mut roots = rustls::RootCertStore::empty();
     let found = rustls_native_certs::load_native_certs();
     for cert in found.certs {
         roots.add(cert).map_err(|e| e.to_string())?;
+    }
+    if let Some(ca) = ca {
+        for cert in CertificateDer::pem_slice_iter(ca.as_bytes()) {
+            let cert = cert.map_err(|e| format!("cannot read the registry CA: {e}"))?;
+            roots
+                .add(cert)
+                .map_err(|e| format!("cannot use the registry CA: {e}"))?;
+        }
     }
     if roots.is_empty() {
         return Err(format!("no CA certificates found: {:?}", found.errors));

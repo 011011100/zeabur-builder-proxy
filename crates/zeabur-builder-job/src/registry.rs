@@ -1,10 +1,11 @@
 //! Pulls an archive source from an OCI registry ([distribution spec], "Pulling manifests" and
 //! "Pulling blobs").
 //!
-//! - **Credentials.** The `kubernetes.io/dockerconfigjson` Secret of the namespace, mounted at
-//!   `$DOCKER_CONFIG/config.json`. They go to the registry as basic auth. If the registry asks for
-//!   a bearer token (`WWW-Authenticate: Bearer`), the same credentials buy a pull token from its
-//!   realm ([token authentication]).
+//! - **Credentials.** The run's `kubernetes.io/dockerconfigjson` Secret, mounted at
+//!   `$DOCKER_CONFIG/config.json`. A `registrytoken` goes to the registry as the bearer token. Else
+//!   `auth`, or `username` and `password`, go as basic auth. If the registry asks for a bearer
+//!   token (`WWW-Authenticate: Bearer`), the basic credentials buy a pull token from its realm
+//!   ([token authentication]).
 //! - **Trust.** The system's CAs and the PEM in `ZB_REGISTRY_CA`, the CA buildkitd trusts.
 //! - **Checks.** The manifest must hash to the run's digest and the layer to its own digest and
 //!   size. The layer goes to a file first, so nothing unverified is unpacked.
@@ -90,6 +91,17 @@ struct AuthEntry {
     username: Option<String>,
     #[serde(default)]
     password: Option<String>,
+    #[serde(default)]
+    registrytoken: Option<String>,
+}
+
+/// The credentials for one registry host, as `Authorization` values.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum Credentials {
+    /// Sent as is; a challenge buys a token with them.
+    Basic(String),
+    /// A token the registry takes as it is.
+    Bearer(String),
 }
 
 /// A token endpoint's answer. Docker's registry writes `token`, OAuth servers `access_token`.
@@ -101,9 +113,10 @@ struct Token {
     access_token: Option<String>,
 }
 
-/// The `Authorization` value for `host` in a Docker config: its `auth`, or `username` and
-/// `password`. A key may carry a scheme and a path, as `docker login` writes for Docker Hub.
-pub(crate) fn basic_auth(config: &[u8], host: &str) -> Result<Option<String>, String> {
+/// The credentials for `host` in a Docker config: its `registrytoken`, else its `auth`, or
+/// `username` and `password`. A key may carry a scheme and a path, as `docker login` writes for
+/// Docker Hub.
+pub(crate) fn credentials(config: &[u8], host: &str) -> Result<Option<Credentials>, String> {
     let config: DockerConfig = serde_json::from_slice(config)
         .map_err(|e| format!("cannot read the Docker config: {e}"))?;
     let entry = config.auths.into_iter().find_map(|(key, entry)| {
@@ -114,11 +127,14 @@ pub(crate) fn basic_auth(config: &[u8], host: &str) -> Result<Option<String>, St
         (key.split('/').next() == Some(host)).then_some(entry)
     });
     Ok(entry.and_then(|entry| {
+        if let Some(token) = entry.registrytoken {
+            return Some(Credentials::Bearer(format!("Bearer {token}")));
+        }
         let pair = entry.auth.or_else(|| {
             let pair = format!("{}:{}", entry.username?, entry.password?);
             Some(STANDARD.encode(pair))
         })?;
-        Some(format!("Basic {pair}"))
+        Some(Credentials::Basic(format!("Basic {pair}")))
     }))
 }
 
@@ -199,19 +215,24 @@ impl Repository {
         client: HttpClient,
         repository: &str,
         plain_http: bool,
-        basic: Option<String>,
+        credentials: Option<Credentials>,
     ) -> Result<Self, String> {
         let (host, name) = repository
             .split_once('/')
             .filter(|(host, name)| !host.is_empty() && !name.is_empty())
             .ok_or_else(|| format!("`{repository}` is not <host>/<name>"))?;
+        let (basic, bearer) = match credentials {
+            Some(Credentials::Basic(basic)) => (Some(basic), None),
+            Some(Credentials::Bearer(bearer)) => (None, Some(bearer)),
+            None => (None, None),
+        };
         Ok(Self {
             client,
             scheme: if plain_http { "http" } else { "https" },
             host: host.to_owned(),
             name: name.to_owned(),
             basic,
-            bearer: None,
+            bearer,
         })
     }
 
@@ -417,17 +438,22 @@ mod tests {
     fn credentials_for_the_registry_host() {
         let config = br#"{"auths":{
             "https://index.docker.io/v1/":{"auth":"aHViOmh1Yg=="},
-            "zot.zot.svc:5000":{"username":"team-a","password":"secret"}}}"#;
+            "zot.zot.svc:5000":{"username":"team-a","password":"secret"},
+            "registry.example":{"registrytoken":"eyJ.x.y","username":"u","password":"p"}}}"#;
         assert_eq!(
-            basic_auth(config, "zot.zot.svc:5000").unwrap().as_deref(),
-            Some(BASIC)
+            credentials(config, "zot.zot.svc:5000").unwrap(),
+            Some(Credentials::Basic(BASIC.to_owned()))
         );
         assert_eq!(
-            basic_auth(config, "index.docker.io").unwrap().as_deref(),
-            Some("Basic aHViOmh1Yg==")
+            credentials(config, "index.docker.io").unwrap(),
+            Some(Credentials::Basic("Basic aHViOmh1Yg==".to_owned()))
         );
-        assert_eq!(basic_auth(config, "zot.zot.svc").unwrap(), None);
-        assert_eq!(basic_auth(br#"{"auths":{}}"#, "zot").unwrap(), None);
+        assert_eq!(
+            credentials(config, "registry.example").unwrap(),
+            Some(Credentials::Bearer("Bearer eyJ.x.y".to_owned()))
+        );
+        assert_eq!(credentials(config, "zot.zot.svc").unwrap(), None);
+        assert_eq!(credentials(br#"{"auths":{}}"#, "zot").unwrap(), None);
     }
 
     #[test]
@@ -569,7 +595,7 @@ mod tests {
             client(None).unwrap(),
             &format!("127.0.0.1:{}/{NAME}", addr.port()),
             true,
-            Some(BASIC.to_owned()),
+            Some(Credentials::Basic(BASIC.to_owned())),
         )
         .unwrap();
         let layer = repository.layer(digest).await?;

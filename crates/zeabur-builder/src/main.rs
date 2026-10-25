@@ -9,6 +9,7 @@ mod github_app;
 mod leader;
 mod notify;
 mod output;
+mod registry;
 mod remote;
 mod ssh;
 mod tls;
@@ -40,6 +41,62 @@ enum Command {
     /// Set up the cluster's GitHub App.
     #[command(subcommand)]
     GithubApp(github_app::Command),
+    /// Print a token for the default registry, signed with the registry token key. Run it in
+    /// the controller's Pod: `kubectl exec deploy/zeabur-builder -- zeabur-builder registry-token`.
+    RegistryToken(RegistryTokenArgs),
+}
+
+#[derive(Debug, Args)]
+struct RegistryTokenArgs {
+    /// A repository the token may pull, such as `team-a/tools`. Repeat for more.
+    #[arg(long = "repository", required = true)]
+    repositories: Vec<String>,
+    /// The token may also push.
+    #[arg(long)]
+    push: bool,
+    /// The token may also delete manifests.
+    #[arg(long)]
+    delete: bool,
+    /// How long the token lasts, in seconds.
+    #[arg(long, default_value_t = 900)]
+    ttl: u64,
+    /// The Secret whose `tls.key` signs tokens, `<namespace>/<name>`.
+    #[arg(long, env = "ZEABUR_BUILDER_REGISTRY_TOKEN_KEY", value_parser = secret_ref)]
+    registry_token_key: (String, String),
+}
+
+/// Parses `<namespace>/<name>`.
+fn secret_ref(value: &str) -> Result<(String, String), String> {
+    match value.split_once('/') {
+        Some((namespace, name))
+            if !namespace.is_empty() && !name.is_empty() && !name.contains('/') =>
+        {
+            Ok((namespace.to_owned(), name.to_owned()))
+        }
+        _ => Err(format!("`{value}` is not <namespace>/<name>")),
+    }
+}
+
+async fn registry_token(args: RegistryTokenArgs) -> Result<String, String> {
+    let client = kube::Client::try_default()
+        .await
+        .map_err(|e| format!("cannot reach Kubernetes: {e}"))?;
+    let (namespace, name) = &args.registry_token_key;
+    let signer = registry::read_signer(&client, namespace, name).await?;
+    let access = registry::Access {
+        push: args.push,
+        delete: args.delete,
+    };
+    let grants: Vec<_> = args
+        .repositories
+        .iter()
+        .map(|r| (r.as_str(), access))
+        .collect();
+    Ok(signer.token(
+        &grants,
+        jiff::Timestamp::now(),
+        Duration::from_secs(args.ttl),
+    ))
 }
 
 #[derive(Debug, Args)]
@@ -62,6 +119,11 @@ struct ControllerArgs {
     /// The default registry speaks plain HTTP. Only for a test cluster.
     #[arg(long, env = "ZEABUR_BUILDER_REGISTRY_HTTP", default_value_t = false, action = clap::ArgAction::Set)]
     registry_http: bool,
+    /// The Secret, `<namespace>/<name>`, whose `tls.key` (PKCS#8 Ed25519) signs tokens the
+    /// default registry trusts, such as `zot/zot-token-signer`. Each run then pushes with a token
+    /// for its own repositories, and the repositories of deleted `Build`s are deleted.
+    #[arg(long, env = "ZEABUR_BUILDER_REGISTRY_TOKEN_KEY", value_parser = secret_ref)]
+    registry_token_key: Option<(String, String)>,
     /// The image of the Job's `fetch` and `build` containers.
     #[arg(long, env = "ZEABUR_BUILDER_JOB_IMAGE")]
     job_image: String,
@@ -169,6 +231,7 @@ impl ControllerArgs {
             registry_auth_prefix: self.registry_auth_prefix,
             registry_ca: self.registry_ca.filter(|ca| !ca.trim().is_empty()),
             registry_http: self.registry_http,
+            registry_token_key: self.registry_token_key,
             job_image: self.job_image,
             job_deadline_seconds: self.job_deadline,
             job_ttl_seconds: self.job_ttl,
@@ -218,6 +281,17 @@ fn main() -> ExitCode {
                     .map_err(|e| e.to_string())
             })
             .and_then(|runtime| runtime.block_on(github_app::run(command)))
+            .map(Some),
+        Command::RegistryToken(args) => rustls::crypto::aws_lc_rs::default_provider()
+            .install_default()
+            .map_err(|_provider| "a TLS provider is already installed".to_owned())
+            .and_then(|()| {
+                tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .map_err(|e| e.to_string())
+            })
+            .and_then(|runtime| runtime.block_on(registry_token(args)))
             .map(Some),
     };
     match result {

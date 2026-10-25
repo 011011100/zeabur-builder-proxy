@@ -31,9 +31,17 @@ registry:
   # Where images go when a Build names no image, such as zot.zot.svc:5000. Required.
   host: ""
   # Each namespace pushes images and pulls archive sources with the kubernetes.io/dockerconfigjson
-  # Secret <authPrefix><namespace> in this namespace, and its builds wait while it is missing. Empty: anonymous pushes, for a
-  # registry that takes them.
+  # Secret <authPrefix><namespace> in this namespace, and its builds wait while it is missing.
+  # Empty: anonymous pushes, for a registry that takes them. With tokenKey, used only for images
+  # outside registry.host.
   authPrefix: registry-push-
+  # The Secret whose tls.key (PKCS#8 Ed25519) signs tokens that registry.host trusts, such as the
+  # catalog Zot's zot-token-signer in zot. Set: each run pushes with a short-lived token for its
+  # own Build's repositories only, clients ask a Build for an upload token, and the repositories
+  # of deleted Builds are deleted. The chart lets the controller read this one Secret.
+  tokenKey:
+    namespace: ""
+    secret: ""
   # The CA that signed the registry's certificate (PEM), when a public CA did not. buildkitd and
   # the archive download trust it.
   ca: ""

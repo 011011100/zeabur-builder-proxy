@@ -148,29 +148,97 @@ helm install builder oci://ghcr.io/zeabur-oss/charts/zeabur-builder --version <v
 `deploy/chart/values.yaml` documents every value. The registry values:
 
 - `registry.host`: where images go, as `<host>/<namespace>/<build>`.
+- `registry.tokenKey`: the Secret whose key signs tokens the registry trusts. See
+  [Registry tokens](#registry-tokens).
 - `registry.authPrefix`: for each namespace that builds, create a
   `kubernetes.io/dockerconfigjson` Secret named `registry-push-<namespace>` in `builder-system`,
-  allowed to push below `<registry>/<namespace>/`. Archive sources are read with it too. Set it to `""` for a registry that takes
-  anonymous pushes.
+  allowed to push below `<registry>/<namespace>/`. Archive sources are read with it too. Set it
+  to `""` for a registry that takes anonymous pushes. With `registry.tokenKey`, it is used only
+  for images outside `registry.host`.
 - `registry.ca` or `registry.caFrom`: the CA of a registry with a private certificate.
 - `registry.inCluster`: the registry's namespace, Pod labels and port, when it runs in the
   cluster, so that the egress policy lets buildkitd reach it.
 
-With the [Zeabur Catalog](https://github.com/zeabur-oss/catalog)'s Zot, which takes anonymous
-pushes over TLS:
+With the [Zeabur Catalog](https://github.com/zeabur-oss/catalog)'s Zot, which takes pushes only
+with a token signed by `zot-token-signer`:
 
 ```sh
 helm install builder oci://ghcr.io/zeabur-oss/charts/zeabur-builder --version <version> \
   -n builder-system --create-namespace --set registry.host=zot.zot.svc:5000 \
   --set registry.authPrefix= --set registry.caFrom.namespace=zot \
   --set registry.caFrom.secret=zot-tls --set registry.inCluster.namespace=zot \
-  --set registry.inCluster.podLabels.app\\.kubernetes\\.io/name=zot
+  --set registry.inCluster.podLabels.app\\.kubernetes\\.io/name=zot \
+  --set registry.tokenKey.namespace=zot --set registry.tokenKey.secret=zot-token-signer
 ```
+
+The controller itself must reach the registry too, to delete repositories: allow it in any
+NetworkPolicy of the registry's namespace.
 
 Helm does not upgrade CRDs. Before `helm upgrade`, apply the new chart's `crds/crds.yaml`.
 
 On a test cluster, `scripts/deploy-example.sh` installs the chart from this checkout with a test
 registry and sample Builds ([CONTRIBUTING.md](CONTRIBUTING.md#tests-against-a-cluster)).
+
+### Registry tokens
+
+With `registry.tokenKey`, the registry trusts one Ed25519 key, and only the controller reads it.
+The controller signs a token for each use; the token names each repository exactly and expires:
+
+- **A run** gets push and pull on its image repository, `<namespace>/<build>`, and pull on its
+  archive repository, `<namespace>/<build>/source`. The token lasts the Job's deadline plus ten
+  minutes. A `Build` whose image is on `registry.host` but not at its own repository fails.
+  Images on other registries use `registry.authPrefix`.
+- **An upload** to an archive source: a new value of the annotation
+  `builder.zeabur.com/upload-token-request` on the `Build` gets the Secret `<build>-upload`, with
+  a token that pushes to `<namespace>/<build>/source` for 15 minutes. `archive.digest` may stay
+  unset until the upload is done; the `Build` then waits with `SourceReady` `WaitingForUpload`.
+
+With kubectl and [ORAS](https://oras.land), as anyone who may edit the `Build`:
+
+```sh
+kubectl -n team-a annotate build/api --overwrite builder.zeabur.com/upload-token-request=u1
+kubectl -n team-a wait build/api --for=jsonpath='{.status.uploadToken.request}'=u1
+oras push --registry-token "$(kubectl -n team-a get secret api-upload -o jsonpath='{.data.token}' | base64 -d)" \
+  zot.zot.svc:5000/team-a/api/source:upload-1 --artifact-type application/vnd.zeabur.source.v1+tar \
+  source.tar.gz:application/vnd.oci.image.layer.v1.tar+gzip
+```
+
+Then set `archive.digest` to the digest `oras push` prints. The Secret's `.dockerconfigjson`
+also works as `DOCKER_CONFIG` for ORAS. The registry must be reachable from where ORAS runs, such
+as through `kubectl port-forward`.
+
+An admin can push an image without a `Build` with a token from the controller's Pod:
+
+```sh
+TOKEN=$(kubectl -n builder-system exec deploy/zeabur-builder -- \
+  zeabur-builder registry-token --repository zeabur_admin/tools --push)
+oras push --registry-token "$TOKEN" zot.zot.svc:5000/zeabur_admin/tools:v1 ./file
+```
+
+Keep such images out of the `<namespace>/<name>` layout, for example with a first segment that
+holds `_` or `.`, which no namespace name has. Otherwise the cleanup below deletes them.
+
+**Cleanup.** When a `Build` is deleted, by itself or with its namespace, the controller deletes
+`<namespace>/<build>/source` and `<namespace>/<build>`, with every tag. It acts on the delete
+event, and a sweep of the registry catalog at start and every ten minutes catches what it
+missed. So images go within one sweep after the deletion, and a namespace never waits for the
+controller: there is no finalizer. A new `Build` first deletes what an earlier `Build` of its
+name left, before any token names those repositories, so the new owner never sees the old
+images or sources. If the controller is not installed, images stay until it is installed again;
+its first sweep deletes them. While it runs, an admin deletes an image by hand with a token from
+`registry-token --delete` and `DELETE /v2/<repository>/manifests/<digest>`.
+
+Deleting every tag of an image repository by hand also deletes the repositories below it in Zot,
+such as its archives in `<repository>/source`.
+
+**Key rotation.** zot reads the public key once at start. Delete the Secret (with the catalog's
+Zot, `kubectl -n zot delete secret zot-token-signer`), wait for cert-manager to issue a new one,
+then restart the registry (`kubectl -n zot rollout restart statefulset/zot`). Tokens signed with
+the old key stop working at once; running builds fail and can be rebuilt.
+
+**Permissions.** With `registry.tokenKey`, the chart adds a Role in the key's namespace: `get` on
+that one Secret. The controller also writes the `<build>-upload` Secrets with its existing
+Secret permissions.
 
 ### Releases
 
@@ -209,6 +277,14 @@ In unit tests, and against a local SSH server for SSH: private repositories with
 Not built yet:
 
 - Prometheus metrics.
+
+Open issues:
+
+- The controller's ClusterRole has `get` on Secrets in every namespace, to read the Secrets
+  Builds name. It needs only the Secrets labelled `builder.zeabur.com/git-credentials` and its
+  own copies.
+- A token stays valid until it expires, even after its `Build` is deleted. A run's token can
+  push again after the cleanup; the next sweep deletes what it pushed.
 
 ## Contributing
 

@@ -445,8 +445,9 @@
                             "type": "string"
                           },
                           "digest": {
-                            "description": "The artifact's manifest digest.",
+                            "description": "The artifact's manifest digest. Unset: the `Build` waits for an upload.",
                             "maxLength": 71,
+                            "nullable": true,
                             "pattern": "^sha256:[0-9a-f]{64}$",
                             "type": "string"
                           },
@@ -458,9 +459,6 @@
                             "type": "string"
                           }
                         },
-                        "required": [
-                          "digest"
-                        ],
                         "type": "object"
                       },
                       "credentialsRef": {
@@ -743,6 +741,33 @@
                     ],
                     "nullable": true,
                     "type": "string"
+                  },
+                  "uploadToken": {
+                    "description": "The last upload token the controller issued, for the annotation\n`builder.zeabur.com/upload-token-request`.",
+                    "nullable": true,
+                    "properties": {
+                      "expiresAt": {
+                        "description": "When the token expires.",
+                        "format": "date-time",
+                        "type": "string"
+                      },
+                      "request": {
+                        "description": "The annotation value it answers.",
+                        "maxLength": 63,
+                        "type": "string"
+                      },
+                      "secretName": {
+                        "description": "The `kubernetes.io/dockerconfigjson` Secret, in the `Build`'s namespace. Its key `token`\nholds the bare token.",
+                        "maxLength": 253,
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "expiresAt",
+                      "request",
+                      "secretName"
+                    ],
+                    "type": "object"
                   }
                 },
                 "type": "object"

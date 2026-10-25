@@ -36,6 +36,8 @@ pub const MAX_NOTIFY: usize = 8;
 pub const MAX_BASE_IMAGES: usize = 10;
 /// Most conditions.
 pub const MAX_CONDITIONS: usize = 8;
+/// The longest upload token request the controller answers.
+pub const MAX_UPLOAD_REQUEST: usize = 63;
 /// A relative path whose segments do not start with `.`, so it cannot climb out with `..`.
 pub const RELATIVE_PATH_PATTERN: &str =
     r"^[A-Za-z0-9_@+-][A-Za-z0-9._@+-]*(/[A-Za-z0-9_@+-][A-Za-z0-9._@+-]*)*$";
@@ -188,9 +190,10 @@ pub struct GitSource {
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct ArchiveSource {
-    /// The artifact's manifest digest.
+    /// The artifact's manifest digest. Unset: the `Build` waits for an upload.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schemars(length(max = 71), regex(pattern = DIGEST_PATTERN))]
-    pub digest: String,
+    pub digest: Option<String>,
     /// The build context inside the archive.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schemars(length(max = MAX_PATH), regex(pattern = RELATIVE_PATH_PATTERN))]
@@ -389,6 +392,27 @@ pub struct BuildStatus {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     #[schemars(length(max = MAX_CONDITIONS))]
     pub conditions: Vec<Condition>,
+    /// The last upload token the controller issued, for the annotation
+    /// `builder.zeabur.com/upload-token-request`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub upload_token: Option<UploadToken>,
+}
+
+/// An upload token: a Secret with a short-lived token that pushes to the `Build`'s archive
+/// repository.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct UploadToken {
+    /// The annotation value it answers.
+    #[schemars(length(max = MAX_UPLOAD_REQUEST))]
+    pub request: String,
+    /// The `kubernetes.io/dockerconfigjson` Secret, in the `Build`'s namespace. Its key `token`
+    /// holds the bare token.
+    #[schemars(length(max = MAX_NAME))]
+    pub secret_name: String,
+    /// When the token expires.
+    #[schemars(extend("format" = "date-time"))]
+    pub expires_at: String,
 }
 
 /// How the source is reached.

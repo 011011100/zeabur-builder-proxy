@@ -21,6 +21,13 @@
 //! An `archive` source has no ref: its digest is the revision, a new digest is a spec change,
 //! and it gets no webhook or commit status. The Job fetches it ([`zeabur_builder_jobspec`]).
 //!
+//! With a registry token key, each run gets a token for its own repositories only
+//! ([`crate::registry`]), and a `Build` whose `builder.zeabur.com/upload-token-request` changes
+//! gets an upload token for its archive repository. The repositories of a deleted `Build` are
+//! deleted on its delete event and by a sweep of the registry catalog at start and every
+//! [`SWEEP`], so a namespace never waits for the controller to go. A new `Build` first deletes
+//! what an earlier `Build` of its name left, before any token names those repositories.
+//!
 //! Only the holder of the Lease reconciles ([`crate::leader`]). The other replicas watch and
 //! receive webhooks.
 
@@ -40,11 +47,13 @@ use kube::api::{
 use kube::runtime::controller::{Action, Controller};
 use kube::runtime::events::{Event, EventType, Recorder, Reporter};
 use kube::runtime::reflector::Store;
-use kube::runtime::watcher;
+use kube::runtime::watcher::{self, watcher};
 use kube::{Client, Resource as _, ResourceExt as _};
 use serde::Serialize;
 use thiserror::Error;
-use zeabur_builder_api::build::{Build, BuildStatus, NotifyTarget, NotifyType, SourceMode};
+use zeabur_builder_api::build::{
+    Build, BuildStatus, MAX_UPLOAD_REQUEST, NotifyTarget, NotifyType, SourceMode, UploadToken,
+};
 use zeabur_builder_api::build_run::{
     BuildRun, BuildRunSpec, BuildRunStatus, Phase, Reason, Trigger,
 };
@@ -59,6 +68,7 @@ use crate::decide::{self, Observed, Wake};
 use crate::github::{self, Access, GitHub, State};
 use crate::leader::{self, Leader};
 use crate::notify::{self, Credentials};
+use crate::registry::{self, Registry, Signer};
 use crate::remote::{self, HttpClient, Resolver};
 use crate::webhook::{self, Lookup, Receiver};
 use crate::{daemon, tls};
@@ -77,6 +87,15 @@ const UNFINISHED: &str = "status.phase!=Succeeded,status.phase!=Failed,status.ph
 const PAGE: u32 = 100;
 /// The name of the client certificate Secret in a build namespace.
 const CLIENT_TLS_COPY: &str = "zeabur-builder-buildkit-client";
+/// How often the registry catalog is swept for repositories of deleted `Build`s.
+const SWEEP: Duration = Duration::from_mins(10);
+/// How long a run's registry token outlives the Job's deadline.
+const TOKEN_MARGIN: Duration = Duration::from_mins(10);
+/// How long an upload token lasts.
+const UPLOAD_TTL: Duration = Duration::from_mins(15);
+/// How long a token for deleting repositories lasts.
+const DELETE_TTL: Duration = Duration::from_mins(5);
+const EMPTY_DOCKER_CONFIG: &[u8] = br#"{"auths":{}}"#;
 
 /// Settings, from the command line.
 #[derive(Debug, Clone)]
@@ -96,6 +115,8 @@ pub(crate) struct Settings {
     pub(crate) registry_ca: Option<String>,
     /// Whether the default registry speaks plain HTTP.
     pub(crate) registry_http: bool,
+    /// The Secret, as namespace and name, whose `tls.key` signs tokens for the default registry.
+    pub(crate) registry_token_key: Option<(String, String)>,
     /// The image of `fetch` and `build`.
     pub(crate) job_image: String,
     /// `activeDeadlineSeconds`.
@@ -115,6 +136,7 @@ struct Context {
     client: Client,
     leader: Leader,
     http: HttpClient,
+    registry: Registry,
     resolver: Resolver,
     recorder: Recorder,
     settings: Settings,
@@ -230,6 +252,11 @@ pub(crate) async fn run(client: Client, settings: Settings) -> Result<(), String
 /// Runs the controllers, the sweep and the receiver until a termination signal.
 async fn run_replica(client: Client, settings: Settings, leader: Leader) -> Result<(), String> {
     let http = remote::http_client()?;
+    let registry = Registry::new(
+        remote::http_client_with(settings.registry_ca.as_deref())?,
+        decide::registry_host(&settings.default_registry),
+        settings.registry_http,
+    );
     let github = Arc::new(GitHub::new(
         &client,
         http.clone(),
@@ -251,6 +278,7 @@ async fn run_replica(client: Client, settings: Settings, leader: Leader) -> Resu
         ),
         resolver: Resolver::new(http.clone()),
         http,
+        registry,
         client: client.clone(),
         settings,
     });
@@ -288,6 +316,7 @@ async fn run_replica(client: Client, settings: Settings, leader: Leader) -> Resu
         watcher::Config::default().labels(&format!("{}={}", labels::MANAGED_BY, labels::MANAGER)),
     )
     .reconcile_all_on(leader.taken());
+    let janitor = janitor(Arc::clone(&context));
     let sweep = daemon::sweep_forever(client.clone(), daemon_settings, runs.store(), leader);
     let runs = runs
         .shutdown_on_signal()
@@ -306,6 +335,7 @@ async fn run_replica(client: Client, settings: Settings, leader: Leader) -> Resu
     tokio::select! {
         ((), ()) = async { tokio::join!(builds, runs) } => {}
         () = sweep => {}
+        () = janitor => {}
         served = receive => served?,
     }
     Ok(())
@@ -369,6 +399,7 @@ async fn reconcile_build(build: Arc<Build>, ctx: Arc<Context>) -> Result<Action,
     let builds: Api<Build> = Api::namespaced(ctx.client.clone(), &namespace);
     let runs_api: Api<BuildRun> = Api::namespaced(ctx.client.clone(), &namespace);
     let at = now();
+    claim_repositories(&ctx, &build).await?;
     let mut status = build.status.clone().unwrap_or_default();
     let source = &build.spec.source;
     status.source_mode = Some(match (&source.archive, &source.github_app) {
@@ -437,6 +468,7 @@ async fn reconcile_build(build: Arc<Build>, ctx: Arc<Context>) -> Result<Action,
         runs.retain(|r| r.metadata.name.as_deref() != Some(old.as_str()));
     }
 
+    answer_upload_request(&ctx, &build, &mut status, at).await?;
     let image = decide::image(&build, &ctx.settings.default_registry);
     decide::summarise(&mut status, &runs, &image, at, generation);
     status.observed_generation = generation;
@@ -476,11 +508,23 @@ async fn resolve_source(
                 )
             },
             |archive| {
-                (
-                    ConditionStatus::True,
-                    "Archive",
-                    format!("archive {}", archive.digest),
-                    Some(archive.digest.clone()),
+                archive.digest.as_ref().map_or_else(
+                    || {
+                        (
+                            ConditionStatus::False,
+                            "WaitingForUpload",
+                            "set archive.digest once the archive is pushed".to_owned(),
+                            None,
+                        )
+                    },
+                    |digest| {
+                        (
+                            ConditionStatus::True,
+                            "Archive",
+                            format!("archive {digest}"),
+                            Some(digest.clone()),
+                        )
+                    },
                 )
             },
         );
@@ -1021,8 +1065,11 @@ where
 /// returns; otherwise why it waits.
 async fn admit(
     ctx: &Context,
-    namespace: &str,
+    build: &Build,
+    owned: Option<&decide::Owned>,
 ) -> Result<Result<ByteString, (Reason, String)>, Error> {
+    let namespace = build.namespace().unwrap_or_default();
+    let namespace = namespace.as_str();
     let settings = &ctx.settings;
     let limit = decide::concurrency_limit(
         Api::<Namespace>::all(ctx.client.clone())
@@ -1053,16 +1100,9 @@ async fn admit(
             format!("{taken} of the namespace's {limit} builds are running"),
         )));
     }
-    Ok(registry_auth(ctx, namespace).await?.ok_or_else(|| {
-        (
-            Reason::RegistryCredentialsMissing,
-            format!(
-                "no Secret `{}{namespace}` with push credentials in `{}`",
-                settings.registry_auth_prefix.as_deref().unwrap_or_default(),
-                settings.namespace
-            ),
-        )
-    }))
+    Ok(registry_auth(ctx, build, owned)
+        .await?
+        .map_err(|message| (Reason::RegistryCredentialsMissing, message)))
 }
 
 /// Records the Job a run waits on.
@@ -1092,6 +1132,20 @@ async fn job_created(
     .await
 }
 
+/// What a run needs that only the `Build` decides: a parseable Git URL, its tags, and its
+/// repositories in the default registry.
+fn static_checks(
+    settings: &Settings,
+    build: &Build,
+    run: &BuildRun,
+) -> Result<(Vec<String>, Option<decide::Owned>), String> {
+    if let Some(git) = &build.spec.source.git {
+        RepoKey::parse(&git.url).map_err(|e| e.to_string())?;
+    }
+    let tags = decide::tags(build, run).map_err(|e| e.to_string())?;
+    Ok((tags, owned_repositories(settings, build)?))
+}
+
 async fn start(ctx: &Context, run: &BuildRun, status: BuildRunStatus) -> Result<Action, Error> {
     let namespace = run.namespace().unwrap_or_default();
     let name = run.name_any();
@@ -1109,14 +1163,10 @@ async fn start(ctx: &Context, run: &BuildRun, status: BuildRunStatus) -> Result<
         reason: Some(Reason::SourceFailed),
         ..fail(message)
     };
-    if let Some(git) = &build.spec.source.git
-        && let Err(e) = RepoKey::parse(&git.url)
-    {
-        return finish(ctx, run, fail(e.to_string())).await;
-    }
-    let tags = match decide::tags(&build, run) {
-        Ok(tags) => tags,
-        Err(e) => return finish(ctx, run, fail(e.to_string())).await,
+    let checked = static_checks(&ctx.settings, &build, run);
+    let (tags, owned) = match checked {
+        Ok(checked) => checked,
+        Err(message) => return finish(ctx, run, fail(message)).await,
     };
 
     let credentials = match git_credentials_for_job(ctx, &build).await {
@@ -1133,7 +1183,7 @@ async fn start(ctx: &Context, run: &BuildRun, status: BuildRunStatus) -> Result<
     };
 
     let settings = &ctx.settings;
-    let registry_auth = match admit(ctx, &namespace).await? {
+    let registry_auth = match admit(ctx, &build, owned.as_ref()).await? {
         Ok(auth) => auth,
         Err((reason, message)) => return pending(ctx, run, status, reason, message).await,
     };
@@ -1195,25 +1245,311 @@ async fn start(ctx: &Context, run: &BuildRun, status: BuildRunStatus) -> Result<
     Ok(Action::await_change())
 }
 
-/// A namespace's push credentials: its own Secret when the controller is given a
-/// prefix, `None` while that Secret is missing; an empty Docker config otherwise, for a registry
-/// that takes anonymous pushes.
-async fn registry_auth(ctx: &Context, namespace: &str) -> Result<Option<ByteString>, Error> {
-    let Some(prefix) = &ctx.settings.registry_auth_prefix else {
-        return Ok(Some(ByteString(br#"{"auths":{}}"#.to_vec())));
+/// A run's registry credentials: the namespace's own Secret when the controller is given a
+/// prefix, else an empty Docker config. With a token key, a token for the `Build`'s image
+/// repository and archive repository replaces any entry for the default registry. The message
+/// says what is missing.
+async fn registry_auth(
+    ctx: &Context,
+    build: &Build,
+    owned: Option<&decide::Owned>,
+) -> Result<Result<ByteString, String>, Error> {
+    let settings = &ctx.settings;
+    let namespace = build.namespace().unwrap_or_default();
+    let base = match &settings.registry_auth_prefix {
+        None => Some(EMPTY_DOCKER_CONFIG.to_vec()),
+        Some(prefix) => {
+            let name = format!("{prefix}{namespace}");
+            match Api::<Secret>::namespaced(ctx.client.clone(), &settings.namespace)
+                .get_opt(&name)
+                .await?
+            {
+                None => None,
+                Some(secret) => Some(
+                    secret
+                        .data
+                        .and_then(|mut d| d.remove(".dockerconfigjson"))
+                        .ok_or_else(|| {
+                            Error::Invalid(format!("Secret `{name}` has no .dockerconfigjson"))
+                        })?
+                        .0,
+                ),
+            }
+        }
     };
-    let name = format!("{prefix}{namespace}");
-    let Some(secret) = Api::<Secret>::namespaced(ctx.client.clone(), &ctx.settings.namespace)
-        .get_opt(&name)
-        .await?
-    else {
-        return Ok(None);
+    let missing = || {
+        format!(
+            "no Secret `{}{namespace}` with push credentials in `{}`",
+            settings.registry_auth_prefix.as_deref().unwrap_or_default(),
+            settings.namespace
+        )
     };
-    secret
-        .data
-        .and_then(|mut d| d.remove(".dockerconfigjson"))
-        .map(Some)
-        .ok_or_else(|| Error::Invalid(format!("Secret `{name}` has no .dockerconfigjson")))
+    let Some(owned) = owned else {
+        return Ok(base.map(ByteString).ok_or_else(missing));
+    };
+    let base = match base {
+        Some(base) => base,
+        None if owned.image.is_some() => EMPTY_DOCKER_CONFIG.to_vec(),
+        None => return Ok(Err(missing())),
+    };
+    let mut grants = Vec::new();
+    if let Some(image) = &owned.image {
+        grants.push((image.as_str(), registry::Access::PUSH));
+    }
+    if build.spec.source.archive.is_some() {
+        grants.push((owned.source.as_str(), registry::Access::PULL));
+    }
+    if grants.is_empty() {
+        return Ok(Ok(ByteString(base)));
+    }
+    let signer = match signer(ctx).await {
+        Ok(signer) => signer,
+        Err(message) => return Ok(Err(message)),
+    };
+    let deadline = Duration::from_secs(u64::try_from(settings.job_deadline_seconds).unwrap_or(0));
+    let token = signer.token(&grants, now(), deadline + TOKEN_MARGIN);
+    registry::with_token(&base, &owned.host, &token)
+        .map(|config| Ok(ByteString(config)))
+        .map_err(Error::Invalid)
+}
+
+/// The `Build`'s repositories in the default registry, when the controller signs tokens.
+fn owned_repositories(settings: &Settings, build: &Build) -> Result<Option<decide::Owned>, String> {
+    settings
+        .registry_token_key
+        .as_ref()
+        .map(|_| decide::owned(build, &settings.default_registry))
+        .transpose()
+}
+
+/// For a `Build` the controller has not acted on yet, deletes what an earlier `Build` of the same
+/// name left in its repositories, before any token names them. Its first status write records
+/// that it is done.
+async fn claim_repositories(ctx: &Context, build: &Build) -> Result<(), Error> {
+    let new = build
+        .status
+        .as_ref()
+        .and_then(|s| s.observed_generation)
+        .is_none();
+    if ctx.settings.registry_token_key.is_none() || !new {
+        return Ok(());
+    }
+    let namespace = build.namespace().unwrap_or_default();
+    clear_repositories(ctx, &namespace, &build.name_any())
+        .await
+        .map_err(Error::Invalid)
+}
+
+/// Issues an upload token when `builder.zeabur.com/upload-token-request` has a value the status
+/// has not answered.
+async fn answer_upload_request(
+    ctx: &Context,
+    build: &Build,
+    status: &mut BuildStatus,
+    at: Timestamp,
+) -> Result<(), Error> {
+    if ctx.settings.registry_token_key.is_some()
+        && build.spec.source.archive.is_some()
+        && let Some(request) = build.annotations().get(annotations::UPLOAD_TOKEN_REQUEST)
+        && !request.is_empty()
+        && request.len() <= MAX_UPLOAD_REQUEST
+        && status.upload_token.as_ref().map(|t| &t.request) != Some(request)
+    {
+        status.upload_token = Some(upload_token(ctx, build, request, at).await?);
+    }
+    Ok(())
+}
+
+/// The key that signs registry tokens, or what is missing.
+async fn signer(ctx: &Context) -> Result<Signer, String> {
+    let Some((namespace, name)) = &ctx.settings.registry_token_key else {
+        return Err("no registry token key is set".to_owned());
+    };
+    registry::read_signer(&ctx.client, namespace, name).await
+}
+
+/// Writes the `Build`'s upload Secret: a token that pushes to and pulls from its archive
+/// repository, as a Docker config and in the key `token`.
+async fn upload_token(
+    ctx: &Context,
+    build: &Build,
+    request: &str,
+    at: Timestamp,
+) -> Result<UploadToken, Error> {
+    let namespace = build.namespace().unwrap_or_default();
+    let name = build.name_any();
+    let [source, _] = decide::repositories(&ctx.settings.default_registry, &namespace, &name);
+    let signer = signer(ctx).await.map_err(Error::Invalid)?;
+    let token = signer.token(&[(source.as_str(), registry::Access::PUSH)], at, UPLOAD_TTL);
+    let host = decide::registry_host(&ctx.settings.default_registry);
+    let secret_name = format!("{name}-upload");
+    let data = BTreeMap::from([
+        (
+            ".dockerconfigjson".to_owned(),
+            ByteString(registry::docker_config(host, &token)),
+        ),
+        ("token".to_owned(), ByteString(token.into_bytes())),
+    ]);
+    let secrets: Api<Secret> = Api::namespaced(ctx.client.clone(), &namespace);
+    if let Some(mut secret) = secrets.get_opt(&secret_name).await? {
+        if secret.labels().get(labels::BUILD) != Some(&name) {
+            return Err(Error::Invalid(format!(
+                "Secret `{secret_name}` exists and is not this Build's upload token"
+            )));
+        }
+        secret.data = Some(data);
+        secrets
+            .replace(&secret_name, &PostParams::default(), &secret)
+            .await?;
+    } else {
+        let secret = Secret {
+            metadata: ObjectMeta {
+                name: Some(secret_name.clone()),
+                namespace: Some(namespace.clone()),
+                labels: Some(BTreeMap::from([
+                    (labels::BUILD.to_owned(), name.clone()),
+                    (labels::MANAGED_BY.to_owned(), labels::MANAGER.to_owned()),
+                ])),
+                owner_references: build.controller_owner_ref(&()).map(|o| vec![o]),
+                ..ObjectMeta::default()
+            },
+            type_: Some("kubernetes.io/dockerconfigjson".to_owned()),
+            data: Some(data),
+            ..Secret::default()
+        };
+        secrets.create(&PostParams::default(), &secret).await?;
+    }
+    let expires = at
+        .checked_add(UPLOAD_TTL)
+        .map_err(|e| Error::Invalid(e.to_string()))?;
+    tracing::info!(build = %name, namespace = %namespace, request, "upload token issued");
+    Ok(UploadToken {
+        request: request.to_owned(),
+        secret_name,
+        expires_at: expires.to_string(),
+    })
+}
+
+/// Deletes the repositories `<namespace>/<name>/source` and `<namespace>/<name>` in the default
+/// registry.
+async fn clear_repositories(ctx: &Context, namespace: &str, name: &str) -> Result<(), String> {
+    let repositories = decide::repositories(&ctx.settings.default_registry, namespace, name);
+    let signer = signer(ctx).await?;
+    let grants: Vec<_> = repositories
+        .iter()
+        .map(|r| (r.as_str(), registry::Access::DELETE))
+        .collect();
+    let token = signer.token(&grants, now(), DELETE_TTL);
+    for repository in &repositories {
+        ctx.registry.delete_repository(repository, &token).await?;
+    }
+    Ok(())
+}
+
+/// Clears the repositories of a `Build` unless one of that name exists again.
+async fn clear_if_gone(ctx: &Context, namespace: &str, name: &str) -> Result<(), String> {
+    let exists = Api::<Build>::namespaced(ctx.client.clone(), namespace)
+        .get_opt(name)
+        .await
+        .map_err(|e| e.to_string())?
+        .is_some();
+    if exists {
+        return Ok(());
+    }
+    clear_repositories(ctx, namespace, name).await?;
+    tracing::info!(
+        namespace,
+        build = name,
+        "deleted the repositories of a deleted Build"
+    );
+    Ok(())
+}
+
+/// Every `Build`, as namespace and name.
+async fn all_builds(client: &Client) -> Result<std::collections::HashSet<(String, String)>, Error> {
+    let api = Api::<Build>::all(client.clone());
+    let mut params = ListParams::default().limit(PAGE);
+    let mut all = std::collections::HashSet::new();
+    loop {
+        let page = api.list_metadata(&params).await?;
+        all.extend(
+            page.items
+                .into_iter()
+                .map(|b| (b.namespace().unwrap_or_default(), b.name_any())),
+        );
+        match page.metadata.continue_ {
+            Some(next) if !next.is_empty() => params = params.continue_token(&next),
+            _ => return Ok(all),
+        }
+    }
+}
+
+/// Deletes the repositories of every `Build` that no longer exists.
+async fn sweep_registry(ctx: &Context) -> Result<(), String> {
+    let signer = signer(ctx).await?;
+    let token = signer.token(
+        &[(registry::CATALOG, registry::Access::PULL)],
+        now(),
+        DELETE_TTL,
+    );
+    let repositories = ctx.registry.catalog(&token).await?;
+    let builds = all_builds(&ctx.client).await.map_err(|e| e.to_string())?;
+    let mut gone = std::collections::BTreeSet::new();
+    for repository in &repositories {
+        if let Some((namespace, name)) =
+            decide::repository_owner(repository, &ctx.settings.default_registry)
+            && !builds.contains(&(namespace.to_owned(), name.to_owned()))
+        {
+            gone.insert((namespace, name));
+        }
+    }
+    for (namespace, name) in gone {
+        clear_if_gone(ctx, namespace, name).await?;
+    }
+    Ok(())
+}
+
+/// Deletes the repositories of deleted `Build`s: on each delete event, and by a sweep at start and
+/// every [`SWEEP`], which also catches events missed while the controller was down.
+async fn janitor(ctx: Arc<Context>) {
+    if ctx.settings.registry_token_key.is_none() {
+        return std::future::pending().await;
+    }
+    let events = watcher(
+        Api::<Build>::all(ctx.client.clone()),
+        watcher::Config::default(),
+    );
+    let mut events = std::pin::pin!(events);
+    let mut next_sweep = tokio::time::Instant::now();
+    loop {
+        tokio::select! {
+            event = events.next() => match event {
+                Some(Ok(watcher::Event::Delete(build))) if ctx.leader.is_leader() => {
+                    let namespace = build.namespace().unwrap_or_default();
+                    let name = build.name_any();
+                    if let Err(error) = clear_if_gone(&ctx, &namespace, &name).await {
+                        tracing::warn!(%error, namespace, build = name, "deleting repositories; the sweep tries again");
+                    }
+                }
+                Some(Err(error)) => {
+                    tracing::warn!(%error, "watching Builds for deletion");
+                    tokio::time::sleep(Duration::from_secs(5)).await;
+                }
+                None => return,
+                Some(Ok(_)) => {}
+            },
+            () = tokio::time::sleep_until(next_sweep) => {
+                if !ctx.leader.is_leader() {
+                    next_sweep += PENDING_RETRY;
+                    continue;
+                }
+                if let Err(error) = sweep_registry(&ctx).await {
+                    tracing::warn!(%error, "sweeping the registry");
+                }
+                next_sweep = tokio::time::Instant::now() + SWEEP;
+            }
+        }
+    }
 }
 
 /// The run's installation token, as a `kubernetes.io/basic-auth` Secret owned by the `BuildRun`

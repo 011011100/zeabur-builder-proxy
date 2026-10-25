@@ -13,11 +13,15 @@ The unit of isolation is the namespace. Teams that share a cluster cannot read e
 source, secrets or build cache, and cannot push to each other's images:
 
 - Each build namespace has its own buildkitd and cache, its own certificate authority and client
-  certificate, and a registry account that pushes only below `<registry.host>/<namespace>/`.
+  certificate. With `registry.tokenKey`, each run pushes with a short-lived token for its own
+  `Build`'s repository only; with `registry.authPrefix`, with a namespace account that pushes
+  only below `<registry.host>/<namespace>/`.
 - An archive source is read only from `<registry.host>/<namespace>/<build>/source`, with the
-  namespace's registry account. The registry decides who else may read it: one that allows
-  anonymous reads, such as the test registry and the Zeabur Catalog's Zot, shows every upload to
+  run's registry credentials. The registry decides who else may read it: the Zeabur Catalog's
+  Zot lets only a token for that repository read it; the test registry shows every upload to
   anyone who can reach it. The Job unpacks the archive without writing outside the source folder.
+- Whoever reads the registry token key can push to and delete any repository. Only the
+  controller may read it.
 - Builds in one namespace trust each other. They share a buildkitd, so a `RUN` step can read the
   cache mounts of other builds in the same namespace.
 - Each `RUN` step has its own network namespace. It reaches the internet and the registry; the

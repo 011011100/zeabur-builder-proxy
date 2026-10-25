@@ -51,6 +51,12 @@ spec:
             - name: ZEABUR_BUILDER_REGISTRY_CA
               value: {{ . | quote }}
             {{- end }}
+            {{- with .Values.registry.tokenKey }}
+            {{- if and .namespace .secret }}
+            - name: ZEABUR_BUILDER_REGISTRY_TOKEN_KEY
+              value: {{ printf "%s/%s" .namespace .secret | quote }}
+            {{- end }}
+            {{- end }}
             {{- if .Values.registry.http }}
             - {name: ZEABUR_BUILDER_REGISTRY_HTTP, value: "true"}
             {{- end }}

@@ -62,4 +62,12 @@ if grep -q ZEABUR_BUILDER_REGISTRY_AUTH_PREFIX <<<"$pinned"; then
 fi
 http=$(helm template builder "$chart" "${base[@]}" --set registry.http=true)
 require "$http" "plain HTTP registry" 'http = true$' 'name: ZEABUR_BUILDER_REGISTRY_HTTP, value: "true"'
+tokens=$(helm template builder "$chart" "${base[@]}" --set registry.tokenKey.namespace=zot \
+  --set registry.tokenKey.secret=zot-token-signer)
+require "$tokens" "registry tokens" 'value: "zot/zot-token-signer"$' 'namespace: zot$' \
+  'resourceNames: \[zot-token-signer\]$'
+if grep -qE 'ZEABUR_BUILDER_REGISTRY_TOKEN_KEY|resourceNames: \[zot-token-signer\]' <<<"$plain"; then
+  echo "default install: the chart reads a token key nobody named" >&2
+  exit 1
+fi
 echo "chart ok"
