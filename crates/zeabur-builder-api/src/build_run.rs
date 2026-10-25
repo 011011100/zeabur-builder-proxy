@@ -185,9 +185,9 @@ pub enum Reason {
     BuildFailed,
     /// The Job ran past its deadline.
     Timeout,
-    /// Replaced or cancelled.
+    /// Replaced, cancelled, or its Job was deleted.
     Cancelled,
-    /// The Job or Pod disappeared, or buildkitd could not be reached.
+    /// The Pod disappeared, or buildkitd could not be reached.
     InfraError,
 }
 

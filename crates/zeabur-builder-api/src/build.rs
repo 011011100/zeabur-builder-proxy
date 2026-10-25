@@ -380,6 +380,11 @@ pub struct BuildStatus {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schemars(length(max = 1024))]
     pub latest_image: Option<String>,
+    /// The revision the controller last created a `BuildRun` for. Deleting that run does not
+    /// build the revision again.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(length(max = MAX_REVISION), regex(pattern = REVISION_PATTERN))]
+    pub last_run_revision: Option<String>,
     /// The newest `BuildRun`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schemars(length(max = MAX_NAME))]

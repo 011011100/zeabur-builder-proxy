@@ -448,6 +448,7 @@ async fn reconcile_build(build: Arc<Build>, ctx: Arc<Context>) -> Result<Action,
         if let Some(trigger) = next.create {
             let run =
                 create_run(&runs_api, &build, sha, status.resolved_ref.clone(), trigger).await?;
+            status.last_run_revision = Some(sha.clone());
             tracing::info!(build = %name, namespace = %namespace, buildrun = %run.name_any(), revision = %sha, ?trigger, "new run");
             if !runs.iter().any(|r| r.metadata.name == run.metadata.name) {
                 runs.push(run);
@@ -793,9 +794,9 @@ async fn reconcile_run(run: Arc<BuildRun>, ctx: Arc<Context>) -> Result<Action, 
                 &ctx,
                 &run,
                 BuildRunStatus {
-                    phase: Some(Phase::Failed),
-                    reason: Some(Reason::InfraError),
-                    message: Some("the Job disappeared".to_owned()),
+                    phase: Some(Phase::Cancelled),
+                    reason: Some(Reason::Cancelled),
+                    message: Some("the Job was deleted".to_owned()),
                     ..status
                 },
             )

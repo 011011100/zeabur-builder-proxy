@@ -950,3 +950,27 @@ fn only_the_controllers_layout_has_an_owner() {
     assert_eq!(repository_owner("team-a/api", registry), None);
     assert_eq!(repository_owner("buildsx/team-a/api", registry), None);
 }
+
+#[test]
+fn a_deleted_run_is_not_created_again() {
+    let mut build = build();
+    build.status = Some(BuildStatus {
+        last_run_revision: Some(B.to_owned()),
+        ..BuildStatus::default()
+    });
+    assert_eq!(next_run(&build, B, &[], Trigger::Poll), NextRun::default());
+    assert_eq!(
+        next_run(&build, A, &[], Trigger::Poll).create,
+        Some(Trigger::Poll)
+    );
+    build
+        .metadata
+        .annotations
+        .get_or_insert_default()
+        .insert(annotations::REBUILD.to_owned(), "1".to_owned());
+    assert_eq!(
+        next_run(&build, B, &[], Trigger::Poll).create,
+        Some(Trigger::Manual),
+        "a rebuild still builds it"
+    );
+}

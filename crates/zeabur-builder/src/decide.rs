@@ -286,9 +286,11 @@ pub(crate) struct NextRun {
 /// Decides whether `remote` needs a build.
 ///
 /// A commit that already has a `BuildRun`, in any phase, gets no other: a failed build is not
-/// retried by itself, which would loop on a broken commit. A [pending rebuild](pending_rebuild)
-/// builds it again, as `Manual`, under the same concurrency rules as a new commit. A new commit
-/// is built with `found_by`: `Poll`, or `Webhook` when a delivery asked for the poll.
+/// retried by itself, which would loop on a broken commit. Nor does the commit of the last run
+/// created, once that run is deleted: deleting a run cancels it. A [pending
+/// rebuild](pending_rebuild) builds it again, as `Manual`, under the same concurrency rules as a
+/// new commit. A new commit is built with `found_by`: `Poll`, or `Webhook` when a delivery asked
+/// for the poll.
 pub(crate) fn next_run(
     build: &Build,
     remote: &str,
@@ -298,11 +300,12 @@ pub(crate) fn next_run(
     if build.spec.suspend {
         return NextRun::default();
     }
-    let latest = build
-        .status
-        .as_ref()
-        .and_then(|s| s.latest_revision.as_deref());
-    let new_commit = latest != Some(remote) && !runs.iter().any(|r| r.spec.revision == remote);
+    let status = build.status.as_ref();
+    let latest = status.and_then(|s| s.latest_revision.as_deref());
+    let last_run = status.and_then(|s| s.last_run_revision.as_deref());
+    let new_commit = latest != Some(remote)
+        && last_run != Some(remote)
+        && !runs.iter().any(|r| r.spec.revision == remote);
     let trigger = if new_commit {
         found_by
     } else if pending_rebuild(build, runs).is_some() {
