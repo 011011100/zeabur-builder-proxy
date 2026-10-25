@@ -311,7 +311,11 @@ pub(crate) fn candidates(
             | Provider::Bitbucket
             | Provider::Generic => b.spec.triggers.webhook.is_some(),
         })
-        .filter(|b| RepoKey::parse(&b.spec.source.git.url).is_ok_and(|k| repositories.contains(&k)))
+        .filter(|b| {
+            b.spec.source.git.as_ref().is_some_and(|git| {
+                RepoKey::parse(&git.url).is_ok_and(|k| repositories.contains(&k))
+            })
+        })
         .cloned()
         .collect()
 }
@@ -354,8 +358,11 @@ pub(crate) fn pushed(build: &Build, refs: &[String]) -> bool {
         .status
         .as_ref()
         .and_then(|s| s.resolved_ref.as_deref());
+    let Some(git) = &build.spec.source.git else {
+        return false;
+    };
     refs.iter()
-        .any(|r| hook::ref_matches(&build.spec.source.git.git_ref, resolved, r))
+        .any(|r| hook::ref_matches(&git.git_ref, resolved, r))
 }
 
 impl Receiver {

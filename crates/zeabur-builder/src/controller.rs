@@ -18,6 +18,9 @@
 //! writes `lastWebhookAt`, so its apply cannot put back an older time. A `githubApp` source is
 //! resolved and fetched with installation tokens and gets commit statuses ([`crate::github`]).
 //!
+//! An `archive` source has no ref: its digest is the revision, a new digest is a spec change,
+//! and it gets no webhook or commit status. The Job fetches it ([`zeabur_builder_jobspec`]).
+//!
 //! Only the holder of the Lease reconciles ([`crate::leader`]). The other replicas watch and
 //! receive webhooks.
 
@@ -89,6 +92,10 @@ pub(crate) struct Settings {
     /// With a prefix, the `kubernetes.io/dockerconfigjson` Secret `<prefix><namespace>` in the
     /// controller's namespace holds a namespace's push credentials; without, pushes are anonymous.
     pub(crate) registry_auth_prefix: Option<String>,
+    /// The default registry's CA, PEM, for the `fetch` container of an archive source.
+    pub(crate) registry_ca: Option<String>,
+    /// Whether the default registry speaks plain HTTP.
+    pub(crate) registry_http: bool,
     /// The image of `fetch` and `build`.
     pub(crate) job_image: String,
     /// `activeDeadlineSeconds`.
@@ -363,10 +370,11 @@ async fn reconcile_build(build: Arc<Build>, ctx: Arc<Context>) -> Result<Action,
     let runs_api: Api<BuildRun> = Api::namespaced(ctx.client.clone(), &namespace);
     let at = now();
     let mut status = build.status.clone().unwrap_or_default();
-    status.source_mode = Some(if build.spec.source.github_app.is_some() {
-        SourceMode::GitHubApp
-    } else {
-        SourceMode::PlainGit
+    let source = &build.spec.source;
+    status.source_mode = Some(match (&source.archive, &source.github_app) {
+        (Some(_), _) => SourceMode::Archive,
+        (None, Some(_)) => SourceMode::GitHubApp,
+        (None, None) => SourceMode::PlainGit,
     });
     let interval = build
         .spec
@@ -457,7 +465,38 @@ async fn resolve_source(
     at: Timestamp,
 ) -> Option<String> {
     let generation = build.metadata.generation;
-    let git = &build.spec.source.git;
+    let Some(git) = &build.spec.source.git else {
+        let (ready, reason, message, digest) = build.spec.source.archive.as_ref().map_or_else(
+            || {
+                (
+                    ConditionStatus::False,
+                    "NoSource",
+                    "set git or archive".to_owned(),
+                    None,
+                )
+            },
+            |archive| {
+                (
+                    ConditionStatus::True,
+                    "Archive",
+                    format!("archive {}", archive.digest),
+                    Some(archive.digest.clone()),
+                )
+            },
+        );
+        status.remote_revision.clone_from(&digest);
+        status.resolved_ref = None;
+        decide::set_condition(
+            &mut status.conditions,
+            "SourceReady",
+            ready,
+            reason,
+            &message,
+            at,
+            generation,
+        );
+        return digest;
+    };
     let resolved = if decide::needs_resolve(build.status.as_ref(), generation, force, interval, at)
     {
         match git_credentials(ctx, build).await {
@@ -524,6 +563,9 @@ async fn git_credentials(ctx: &Context, build: &Build) -> Result<Option<GitCrede
     let Some(secret_ref) = &build.spec.source.credentials_ref else {
         return Ok(None);
     };
+    if build.spec.source.git.is_none() {
+        return Ok(None);
+    }
     let name = &secret_ref.name;
     let namespace = build.namespace().unwrap_or_default();
     let secret = Api::<Secret>::namespaced(ctx.client.clone(), &namespace)
@@ -553,23 +595,23 @@ async fn git_credentials_for_job(
 /// A token of the `Build`'s installation for its repository, once the namespace is allowed to use
 /// the installation.
 async fn app_token(ctx: &Context, build: &Build, access: Access) -> Result<String, Refusal> {
-    let Some(app) = &build.spec.source.github_app else {
+    let (Some(app), Some(git)) = (&build.spec.source.github_app, &build.spec.source.git) else {
         return Err(("CredentialsMissing", "no githubApp source".to_owned()));
     };
     let namespace = build.namespace().unwrap_or_default();
     ctx.github.allowed(app.installation_id, &namespace).await?;
-    let key = RepoKey::parse(&build.spec.source.git.url)
-        .map_err(|e| ("UnsupportedURL", e.to_string()))?;
+    let key = RepoKey::parse(&git.url).map_err(|e| ("UnsupportedURL", e.to_string()))?;
     ctx.github.token(app.installation_id, &key, access).await
 }
 
-/// Sets the commit status of a `githubApp` source's run. Nothing happens for other sources.
+/// Sets the commit status of a `githubApp` source's run. Nothing happens for other sources,
+/// archive sources among them.
 async fn report(ctx: &Context, build: &Build, sha: &str, state: State, description: &str) {
-    let Some(app) = &build.spec.source.github_app else {
+    let (Some(app), Some(git)) = (&build.spec.source.github_app, &build.spec.source.git) else {
         return;
     };
     let namespace = build.namespace().unwrap_or_default();
-    let Ok(key) = RepoKey::parse(&build.spec.source.git.url) else {
+    let Ok(key) = RepoKey::parse(&git.url) else {
         return;
     };
     if ctx
@@ -1067,7 +1109,9 @@ async fn start(ctx: &Context, run: &BuildRun, status: BuildRunStatus) -> Result<
         reason: Some(Reason::SourceFailed),
         ..fail(message)
     };
-    if let Err(e) = RepoKey::parse(&build.spec.source.git.url) {
+    if let Some(git) = &build.spec.source.git
+        && let Err(e) = RepoKey::parse(&git.url)
+    {
         return finish(ctx, run, fail(e.to_string())).await;
     }
     let tags = match decide::tags(&build, run) {
@@ -1128,6 +1172,9 @@ async fn start(ctx: &Context, run: &BuildRun, status: BuildRunStatus) -> Result<
         builder_name: &build.spec.builder_ref,
         builder: &builder.spec,
         image: &image,
+        registry: &settings.default_registry,
+        registry_ca: settings.registry_ca.as_deref(),
+        registry_http: settings.registry_http,
         tags: &tags,
         buildkitd_addr: &woken.address,
         job_image: &settings.job_image,

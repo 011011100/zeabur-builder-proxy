@@ -32,6 +32,8 @@ zeabur-builder-jobspec = { path = "crates/zeabur-builder-jobspec" }
 aws-lc-rs = { version = "1.18", default-features = false, features = ["aws-lc-sys", "alloc"] }
 base64 = "0.23"
 bytes = "1"
+# The decompressor of archive sources, in pure Rust.
+flate2 = "1"
 clap = { version = "4", default-features = false, features = ["std", "derive", "env", "help", "usage", "error-context"] }
 futures-util = { version = "0.3", default-features = false, features = ["std"] }
 http = "1"
@@ -55,6 +57,8 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 # SHA-256 for the pure crates, which hold no C library.
 sha2 = { version = "0.11", default-features = false }
+# Reads the tar entries of archive sources; the Job writes the files itself.
+tar = { version = "0.4", default-features = false }
 thiserror = "2"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "signal", "time", "sync"] }
 tracing = "0.1"

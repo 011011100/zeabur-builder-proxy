@@ -95,7 +95,8 @@ case "$job" in
           --for 'jsonpath={.status.conditions[?(@.type=="SourceReady")].reason}=RefNotFound' &&
         kubectl -n team-a wait buildrun -l builder.zeabur.com/build=no-such-dockerfile --timeout 600s \
           --for 'jsonpath={.status.phase}=Failed' &&
-        TAG="$tag" ./scripts/example-isolation.sh k3d-zeabur-builder
+        TAG="$tag" ./scripts/example-isolation.sh k3d-zeabur-builder &&
+        ./scripts/example-archive.sh k3d-zeabur-builder
     }; then
       cluster_failure_context
       exit 1

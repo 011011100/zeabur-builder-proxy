@@ -1,5 +1,6 @@
 //! Zeabur Builder's decisions that need no I/O.
 //!
+//! - [`archive`]: the uploaded-archive source, its OCI artifact and the tar entries it may hold.
 //! - [`git`]: resolving a branch or tag to a commit from a Git server's answer.
 //! - [`ssh`]: SSH remotes and the `known_hosts` keys that vouch for them.
 //! - [`hook`]: the repository and refs a webhook delivery names.
@@ -14,6 +15,7 @@
 //! The controller and the Job image both depend on this crate, which is why it stays free of I/O,
 //! clocks and randomness: the same inputs always give the same decision.
 
+pub mod archive;
 pub mod daemon;
 pub mod git;
 pub mod hook;

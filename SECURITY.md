@@ -14,6 +14,10 @@ source, secrets or build cache, and cannot push to each other's images:
 
 - Each build namespace has its own buildkitd and cache, its own certificate authority and client
   certificate, and a registry account that pushes only below `<registry.host>/<namespace>/`.
+- An archive source is read only from `<registry.host>/<namespace>/<build>/source`, with the
+  namespace's registry account. The registry decides who else may read it: one that allows
+  anonymous reads, such as the test registry and the Zeabur Catalog's Zot, shows every upload to
+  anyone who can reach it. The Job unpacks the archive without writing outside the source folder.
 - Builds in one namespace trust each other. They share a buildkitd, so a `RUN` step can read the
   cache mounts of other builds in the same namespace.
 - Each `RUN` step has its own network namespace. It reaches the internet and the registry; the

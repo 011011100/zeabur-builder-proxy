@@ -1,4 +1,4 @@
-//! `BuildRun`: one build of one commit.
+//! `BuildRun`: one build of one commit or archive.
 
 #![expect(
     unreachable_pub,
@@ -11,9 +11,9 @@ use kube::{CustomResource, KubeSchema};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-use crate::common::{DIGEST_PATTERN, MAX_NAME, REVISION_PATTERN};
+use crate::common::{DIGEST_PATTERN, MAX_NAME, MAX_REVISION, REVISION_PATTERN};
 
-/// One build of one commit. The spec is immutable: to build again, create another.
+/// One build of one commit or archive. The spec is immutable: to build again, create another.
 #[expect(
     clippy::duplicated_attributes,
     reason = "repeated printcolumn arguments such as `type_ = \"string\"` are distinct columns"
@@ -49,7 +49,7 @@ use crate::common::{DIGEST_PATTERN, MAX_NAME, REVISION_PATTERN};
         type_ = "date",
         json_path = ".metadata.creationTimestamp"
     ),
-    doc = "One build of one Git commit by Zeabur Builder."
+    doc = "One build of one Git commit or uploaded archive by Zeabur Builder."
 )]
 #[x_kube(validation = Rule::new("self == oldSelf").message("a BuildRun's spec is immutable; create another"))]
 #[serde(rename_all = "camelCase")]
@@ -57,8 +57,8 @@ pub struct BuildRunSpec {
     /// The `Build`.
     #[schemars(length(min = 1, max = MAX_NAME))]
     pub build_ref: String,
-    /// The full commit SHA.
-    #[schemars(length(max = 40), regex(pattern = REVISION_PATTERN))]
+    /// The full commit SHA of a Git source, or the manifest digest of an archive source.
+    #[schemars(length(max = MAX_REVISION), regex(pattern = REVISION_PATTERN))]
     pub revision: String,
     /// The full name of the ref `revision` was resolved from, such as `refs/heads/master`.
     #[serde(default, rename = "ref", skip_serializing_if = "Option::is_none")]
@@ -177,7 +177,7 @@ pub enum Reason {
     BuildkitdStarting,
     /// The namespace has no push credentials for the default registry.
     RegistryCredentialsMissing,
-    /// Clone or checkout failed.
+    /// Clone, checkout or the archive download failed.
     SourceFailed,
     /// The planner failed.
     PlanFailed,

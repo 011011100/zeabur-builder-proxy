@@ -77,7 +77,7 @@ Shared with [Zeabur Identity](https://github.com/zeabur-oss/identity):
 with its own kubeconfig (`target/ci/kubeconfig`), builds the images, installs the chart from
 `deploy/chart`, builds the sample Builds from Git (a Dockerfile in `team-a` and `team-b`, Railpack
 in `team-a`), waits for the two samples that fail on purpose, runs `scripts/example-isolation.sh`
-and deletes the cluster. Run it on a Linux machine with Docker; `ZEABUR_CI_KEEP=1` keeps the
+and `scripts/example-archive.sh`, and deletes the cluster. Run it on a Linux machine with Docker; `ZEABUR_CI_KEEP=1` keeps the
 cluster.
 
 To work against a cluster by hand, use a disposable one with its own kubeconfig, never your normal

@@ -246,10 +246,10 @@
         "name": "v1alpha1",
         "schema": {
           "openAPIV3Schema": {
-            "description": "A Git ref that Zeabur Builder keeps built into a container image.",
+            "description": "A Git ref or an uploaded archive that Zeabur Builder keeps built into a container image.",
             "properties": {
               "spec": {
-                "description": "A Git ref to follow and the image to keep built from it.\n\n```yaml\napiVersion: builder.zeabur.com/v1alpha1\nkind: Build\nmetadata: {name: api, namespace: team-a}\nspec:\n  source: {git: {url: https://github.com/acme/api, ref: main}}\n  builderRef: railpack\n```",
+                "description": "A Git ref to follow, or an uploaded archive, and the image to keep built from it.\n\n```yaml\napiVersion: builder.zeabur.com/v1alpha1\nkind: Build\nmetadata: {name: api, namespace: team-a}\nspec:\n  source: {git: {url: https://github.com/acme/api, ref: main}}\n  builderRef: railpack\n```",
                 "properties": {
                   "builderRef": {
                     "description": "The `ClusterBuilder`.",
@@ -433,6 +433,36 @@
                   "source": {
                     "description": "Where the source comes from.",
                     "properties": {
+                      "archive": {
+                        "description": "An archive pushed as an OCI artifact to `<registry>/<namespace>/<name>/source`\n(`docs/archive-source.md`).",
+                        "nullable": true,
+                        "properties": {
+                          "contextDir": {
+                            "description": "The build context inside the archive.",
+                            "maxLength": 1024,
+                            "nullable": true,
+                            "pattern": "^[A-Za-z0-9_@+-][A-Za-z0-9._@+-]*(/[A-Za-z0-9_@+-][A-Za-z0-9._@+-]*)*$",
+                            "type": "string"
+                          },
+                          "digest": {
+                            "description": "The artifact's manifest digest.",
+                            "maxLength": 71,
+                            "pattern": "^sha256:[0-9a-f]{64}$",
+                            "type": "string"
+                          },
+                          "dockerfile": {
+                            "description": "The Dockerfile, relative to the context, for the `dockerfile` builder. Default\n`Dockerfile`.",
+                            "maxLength": 1024,
+                            "nullable": true,
+                            "pattern": "^[A-Za-z0-9_@+-][A-Za-z0-9._@+-]*(/[A-Za-z0-9_@+-][A-Za-z0-9._@+-]*)*$",
+                            "type": "string"
+                          }
+                        },
+                        "required": [
+                          "digest"
+                        ],
+                        "type": "object"
+                      },
                       "credentialsRef": {
                         "description": "Credentials for a plain Git server: a `kubernetes.io/ssh-auth` Secret (with `known_hosts`)\nor a `kubernetes.io/basic-auth` one, labelled `builder.zeabur.com/git-credentials: \"true\"`.",
                         "nullable": true,
@@ -451,6 +481,7 @@
                       },
                       "git": {
                         "description": "The Git repository.",
+                        "nullable": true,
                         "properties": {
                           "contextDir": {
                             "description": "The build context inside the repository, for monorepos.",
@@ -502,18 +533,23 @@
                         "type": "object"
                       }
                     },
-                    "required": [
-                      "git"
-                    ],
                     "type": "object",
                     "x-kubernetes-validations": [
+                      {
+                        "message": "set exactly one of git and archive",
+                        "rule": "has(self.git) != has(self.archive)"
+                      },
+                      {
+                        "message": "credentialsRef and githubApp need a git source",
+                        "rule": "has(self.git) || !(has(self.credentialsRef) || has(self.githubApp))"
+                      },
                       {
                         "message": "set at most one of credentialsRef and githubApp",
                         "rule": "!(has(self.credentialsRef) && has(self.githubApp))"
                       },
                       {
                         "message": "a githubApp source needs an https URL",
-                        "rule": "!has(self.githubApp) || self.git.url.startsWith('https://')"
+                        "rule": "!has(self.githubApp) || (has(self.git) && self.git.url.startsWith('https://'))"
                       }
                     ]
                   },
@@ -572,7 +608,13 @@
                   "builderRef",
                   "source"
                 ],
-                "type": "object"
+                "type": "object",
+                "x-kubernetes-validations": [
+                  {
+                    "message": "an archive source has no webhook trigger",
+                    "rule": "!has(self.source.archive) || !has(self.triggers.webhook)"
+                  }
+                ]
               },
               "status": {
                 "description": "What the controller knows about a `Build`.",
@@ -667,10 +709,10 @@
                     "type": "string"
                   },
                   "latestRevision": {
-                    "description": "The commit of the newest successful build.",
-                    "maxLength": 40,
+                    "description": "The commit or archive digest of the newest successful build.",
+                    "maxLength": 71,
                     "nullable": true,
-                    "pattern": "^[0-9a-f]{40}$",
+                    "pattern": "^([0-9a-f]{40}|sha256:[0-9a-f]{64})$",
                     "type": "string"
                   },
                   "observedGeneration": {
@@ -680,10 +722,10 @@
                     "type": "integer"
                   },
                   "remoteRevision": {
-                    "description": "The commit the ref points at.",
-                    "maxLength": 40,
+                    "description": "The commit the ref points at, or the archive's digest.",
+                    "maxLength": 71,
                     "nullable": true,
-                    "pattern": "^[0-9a-f]{40}$",
+                    "pattern": "^([0-9a-f]{40}|sha256:[0-9a-f]{64})$",
                     "type": "string"
                   },
                   "resolvedRef": {
@@ -696,7 +738,8 @@
                     "description": "How the source is reached.",
                     "enum": [
                       "GitHubApp",
-                      "PlainGit"
+                      "PlainGit",
+                      "Archive"
                     ],
                     "nullable": true,
                     "type": "string"
@@ -785,10 +828,10 @@
         "name": "v1alpha1",
         "schema": {
           "openAPIV3Schema": {
-            "description": "One build of one Git commit by Zeabur Builder.",
+            "description": "One build of one Git commit or uploaded archive by Zeabur Builder.",
             "properties": {
               "spec": {
-                "description": "One build of one commit. The spec is immutable: to build again, create another.",
+                "description": "One build of one commit or archive. The spec is immutable: to build again, create another.",
                 "properties": {
                   "buildRef": {
                     "description": "The `Build`.",
@@ -803,9 +846,9 @@
                     "type": "string"
                   },
                   "revision": {
-                    "description": "The full commit SHA.",
-                    "maxLength": 40,
-                    "pattern": "^[0-9a-f]{40}$",
+                    "description": "The full commit SHA of a Git source, or the manifest digest of an archive source.",
+                    "maxLength": 71,
+                    "pattern": "^([0-9a-f]{40}|sha256:[0-9a-f]{64})$",
                     "type": "string"
                   },
                   "trigger": {

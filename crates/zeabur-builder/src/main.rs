@@ -55,6 +55,13 @@ struct ControllerArgs {
     /// anonymous pushes.
     #[arg(long, env = "ZEABUR_BUILDER_REGISTRY_AUTH_PREFIX")]
     registry_auth_prefix: Option<String>,
+    /// The default registry's CA, PEM, when a public CA did not sign its certificate. The `fetch`
+    /// container of an archive source trusts it.
+    #[arg(long, env = "ZEABUR_BUILDER_REGISTRY_CA")]
+    registry_ca: Option<String>,
+    /// The default registry speaks plain HTTP. Only for a test cluster.
+    #[arg(long, env = "ZEABUR_BUILDER_REGISTRY_HTTP", default_value_t = false, action = clap::ArgAction::Set)]
+    registry_http: bool,
     /// The image of the Job's `fetch` and `build` containers.
     #[arg(long, env = "ZEABUR_BUILDER_JOB_IMAGE")]
     job_image: String,
@@ -160,6 +167,8 @@ impl ControllerArgs {
             max_concurrent: self.max_concurrent_builds,
             default_registry: self.default_registry,
             registry_auth_prefix: self.registry_auth_prefix,
+            registry_ca: self.registry_ca.filter(|ca| !ca.trim().is_empty()),
+            registry_http: self.registry_http,
             job_image: self.job_image,
             job_deadline_seconds: self.job_deadline,
             job_ttl_seconds: self.job_ttl,

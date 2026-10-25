@@ -453,18 +453,29 @@ pub(crate) fn resolved_message(git_ref: &str, resolved: Option<&str>, sha: &str)
     }
 }
 
-/// The tags of a run: the template's, then the extra ones.
+/// The `.Branch` of an archive source's tags.
+pub(crate) const ARCHIVE_BRANCH: &str = "archive";
+
+/// The tags of a run: the template's, then the extra ones. For an archive source, `.Branch` is
+/// [`ARCHIVE_BRANCH`] and `.SHA` the digest's hexadecimal part.
 pub(crate) fn tags(build: &Build, run: &BuildRun) -> Result<Vec<String>, TagError> {
     let output = build.spec.output.as_ref();
     let template = output
         .and_then(|o| o.tag_template.as_deref())
         .unwrap_or(tag::DEFAULT_TEMPLATE);
-    let git_ref = run
+    let branch = build
         .spec
-        .git_ref
-        .as_deref()
-        .unwrap_or(&build.spec.source.git.git_ref);
-    let branch = short_ref(git_ref);
+        .source
+        .git
+        .as_ref()
+        .map_or(ARCHIVE_BRANCH, |git| {
+            short_ref(run.spec.git_ref.as_deref().unwrap_or(&git.git_ref))
+        });
+    let sha = run
+        .spec
+        .revision
+        .strip_prefix("sha256:")
+        .unwrap_or(&run.spec.revision);
     let unix_time = run
         .metadata
         .creation_timestamp
@@ -474,7 +485,7 @@ pub(crate) fn tags(build: &Build, run: &BuildRun) -> Result<Vec<String>, TagErro
         template,
         &TagInputs {
             branch,
-            sha: &run.spec.revision,
+            sha,
             unix_time,
             build_run: run.metadata.name.as_deref().unwrap_or_default(),
         },

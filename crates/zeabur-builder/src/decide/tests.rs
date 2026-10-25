@@ -6,8 +6,8 @@ use k8s_openapi::api::core::v1::{
 };
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::Time;
 use zeabur_builder_api::build::{
-    BuildSpec, GitHubAppSource, GitSource, NotifyTarget, NotifyType, OutputSpec, SourceSpec,
-    TriggerSpec,
+    ArchiveSource, BuildSpec, GitHubAppSource, GitSource, NotifyTarget, NotifyType, OutputSpec,
+    SourceSpec, TriggerSpec,
 };
 use zeabur_builder_api::build_run::BuildRunSpec;
 
@@ -16,6 +16,12 @@ use super::*;
 const A: &str = "3e1a9c2d4f0b5a6c7d8e9f0a1b2c3d4e5f6a7b8c";
 const B: &str = "0123456789abcdef0123456789abcdef01234567";
 const DIGEST: &str = "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+
+fn set_ref(build: &mut Build, git_ref: &str) {
+    if let Some(git) = &mut build.spec.source.git {
+        git.git_ref = git_ref.to_owned();
+    }
+}
 
 fn now() -> Timestamp {
     "2026-10-22T08:00:00Z".parse().unwrap()
@@ -26,12 +32,13 @@ fn build() -> Build {
         "api",
         BuildSpec {
             source: SourceSpec {
-                git: GitSource {
+                git: Some(GitSource {
                     url: "https://github.com/acme/api".to_owned(),
                     git_ref: "main".to_owned(),
                     context_dir: None,
                     dockerfile: None,
-                },
+                }),
+                archive: None,
                 credentials_ref: None,
                 github_app: None,
             },
@@ -450,7 +457,7 @@ fn image_and_tags() {
         "registry.local:5000/team-a/api"
     );
     assert_eq!(tags(&build, &run).unwrap(), ["main-1761058800-3e1a9c2"]);
-    build.spec.source.git.git_ref = "refs/heads/feature/x".to_owned();
+    set_ref(&mut build, "refs/heads/feature/x");
     build.spec.output = Some(OutputSpec {
         image: Some("ghcr.io/acme/api".to_owned()),
         extra_tags: vec!["latest".to_owned()],
@@ -464,9 +471,22 @@ fn image_and_tags() {
 }
 
 #[test]
+fn archive_tags_use_the_digest() {
+    let mut build = build();
+    build.spec.source.git = None;
+    build.spec.source.archive = Some(ArchiveSource {
+        digest: DIGEST.to_owned(),
+        context_dir: None,
+        dockerfile: None,
+    });
+    let run = run("api-x7k2p", DIGEST, None, "2025-10-21T15:00:00Z");
+    assert_eq!(tags(&build, &run).unwrap(), ["archive-1761058800-0123456"]);
+}
+
+#[test]
 fn default_branch_tags_and_message() {
     let mut build = build();
-    build.spec.source.git.git_ref = "HEAD".to_owned();
+    set_ref(&mut build, "HEAD");
     let mut run = run("api-x7k2p", A, None, "2025-10-21T15:00:00Z");
     run.spec.git_ref = Some("refs/heads/master".to_owned());
     assert_eq!(tags(&build, &run).unwrap(), ["master-1761058800-3e1a9c2"]);

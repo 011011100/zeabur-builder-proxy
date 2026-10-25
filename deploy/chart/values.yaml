@@ -30,11 +30,12 @@ railpackFrontend: ghcr.io/railwayapp/railpack-frontend:v0.43.0
 registry:
   # Where images go when a Build names no image, such as zot.zot.svc:5000. Required.
   host: ""
-  # Each namespace pushes with the kubernetes.io/dockerconfigjson Secret <authPrefix><namespace>
-  # in this namespace, and its builds wait while it is missing. Empty: anonymous pushes, for a
+  # Each namespace pushes images and pulls archive sources with the kubernetes.io/dockerconfigjson
+  # Secret <authPrefix><namespace> in this namespace, and its builds wait while it is missing. Empty: anonymous pushes, for a
   # registry that takes them.
   authPrefix: registry-push-
-  # The CA that signed the registry's certificate (PEM), when a public CA did not.
+  # The CA that signed the registry's certificate (PEM), when a public CA did not. buildkitd and
+  # the archive download trust it.
   ca: ""
   # Copy the CA from a Secret at install time, such as the catalog Zot's zot-tls in zot. Used when
   # ca is empty. `helm template` cannot read the cluster and leaves it out.

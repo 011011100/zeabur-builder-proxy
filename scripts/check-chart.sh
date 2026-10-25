@@ -42,8 +42,8 @@ plain=$(helm template builder "$chart" "${base[@]}")
 require "$plain" "default install" 'name: dockerfile$' 'name: railpack$' 'name: buildkitd$' \
   'name: buildkitd-egress$' '- 169.254.0.0/16$' 'ghcr.io/railwayapp/railpack-frontend",$' \
   'image: "ghcr.io/zeabur-oss/builder:0.0.1"$' 'value: "registry-push-"'
-if grep -qE '^\s+\[registry\.' <<<"$plain"; then
-  echo "default install: buildkitd.toml has a registry section without http or a CA" >&2
+if grep -qE '^\s+\[registry\.|ZEABUR_BUILDER_REGISTRY_(CA|HTTP)' <<<"$plain"; then
+  echo "default install: the chart sets registry http or a CA that nobody asked for" >&2
   exit 1
 fi
 
@@ -54,9 +54,12 @@ pinned=$(helm template builder "$chart" "${base[@]}" --set image.digest="$digest
   --set registry.inCluster.namespace=zot --set registry.inCluster.podLabels.app=zot)
 require "$pinned" "pinned install" "image: \"ghcr.io/zeabur-oss/builder@$digest\"" \
   "value: \"ghcr.io/zeabur-oss/builder-job@$digest\"" "image: \"ghcr.io/zeabur-oss/builder-railpack@$digest\"" \
-  'ca = \["/etc/buildkit/registry-ca.crt"\]' 'registry-ca.crt: \|' 'kubernetes.io/metadata.name: zot'
+  'ca = \["/etc/buildkit/registry-ca.crt"\]' 'registry-ca.crt: \|' 'kubernetes.io/metadata.name: zot' \
+  'name: ZEABUR_BUILDER_REGISTRY_CA$' 'value: "CA"$'
 if grep -q ZEABUR_BUILDER_REGISTRY_AUTH_PREFIX <<<"$pinned"; then
   echo "pinned install: an empty registry.authPrefix still sets a prefix" >&2
   exit 1
 fi
+http=$(helm template builder "$chart" "${base[@]}" --set registry.http=true)
+require "$http" "plain HTTP registry" 'http = true$' 'name: ZEABUR_BUILDER_REGISTRY_HTTP, value: "true"'
 echo "chart ok"

@@ -9,8 +9,11 @@ pub const MAX_NAME: usize = 253;
 /// A Go duration as Kubernetes writes them, such as `90s`, `10m` or `1h30m`.
 pub const DURATION_PATTERN: &str = r"^([0-9]{1,6}(\.[0-9]{1,3})?(ms|s|m|h))+$";
 
-/// A full commit SHA.
-pub const REVISION_PATTERN: &str = "^[0-9a-f]{40}$";
+/// What a build built from: a full commit SHA, or an archive's manifest digest.
+pub const REVISION_PATTERN: &str = "^([0-9a-f]{40}|sha256:[0-9a-f]{64})$";
+
+/// The longest [`REVISION_PATTERN`] value.
+pub const MAX_REVISION: usize = 71;
 
 /// An OCI manifest digest.
 pub const DIGEST_PATTERN: &str = "^sha256:[0-9a-f]{64}$";

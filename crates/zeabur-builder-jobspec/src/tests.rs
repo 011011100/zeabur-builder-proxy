@@ -6,7 +6,7 @@ use std::collections::BTreeMap;
 
 use pretty_assertions::assert_eq;
 use zeabur_builder_api::build::{
-    BuildSpec, Concurrency, EnvVarSource, GitSource, SourceSpec, TriggerSpec,
+    ArchiveSource, BuildSpec, Concurrency, EnvVarSource, GitSource, SourceSpec, TriggerSpec,
 };
 use zeabur_builder_api::build_run::{BuildRunSpec, Trigger};
 use zeabur_builder_api::cluster_builder::{FrontendSpec, PlannerSpec};
@@ -15,6 +15,7 @@ use zeabur_builder_api::common::SecretKeyRef;
 use super::*;
 
 const SHA: &str = "3e1a9c2d4f0b5a6c7d8e9f0a1b2c3d4e5f6a7b8c";
+const DIGEST: &str = "sha256:5d2a8f1c0b9e7d6a4c3b2a1f0e9d8c7b6a5f4e3d2c1b0a9f8e7d6c5b4a3f2e1d";
 const RAILPACK: &str = "v0.43.0";
 
 fn build(url: &str, context_dir: Option<&str>, env: Vec<BuildEnvVar>) -> Build {
@@ -22,12 +23,13 @@ fn build(url: &str, context_dir: Option<&str>, env: Vec<BuildEnvVar>) -> Build {
         "api",
         BuildSpec {
             source: SourceSpec {
-                git: GitSource {
+                git: Some(GitSource {
                     url: url.to_owned(),
                     git_ref: "main".to_owned(),
                     context_dir: context_dir.map(str::to_owned),
                     dockerfile: None,
-                },
+                }),
+                archive: None,
                 credentials_ref: None,
                 github_app: None,
             },
@@ -43,6 +45,29 @@ fn build(url: &str, context_dir: Option<&str>, env: Vec<BuildEnvVar>) -> Build {
     );
     build.metadata.namespace = Some("team-a".to_owned());
     build
+}
+
+fn archive_build(namespace: &str) -> Build {
+    let mut build = build("https://unused.example", None, Vec::new());
+    build.spec.source = SourceSpec {
+        git: None,
+        archive: Some(ArchiveSource {
+            digest: DIGEST.to_owned(),
+            context_dir: Some("app".to_owned()),
+            dockerfile: None,
+        }),
+        credentials_ref: None,
+        github_app: None,
+    };
+    build.metadata.namespace = Some(namespace.to_owned());
+    build
+}
+
+fn archive_run(namespace: &str) -> BuildRun {
+    let mut run = build_run();
+    run.spec.revision = DIGEST.to_owned();
+    run.metadata.namespace = Some(namespace.to_owned());
+    run
 }
 
 fn build_run() -> BuildRun {
@@ -102,6 +127,9 @@ fn inputs<'a>(
         builder_name: name,
         builder,
         image: "registry.internal/team-a/api",
+        registry: "registry.internal",
+        registry_ca: None,
+        registry_http: false,
         tags,
         buildkitd_addr: "tcp://buildkitd-team-a-0.buildkitd-team-a.builder-system.svc:1234",
         job_image: "ghcr.io/zeabur-oss/builder-job:v0.0.1",
@@ -135,7 +163,9 @@ fn dockerfile_in_a_monorepo() {
         Some("services/api"),
         Vec::new(),
     );
-    build.spec.source.git.dockerfile = Some("docker/Dockerfile.prod".to_owned());
+    if let Some(git) = &mut build.spec.source.git {
+        git.dockerfile = Some("docker/Dockerfile.prod".to_owned());
+    }
     let builder = dockerfile();
     let tags = tags();
     let job = job(&inputs(
@@ -198,6 +228,107 @@ fn dockerfile_over_ssh() {
 }
 
 #[test]
+fn archive_with_a_private_registry_ca() {
+    let run = archive_run("team-a");
+    let build = archive_build("team-a");
+    let builder = dockerfile();
+    let tags = vec!["archive-1761058800-5d2a8f1".to_owned()];
+    let mut inputs = inputs(
+        &run,
+        &build,
+        "dockerfile",
+        &builder,
+        &tags,
+        GitAuth::Anonymous,
+    );
+    inputs.registry_ca = Some("-----BEGIN CERTIFICATE-----\nMIIB\n-----END CERTIFICATE-----\n");
+    golden(
+        "archive",
+        include_str!("../golden/archive.json"),
+        &job(&inputs).unwrap(),
+    );
+}
+
+/// The archive repository follows from the run's namespace and `Build`, whatever digest the run
+/// names, so a run in `team-b` with `team-a`'s digest reads `team-b`'s repository only.
+#[test]
+fn an_archive_is_read_only_from_the_runs_own_namespace() {
+    let builder = dockerfile();
+    let tags = tags();
+    for namespace in ["team-a", "team-b"] {
+        let run = archive_run(namespace);
+        let build = archive_build(namespace);
+        let job = job(&inputs(
+            &run,
+            &build,
+            "dockerfile",
+            &builder,
+            &tags,
+            GitAuth::Anonymous,
+        ))
+        .unwrap();
+        let pod = job.spec.unwrap().template.spec.unwrap();
+        let fetch = &pod.init_containers.unwrap()[0];
+        let command = fetch.command.as_ref().unwrap();
+        assert_eq!(
+            command[2..],
+            [
+                format!("registry.internal/{namespace}/api/source"),
+                DIGEST.to_owned(),
+                "/workspace/src".to_owned()
+            ]
+        );
+        let other = if namespace == "team-a" {
+            "team-b"
+        } else {
+            "team-a"
+        };
+        assert!(!command.iter().any(|arg| arg.contains(other)));
+        let auth = pod
+            .volumes
+            .unwrap()
+            .into_iter()
+            .find(|v| v.name == "registry-auth")
+            .unwrap();
+        assert_eq!(
+            auth.secret.unwrap().secret_name.as_deref(),
+            Some("api-x7k2p-registry")
+        );
+    }
+}
+
+#[test]
+fn a_revision_must_fit_the_source() {
+    let tags = tags();
+    let builder = dockerfile();
+    let build = build("https://github.com/acme/api", None, Vec::new());
+    let digest_run = archive_run("team-a");
+    assert_eq!(
+        job(&inputs(
+            &digest_run,
+            &build,
+            "dockerfile",
+            &builder,
+            &tags,
+            GitAuth::Anonymous
+        )),
+        Err(JobError::Revision(DIGEST.to_owned()))
+    );
+    let archive = archive_build("team-a");
+    assert_eq!(
+        job(&inputs(
+            &build_run(),
+            &archive,
+            "dockerfile",
+            &builder,
+            &tags,
+            GitAuth::Anonymous
+        )),
+        Err(JobError::Revision(SHA.to_owned()))
+    );
+}
+
+#[test]
 fn refuses_what_admission_should_have_caught() {
     let tags = tags();
     let builder = dockerfile();
@@ -216,7 +347,6 @@ fn refuses_what_admission_should_have_caught() {
         )),
         Err(JobError::Revision("main".to_owned()))
     );
-
     let run = build_run();
     for url in [
         "ext::sh -c id",

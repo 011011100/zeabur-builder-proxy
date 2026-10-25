@@ -2,7 +2,12 @@
 //!
 //! ```text
 //! zeabur-builder-job [--secrets-hash-env NAME]… [--non-root DIR] -- buildctl … build … [--then buildctl … build …]
+//! zeabur-builder-job fetch-archive [--plain-http] <repository> <digest> <dir>
 //! ```
+//!
+//! `fetch-archive` is the `fetch` container of an archive source: it pulls the archive
+//! ([`registry`]) and unpacks it into `<dir>` ([`unpack`]). It writes errors to stderr, which the
+//! controller shows as the run's message.
 //!
 //! Runs the `buildctl` commands it is given (built by `zeabur-builder-jobspec`) one after the
 //! other, prints their `rawjson` progress for people, counts cached steps, reads each digest from
@@ -20,6 +25,8 @@
 //! build's `DIR/non-root/Dockerfile`.
 
 mod progress;
+mod registry;
+mod unpack;
 
 use std::collections::BTreeMap;
 use std::io::{BufRead as _, BufReader, Write as _};
@@ -27,12 +34,17 @@ use std::process::{Command, ExitCode, Stdio};
 use std::time::Instant;
 
 use sha2::{Digest as _, Sha256};
+use zeabur_builder_core::archive::MAX_UNPACKED_BYTES;
 use zeabur_builder_core::progress::CacheCounter;
 use zeabur_builder_core::railpack;
 use zeabur_builder_core::result::{BuildResult, FailureReason, Outcome, PlanSource};
 
 const TERMINATION_LOG: &str = "/dev/termination-log";
+const WORKSPACE: &str = "/workspace";
 const OUT: &str = "/workspace/out";
+const PLAN: &str = "/workspace/plan";
+/// The registry's CA, PEM (`zeabur_builder_jobspec::REGISTRY_CA_ENV`).
+const REGISTRY_CA_ENV: &str = "ZB_REGISTRY_CA";
 /// In a command after `--then`, the digest of the command before it.
 const DIGEST: &str = "{digest}";
 
@@ -303,8 +315,88 @@ fn with_digest(command: &[String], previous: Option<&str>) -> Vec<String> {
     )
 }
 
+/// The arguments of `fetch-archive`.
+#[derive(Debug, PartialEq, Eq)]
+struct FetchArgs {
+    plain_http: bool,
+    repository: String,
+    digest: String,
+    dir: String,
+}
+
+fn parse_fetch(args: &[String]) -> Result<FetchArgs, String> {
+    let (plain_http, rest) = match args.split_first() {
+        Some((first, rest)) if first == "--plain-http" => (true, rest),
+        _ => (false, args),
+    };
+    let [repository, digest, dir] = rest else {
+        return Err("usage: fetch-archive [--plain-http] <repository> <digest> <dir>".to_owned());
+    };
+    Ok(FetchArgs {
+        plain_http,
+        repository: repository.clone(),
+        digest: digest.clone(),
+        dir: dir.clone(),
+    })
+}
+
+/// Pulls the archive, checks it, and unpacks it into `args.dir`.
+fn fetch_archive(args: &FetchArgs) -> Result<(), String> {
+    let start = Instant::now();
+    for dir in [OUT, PLAN] {
+        std::fs::create_dir_all(dir).map_err(|e| format!("cannot create {dir}: {e}"))?;
+    }
+    let host = args.repository.split('/').next().unwrap_or_default();
+    let config_path = format!(
+        "{}/config.json",
+        std::env::var("DOCKER_CONFIG").unwrap_or_default()
+    );
+    let basic = match std::fs::read(&config_path) {
+        Ok(config) => registry::basic_auth(&config, host)?,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+        Err(e) => return Err(format!("cannot read {config_path}: {e}")),
+    };
+    let ca = std::env::var(REGISTRY_CA_ENV).ok();
+    let client = registry::client(ca.as_deref())?;
+    let mut repository =
+        registry::Repository::new(client, &args.repository, args.plain_http, basic)?;
+    let file = std::path::Path::new(WORKSPACE).join("archive.tar.gz");
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .map_err(|e| e.to_string())?;
+    runtime.block_on(async {
+        let layer = repository.layer(&args.digest).await?;
+        repository.download(&layer, &file).await
+    })?;
+    let archive =
+        std::fs::File::open(&file).map_err(|e| format!("cannot open {}: {e}", file.display()))?;
+    unpack::unpack(
+        BufReader::new(archive),
+        std::path::Path::new(&args.dir),
+        MAX_UNPACKED_BYTES,
+    )?;
+    drop(std::fs::remove_file(&file));
+    std::fs::write(
+        format!("{OUT}/fetch.json"),
+        format!("{{\"fetch\":{}}}", start.elapsed().as_secs()),
+    )
+    .map_err(|e| format!("cannot write {OUT}/fetch.json: {e}"))
+}
+
 fn main() -> ExitCode {
     let raw: Vec<String> = std::env::args().skip(1).collect();
+    if let Some((first, rest)) = raw.split_first()
+        && first == "fetch-archive"
+    {
+        return match parse_fetch(rest).and_then(|args| fetch_archive(&args)) {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(message) => {
+                drop(writeln!(std::io::stderr().lock(), "{message}"));
+                ExitCode::FAILURE
+            }
+        };
+    }
     let result = match parse_args(&raw) {
         Ok(args) => run(&args),
         Err(message) => BuildResult {
@@ -381,6 +473,26 @@ mod tests {
         assert!(parse_args(&strings(&["--non-root"])).is_err());
         assert!(parse_args(&strings(&["--", "buildctl", "--then"])).is_err());
         assert!(parse_args(&strings(&["--", "--then", "buildctl"])).is_err());
+    }
+
+    #[test]
+    fn fetch_arguments() {
+        assert_eq!(
+            parse_fetch(&strings(&[
+                "--plain-http",
+                "r/a/b/source",
+                "sha256:00",
+                "/w/src"
+            ])),
+            Ok(FetchArgs {
+                plain_http: true,
+                repository: "r/a/b/source".to_owned(),
+                digest: "sha256:00".to_owned(),
+                dir: "/w/src".to_owned(),
+            })
+        );
+        assert!(parse_fetch(&strings(&["r/a/b/source", "sha256:00"])).is_err());
+        assert!(parse_fetch(&strings(&["--plain-http"])).is_err());
     }
 
     #[test]

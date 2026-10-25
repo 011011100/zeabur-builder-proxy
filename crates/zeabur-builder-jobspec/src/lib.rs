@@ -5,7 +5,7 @@
 //!
 //! | container | image | does |
 //! |---|---|---|
-//! | `fetch` (init) | job image | `git fetch --depth=1 <url> <sha>` into `/workspace/src`, then checks `HEAD` |
+//! | `fetch` (init) | job image | `git fetch --depth=1 <url> <sha>` into `/workspace/src`, then checks `HEAD`; for an archive source, `zeabur-builder-job fetch-archive` |
 //! | `plan` (init) | planner image | Railpack writes `/workspace/plan`; absent for `dockerfile` |
 //! | `build` | job image | `zeabur-builder-job -- buildctl build …` |
 //!
@@ -19,6 +19,10 @@
 //! the progress for people, counts cached steps, reads the image digest from `--metadata-file`
 //! and writes the termination message ([`zeabur_builder_core::result`]). The `buildctl`
 //! arguments are built here, so they are reviewed and tested with the rest of the Job.
+//!
+//! An archive source is fetched from [`archive::repository`] of the run's own namespace and
+//! `Build`, with the namespace's push credentials, the registry's CA and the run's digest. The
+//! `Build` names no repository, so a run never reads another namespace's archive.
 //!
 //! Every user-controlled value (URL, revision, paths, variable names) reaches a shell only as a
 //! positional parameter (`"$1"`), never inside the script text, and has `$` doubled, because the
@@ -43,8 +47,9 @@ use zeabur_builder_api::build::{Build, EnvVar as BuildEnvVar};
 use zeabur_builder_api::build_run::BuildRun;
 use zeabur_builder_api::cluster_builder::{BuilderType, ClusterBuilderSpec, FrontendType};
 use zeabur_builder_api::{annotations, labels};
-use zeabur_builder_core::is_commit_sha;
 use zeabur_builder_core::repo::{RepoKey, RepoUrlError};
+use zeabur_builder_core::result::is_digest;
+use zeabur_builder_core::{archive, is_commit_sha};
 
 /// The user the Pod runs as; `moby/buildkit` would otherwise run as root.
 pub const RUN_AS: i64 = 1000;
@@ -56,6 +61,8 @@ const OUT: &str = "/workspace/out";
 const GIT_CREDENTIALS: &str = "/etc/zeabur-builder/git";
 const BUILDKIT_TLS: &str = "/etc/zeabur-builder/buildkit";
 const REGISTRY_AUTH: &str = "/etc/zeabur-builder/registry";
+/// The registry's CA, PEM, in the `fetch` container of an archive source.
+pub const REGISTRY_CA_ENV: &str = "ZB_REGISTRY_CA";
 /// Prefix of the build container's variables that carry `Build.spec.env`, so a variable named
 /// `PATH` or `BUILDKIT_HOST` cannot change how `buildctl` runs.
 const SECRET_ENV_PREFIX: &str = "ZB_SECRET_";
@@ -91,6 +98,12 @@ pub struct JobInputs<'a> {
     pub builder: &'a ClusterBuilderSpec,
     /// The image repository to push to, without a tag.
     pub image: &'a str,
+    /// The default registry, which holds the archives of archive sources.
+    pub registry: &'a str,
+    /// The default registry's CA, PEM, when a public CA did not sign its certificate.
+    pub registry_ca: Option<&'a str>,
+    /// Whether the default registry speaks plain HTTP. Only for a test cluster.
+    pub registry_http: bool,
     /// The rendered tags, the first one from the template.
     pub tags: &'a [String],
     /// The namespace's buildkitd, `tcp://buildkitd-<ns>-0.buildkitd-<ns>.<builder ns>.svc:1234`.
@@ -121,9 +134,12 @@ pub enum JobError {
     /// No tag to push.
     #[error("no tags to push")]
     NoTags,
-    /// The revision is not a full commit SHA.
-    #[error("the revision `{0}` is not a full commit SHA")]
+    /// The revision is not a full commit SHA for a Git source, or not a digest for an archive.
+    #[error("the revision `{0}` does not fit the source")]
     Revision(String),
+    /// The `Build` sets neither `git` nor `archive`.
+    #[error("the Build has no source")]
+    NoSource,
     /// The repository URL is not one `fetch` may use.
     #[error(transparent)]
     Url(#[from] RepoUrlError),
@@ -155,10 +171,13 @@ pub fn job(inputs: &JobInputs<'_>) -> Result<Job, JobError> {
         return Err(JobError::NoTags);
     }
     let revision = &inputs.build_run.spec.revision;
-    if !is_commit_sha(revision) {
-        return Err(JobError::Revision(revision.clone()));
-    }
-    let repo = RepoKey::parse(&inputs.build.spec.source.git.url)?;
+    let source = &inputs.build.spec.source;
+    let repo = match (&source.git, &source.archive) {
+        (Some(git), _) if is_commit_sha(revision) => Some(RepoKey::parse(&git.url)?),
+        (None, Some(_)) if is_digest(revision) => None,
+        (None, None) => return Err(JobError::NoSource),
+        _ => return Err(JobError::Revision(revision.clone())),
+    };
 
     let labels = BTreeMap::from([
         (
@@ -171,7 +190,11 @@ pub fn job(inputs: &JobInputs<'_>) -> Result<Job, JobError> {
     ]);
     let annotations = BTreeMap::from([(annotations::REVISION.to_owned(), revision.clone())]);
 
-    let mut init_containers = vec![fetch_container(inputs)];
+    let fetch = source.git.as_ref().map_or_else(
+        || archive_container(inputs, namespace),
+        |git| fetch_container(inputs, &git.url),
+    );
+    let mut init_containers = vec![fetch];
     if let Some(plan) = plan_container(inputs)? {
         init_containers.push(plan);
     }
@@ -192,7 +215,7 @@ pub fn job(inputs: &JobInputs<'_>) -> Result<Job, JobError> {
             ..PodSecurityContext::default()
         }),
         init_containers: Some(init_containers),
-        containers: vec![build_container(inputs, &repo)?],
+        containers: vec![build_container(inputs, repo.as_ref())?],
         volumes: Some(volumes(inputs)),
         ..PodSpec::default()
     };
@@ -251,8 +274,7 @@ test "$(git -C /workspace/src rev-parse HEAD)" = "$2"
 echo "{\"fetch\":$(( $(date +%s) - start ))}" > /workspace/out/fetch.json
 "#;
 
-fn fetch_container(inputs: &JobInputs<'_>) -> Container {
-    let git = &inputs.build.spec.source.git;
+fn fetch_container(inputs: &JobInputs<'_>, url: &str) -> Container {
     let mut mounts = workspace_mounts();
     if !matches!(inputs.git_auth, GitAuth::Anonymous) {
         mounts.push(mount("git-credentials", GIT_CREDENTIALS));
@@ -266,10 +288,7 @@ fn fetch_container(inputs: &JobInputs<'_>) -> Container {
             FETCH_SCRIPT.to_owned(),
             "fetch".to_owned(),
         ]),
-        args: Some(vec![
-            literal(&git.url),
-            inputs.build_run.spec.revision.clone(),
-        ]),
+        args: Some(vec![literal(url), inputs.build_run.spec.revision.clone()]),
         env: Some(vec![
             env("HOME", "/tmp"),
             env("GIT_TERMINAL_PROMPT", "0"),
@@ -279,6 +298,37 @@ fn fetch_container(inputs: &JobInputs<'_>) -> Container {
         ]),
         volume_mounts: Some(mounts),
         // Git's error is on stderr; the controller shows its last lines as the run's message.
+        termination_message_policy: Some("FallbackToLogsOnError".to_owned()),
+        ..hardened()
+    }
+}
+
+/// Fetches the run's archive from the repository of its own namespace and `Build`, with the
+/// namespace's push credentials, into `/workspace/src`.
+fn archive_container(inputs: &JobInputs<'_>, namespace: &str) -> Container {
+    let repository =
+        archive::repository(inputs.registry, namespace, &inputs.build_run.spec.build_ref);
+    let mut command = vec!["zeabur-builder-job".to_owned(), "fetch-archive".to_owned()];
+    if inputs.registry_http {
+        command.push("--plain-http".to_owned());
+    }
+    command.extend([
+        literal(&repository),
+        inputs.build_run.spec.revision.clone(),
+        SRC.to_owned(),
+    ]);
+    let mut env_vars = vec![env("HOME", "/tmp"), env("DOCKER_CONFIG", REGISTRY_AUTH)];
+    if let Some(ca) = inputs.registry_ca {
+        env_vars.push(env(REGISTRY_CA_ENV, &literal(ca)));
+    }
+    let mut mounts = workspace_mounts();
+    mounts.push(mount("registry-auth", REGISTRY_AUTH));
+    Container {
+        name: "fetch".to_owned(),
+        image: Some(inputs.job_image.to_owned()),
+        command: Some(command),
+        env: Some(env_vars),
+        volume_mounts: Some(mounts),
         termination_message_policy: Some("FallbackToLogsOnError".to_owned()),
         ..hardened()
     }
@@ -338,7 +388,7 @@ fn plan_container(inputs: &JobInputs<'_>) -> Result<Option<Container>, JobError>
     }))
 }
 
-fn build_container(inputs: &JobInputs<'_>, repo: &RepoKey) -> Result<Container, JobError> {
+fn build_container(inputs: &JobInputs<'_>, repo: Option<&RepoKey>) -> Result<Container, JobError> {
     let context = context_path(inputs);
     let non_root = non_root(inputs.builder);
     let mut wrapper = vec!["zeabur-builder-job".to_owned()];
@@ -414,7 +464,7 @@ fn buildctl(inputs: &JobInputs<'_>, metadata: &str) -> Vec<String> {
 /// The second build: the Railpack image, pushed by digest only, made to run as
 /// [`IMAGE_UID`](zeabur_builder_core::railpack::IMAGE_UID) by the Dockerfile `zeabur-builder-job
 /// --non-root` writes, and pushed with the tags. `{digest}` is the first build's digest.
-fn non_root_build(inputs: &JobInputs<'_>, repo: &RepoKey) -> Vec<String> {
+fn non_root_build(inputs: &JobInputs<'_>, repo: Option<&RepoKey>) -> Vec<String> {
     let dir = format!("{PLAN}/non-root");
     let mut buildctl = buildctl(inputs, &format!("{OUT}/metadata.json"));
     buildctl.extend([
@@ -439,10 +489,14 @@ fn frontend_args(
     buildctl: &mut Vec<String>,
 ) -> Result<(), JobError> {
     let builder = inputs.builder;
-    let git = &inputs.build.spec.source.git;
     match (builder.frontend.kind, builder.kind) {
         (FrontendType::Dockerfile, BuilderType::Dockerfile) => {
-            let path = git.dockerfile.as_deref().unwrap_or("Dockerfile");
+            let path = inputs
+                .build
+                .spec
+                .source
+                .dockerfile()
+                .unwrap_or("Dockerfile");
             let (dir, file) = path
                 .rsplit_once('/')
                 .map_or((None, path), |(d, f)| (Some(d), f));
@@ -500,7 +554,7 @@ fn tagged(inputs: &JobInputs<'_>) -> Vec<String> {
 /// `--output`, pushing `names`; `by_digest` pushes the image without a tag.
 fn output(
     inputs: &JobInputs<'_>,
-    repo: &RepoKey,
+    repo: Option<&RepoKey>,
     names: &[String],
     by_digest: bool,
 ) -> [String; 2] {
@@ -514,14 +568,16 @@ fn output(
     if by_digest {
         output.push("push-by-digest=true".to_owned());
     }
-    output.extend([
-        "oci-mediatypes=true".to_owned(),
-        format!("annotation.org.opencontainers.image.source=https://{repo}"),
-        format!(
-            "annotation.org.opencontainers.image.revision={}",
-            inputs.build_run.spec.revision
-        ),
-    ]);
+    output.push("oci-mediatypes=true".to_owned());
+    if let Some(repo) = repo {
+        output.push(format!(
+            "annotation.org.opencontainers.image.source=https://{repo}"
+        ));
+    }
+    output.extend([format!(
+        "annotation.org.opencontainers.image.revision={}",
+        inputs.build_run.spec.revision
+    )]);
     [
         "--output".to_owned(),
         output
@@ -578,9 +634,7 @@ fn context_path(inputs: &JobInputs<'_>) -> String {
         .build
         .spec
         .source
-        .git
-        .context_dir
-        .as_deref()
+        .context_dir()
         .map(|d| d.trim_matches('/'))
     {
         None | Some("" | ".") => SRC.to_owned(),

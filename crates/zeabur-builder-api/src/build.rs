@@ -10,7 +10,8 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 use crate::common::{
-    Condition, DURATION_PATTERN, MAX_NAME, REVISION_PATTERN, SecretKeyRef, SecretRef,
+    Condition, DIGEST_PATTERN, DURATION_PATTERN, MAX_NAME, MAX_REVISION, REVISION_PATTERN,
+    SecretKeyRef, SecretRef,
 };
 
 /// Longest repository URL.
@@ -39,7 +40,7 @@ pub const MAX_CONDITIONS: usize = 8;
 pub const RELATIVE_PATH_PATTERN: &str =
     r"^[A-Za-z0-9_@+-][A-Za-z0-9._@+-]*(/[A-Za-z0-9_@+-][A-Za-z0-9._@+-]*)*$";
 
-/// A Git ref to follow and the image to keep built from it.
+/// A Git ref to follow, or an uploaded archive, and the image to keep built from it.
 ///
 /// ```yaml
 /// apiVersion: builder.zeabur.com/v1alpha1
@@ -85,7 +86,10 @@ pub const RELATIVE_PATH_PATTERN: &str =
         type_ = "date",
         json_path = ".metadata.creationTimestamp"
     ),
-    doc = "A Git ref that Zeabur Builder keeps built into a container image."
+    doc = "A Git ref or an uploaded archive that Zeabur Builder keeps built into a container image."
+)]
+#[x_kube(
+    validation = Rule::new("!has(self.source.archive) || !has(self.triggers.webhook)").message("an archive source has no webhook trigger")
 )]
 #[serde(rename_all = "camelCase")]
 pub struct BuildSpec {
@@ -120,16 +124,23 @@ pub struct BuildSpec {
     pub suspend: bool,
 }
 
-/// The source.
+/// The source: a Git repository or an uploaded archive.
 #[derive(KubeSchema, Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
 #[x_kube(
+    validation = Rule::new("has(self.git) != has(self.archive)").message("set exactly one of git and archive"),
+    validation = Rule::new("has(self.git) || !(has(self.credentialsRef) || has(self.githubApp))").message("credentialsRef and githubApp need a git source"),
     validation = Rule::new("!(has(self.credentialsRef) && has(self.githubApp))").message("set at most one of credentialsRef and githubApp"),
-    validation = Rule::new("!has(self.githubApp) || self.git.url.startsWith('https://')").message("a githubApp source needs an https URL"),
+    validation = Rule::new("!has(self.githubApp) || (has(self.git) && self.git.url.startsWith('https://'))").message("a githubApp source needs an https URL"),
 )]
 #[serde(rename_all = "camelCase")]
 pub struct SourceSpec {
     /// The Git repository.
-    pub git: GitSource,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub git: Option<GitSource>,
+    /// An archive pushed as an OCI artifact to `<registry>/<namespace>/<name>/source`
+    /// (`docs/archive-source.md`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub archive: Option<ArchiveSource>,
     /// Credentials for a plain Git server: a `kubernetes.io/ssh-auth` Secret (with `known_hosts`)
     /// or a `kubernetes.io/basic-auth` one, labelled `builder.zeabur.com/git-credentials: "true"`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -170,6 +181,47 @@ pub struct GitSource {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schemars(length(max = MAX_PATH), regex(pattern = RELATIVE_PATH_PATTERN))]
     pub dockerfile: Option<String>,
+}
+
+/// An uploaded archive. The repository follows from the `Build`'s namespace and name, so a
+/// `Build` reads only its own archives.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct ArchiveSource {
+    /// The artifact's manifest digest.
+    #[schemars(length(max = 71), regex(pattern = DIGEST_PATTERN))]
+    pub digest: String,
+    /// The build context inside the archive.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(length(max = MAX_PATH), regex(pattern = RELATIVE_PATH_PATTERN))]
+    pub context_dir: Option<String>,
+    /// The Dockerfile, relative to the context, for the `dockerfile` builder. Default
+    /// `Dockerfile`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(length(max = MAX_PATH), regex(pattern = RELATIVE_PATH_PATTERN))]
+    pub dockerfile: Option<String>,
+}
+
+impl SourceSpec {
+    /// The build context inside the source.
+    #[must_use]
+    pub fn context_dir(&self) -> Option<&str> {
+        match (&self.git, &self.archive) {
+            (Some(git), _) => git.context_dir.as_deref(),
+            (None, Some(archive)) => archive.context_dir.as_deref(),
+            (None, None) => None,
+        }
+    }
+
+    /// The Dockerfile, relative to the context.
+    #[must_use]
+    pub fn dockerfile(&self) -> Option<&str> {
+        match (&self.git, &self.archive) {
+            (Some(git), _) => git.dockerfile.as_deref(),
+            (None, Some(archive)) => archive.dockerfile.as_deref(),
+            (None, None) => None,
+        }
+    }
 }
 
 fn default_ref() -> String {
@@ -296,12 +348,12 @@ pub struct BuildStatus {
     /// The generation last acted on.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub observed_generation: Option<i64>,
-    /// `GitHubApp` or `PlainGit`.
+    /// `GitHubApp`, `PlainGit` or `Archive`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source_mode: Option<SourceMode>,
-    /// The commit the ref points at.
+    /// The commit the ref points at, or the archive's digest.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[schemars(length(max = 40), regex(pattern = REVISION_PATTERN))]
+    #[schemars(length(max = MAX_REVISION), regex(pattern = REVISION_PATTERN))]
     pub remote_revision: Option<String>,
     /// The full name of the ref `remoteRevision` came from, such as `refs/heads/master` when
     /// `ref` is `HEAD`.
@@ -317,9 +369,9 @@ pub struct BuildStatus {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schemars(extend("format" = "date-time"))]
     pub last_webhook_at: Option<String>,
-    /// The commit of the newest successful build.
+    /// The commit or archive digest of the newest successful build.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[schemars(length(max = 40), regex(pattern = REVISION_PATTERN))]
+    #[schemars(length(max = MAX_REVISION), regex(pattern = REVISION_PATTERN))]
     pub latest_revision: Option<String>,
     /// Its image, `<repository>:<tag>@<digest>`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -346,4 +398,6 @@ pub enum SourceMode {
     GitHubApp,
     /// Over plain Git.
     PlainGit,
+    /// From an uploaded archive.
+    Archive,
 }

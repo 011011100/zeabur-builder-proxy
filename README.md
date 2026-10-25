@@ -36,6 +36,8 @@ For every new commit on the ref, the controller builds an image, pushes it to
   `RUN --mount=type=cache` keeps its contents. An idle buildkitd scales to zero after 10 minutes.
 - **Build variables as secrets.** `spec.env` reaches the build as BuildKit secrets, from a value
   or a Secret key.
+- **Uploaded folders.** `spec.source.archive` builds a folder that a client pushed to the
+  registry as an OCI artifact, by digest ([docs/archive-source.md](docs/archive-source.md)).
 - **Small.** One controller, a buildkitd per building namespace, one Job per build, three custom
   resources. The Job runs `buildctl` and needs no privileges.
 
@@ -147,7 +149,7 @@ helm install builder oci://ghcr.io/zeabur-oss/charts/zeabur-builder --version <v
 - `registry.host`: where images go, as `<host>/<namespace>/<build>`.
 - `registry.authPrefix`: for each namespace that builds, create a
   `kubernetes.io/dockerconfigjson` Secret named `registry-push-<namespace>` in `builder-system`,
-  allowed to push below `<registry>/<namespace>/`. Set it to `""` for a registry that takes
+  allowed to push below `<registry>/<namespace>/`. Archive sources are read with it too. Set it to `""` for a registry that takes
   anonymous pushes.
 - `registry.ca` or `registry.caFrom`: the CA of a registry with a private certificate.
 - `registry.inCluster`: the registry's namespace, Pod labels and port, when it runs in the
@@ -187,8 +189,8 @@ cosign verify ghcr.io/zeabur-oss/builder@sha256:<digest> \
 
 Zeabur Builder has no release yet. The API is `v1alpha1`.
 
-On a k3s 1.36 cluster, with `scripts/deploy-example.sh` and `scripts/example-isolation.sh` (CI runs
-both, `scripts/ci.sh kubernetes`):
+On a k3s 1.36 cluster, with `scripts/deploy-example.sh`, `scripts/example-isolation.sh` and
+`scripts/example-archive.sh` (CI runs them, `scripts/ci.sh kubernetes`):
 
 - Dockerfile and Railpack builds of public repositories, started by polling.
 - Failures for a missing ref and a missing Dockerfile, in `SourceReady` and the `BuildRun`.
@@ -196,6 +198,8 @@ both, `scripts/ci.sh kubernetes`):
 - Isolation between namespaces: another namespace's client certificate, registry path and Pods
   are refused. `RUN` reaches the internet and the registry; it cannot reach Services, the
   Kubernetes API or `169.254.169.254`.
+- An archive source built from its digest; the same digest in a `Build` of another namespace or
+  of another name fails at the source.
 
 In unit tests, and against a local SSH server for SSH: private repositories with
 `credentialsRef`, push webhooks for every provider, the GitHub App, Keel notifications and

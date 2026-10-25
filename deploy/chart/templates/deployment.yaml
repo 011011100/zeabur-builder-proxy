@@ -47,6 +47,13 @@ spec:
             {{- with .Values.registry.authPrefix }}
             - {name: ZEABUR_BUILDER_REGISTRY_AUTH_PREFIX, value: {{ . | quote }}}
             {{- end }}
+            {{- with include "builder.registryCA" . }}
+            - name: ZEABUR_BUILDER_REGISTRY_CA
+              value: {{ . | quote }}
+            {{- end }}
+            {{- if .Values.registry.http }}
+            - {name: ZEABUR_BUILDER_REGISTRY_HTTP, value: "true"}
+            {{- end }}
             {{- if .Values.webhooks.enabled }}
           ports:
             - {name: webhooks, containerPort: {{ .Values.webhooks.port }}}
