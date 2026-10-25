@@ -1,6 +1,6 @@
 {
   "$schema": "https://docs.renovatebot.com/renovate-schema.json",
-  "description": "Cargo crates and action digests. The Rust nightly and flake.lock are updated by .github/workflows/update-toolchain.yml, which also has to update the fenix hash in flake.nix.",
+  "description": "Cargo crates and action digests. Lock file maintenance also updates flake.lock, and with it the Rust nightly.",
   "extends": [
     "config:recommended",
     ":semanticCommitTypeAll(chore)",
@@ -16,7 +16,8 @@
   "commitBody": "Signed-off-by: renovate[bot] <29139614+renovate[bot]@users.noreply.github.com>",
   "enabledManagers": [
     "cargo",
-    "github-actions"
+    "github-actions",
+    "nix"
   ],
   "minimumReleaseAge": "7 days",
   "internalChecksFilter": "strict",

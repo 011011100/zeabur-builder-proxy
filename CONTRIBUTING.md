@@ -58,8 +58,9 @@ functions of their inputs, so they are tested without a cluster.
 
 Shared with [Zeabur Identity](https://github.com/zeabur-oss/identity):
 
-- `rust-toolchain.toml` is the only place the compiler version is set; `scripts/bump-toolchain.sh`
-  also updates the hash in `flake.nix`.
+- `flake.lock` is the only place the compiler version is set: the newest nightly in the locked
+  rust-overlay that has every component and target listed in `flake.nix`. Renovate's lock file
+  maintenance (`renovate.json`) moves it every Monday.
 - `nix develop` sets `RUSTC_WRAPPER=kache`, a compiler cache (https://github.com/kunobi-ninja/kache)
   shared by every checkout and worktree on the machine. `scripts/build-images.sh` turns it off, so
   image binaries are always compiled. kache is pinned to a release tag in `flake.nix`.

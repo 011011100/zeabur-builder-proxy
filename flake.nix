@@ -3,14 +3,16 @@
 
   inputs = {
     nixpkgs.url = "https://flakehub.com/f/NixOS/nixpkgs/0.1"; # unstable Nixpkgs
-    fenix = {
-      url = "https://flakehub.com/f/nix-community/fenix/0.1";
+    # Rust toolchains. The locked revision sets the nightly (overlays.default).
+    rust-overlay = {
+      url = "https://flakehub.com/f/oxalica/rust-overlay/0.1";
       inputs.nixpkgs.follows = "nixpkgs";
     };
     # Compiler cache, built from source at a release tag.
     kache = {
       url = "github:kunobi-ninja/kache/v1.2.2";
       inputs.nixpkgs.follows = "nixpkgs";
+      inputs.rust-overlay.follows = "rust-overlay";
     };
   };
 
@@ -32,7 +34,8 @@
             pkgs = import inputs.nixpkgs {
               inherit system;
               overlays = [
-                inputs.kache.overlays.default
+                inputs.rust-overlay.overlays.default
+                inputs.kache.overlays.kache
                 inputs.self.overlays.default
               ];
             };
@@ -41,11 +44,22 @@
     in
     {
       overlays.default = final: prev: {
-        # rust-toolchain.toml is the only place the Rust version is set.
-        rustToolchain = inputs.fenix.packages.${prev.stdenv.hostPlatform.system}.fromToolchainFile {
-          file = ./rust-toolchain.toml;
-          sha256 = "sha256-ackdOtCWk+NYS4SXZE1LZolba9ZfGWmu+4GhiK2Fq9E=";
-        };
+        # The newest nightly in the locked rust-overlay that has all these components and targets.
+        rustToolchain = final.rust-bin.selectLatestNightlyWith (
+          toolchain:
+          toolchain.minimal.override {
+            extensions = [
+              "rustfmt"
+              "clippy"
+              "rust-src"
+              "rust-analyzer"
+            ];
+            targets = [
+              "x86_64-unknown-linux-musl"
+              "aarch64-unknown-linux-musl"
+            ];
+          }
+        );
         # kache's own CI tests each release. Its 4,500 tests take 6 min here and some are timing-sensitive.
         kache = prev.kache.overrideAttrs { doCheck = false; };
       };
