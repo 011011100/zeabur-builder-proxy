@@ -251,9 +251,6 @@ pub struct OutputSpec {
         inner(length(max = 128), regex(pattern = r"^[A-Za-z0-9_][A-Za-z0-9._-]{0,127}$"))
     )]
     pub extra_tags: Vec<String>,
-    /// A `kubernetes.io/dockerconfigjson` Secret to push with instead of the controller's.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub push_secret_ref: Option<SecretRef>,
 }
 
 /// A build variable.
