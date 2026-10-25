@@ -38,6 +38,9 @@ use sha2::{Digest as _, Sha256};
 use zeabur_builder_core::archive::{self, Layer, MANIFEST_MEDIA_TYPE, MAX_MANIFEST_BYTES};
 
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
+/// A network policy can admit a new Pod some seconds after it starts, and refuse it until then.
+const CONNECT_RETRY: Duration = Duration::from_secs(1);
+const CONNECT_RETRIES: u32 = 30;
 const MAX_REDIRECTS: usize = 5;
 const MAX_TOKEN_BYTES: u64 = 1 << 20;
 const USER_AGENT: &str = concat!("zeabur-builder-job/", env!("CARGO_PKG_VERSION"));
@@ -242,23 +245,29 @@ impl Repository {
         accept: Option<&str>,
         authorization: Option<&str>,
     ) -> Result<Response<Incoming>, String> {
-        let mut request = Request::get(url).header(header::USER_AGENT, USER_AGENT);
-        if let Some(accept) = accept {
-            request = request.header(header::ACCEPT, accept);
+        let mut retries = 0;
+        loop {
+            let mut request = Request::get(url).header(header::USER_AGENT, USER_AGENT);
+            if let Some(accept) = accept {
+                request = request.header(header::ACCEPT, accept);
+            }
+            if let Some(value) = authorization {
+                let mut value =
+                    HeaderValue::from_str(value).map_err(|_e| "invalid credentials".to_owned())?;
+                value.set_sensitive(true);
+                request = request.header(header::AUTHORIZATION, value);
+            }
+            let request = request
+                .body(Empty::new())
+                .map_err(|e| format!("{url}: {e}"))?;
+            match self.client.request(request).await {
+                Err(e) if e.is_connect() && retries < CONNECT_RETRIES => {
+                    retries += 1;
+                    tokio::time::sleep(CONNECT_RETRY).await;
+                }
+                answer => return answer.map_err(|e| format!("{url}: {e:?}")),
+            }
         }
-        if let Some(value) = authorization {
-            let mut value =
-                HeaderValue::from_str(value).map_err(|_e| "invalid credentials".to_owned())?;
-            value.set_sensitive(true);
-            request = request.header(header::AUTHORIZATION, value);
-        }
-        let request = request
-            .body(Empty::new())
-            .map_err(|e| format!("{url}: {e}"))?;
-        self.client
-            .request(request)
-            .await
-            .map_err(|e| format!("{url}: {e:?}"))
     }
 
     /// GETs `/v2/<name>/<path>`, with a pull token if the registry asks for one, following
@@ -552,6 +561,10 @@ mod tests {
 
     async fn serve(manifest: Vec<u8>, blob: Vec<u8>) -> SocketAddr {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        serve_on(listener, manifest, blob)
+    }
+
+    fn serve_on(listener: tokio::net::TcpListener, manifest: Vec<u8>, blob: Vec<u8>) -> SocketAddr {
         let addr = listener.local_addr().unwrap();
         let fake = Arc::new(Fake {
             manifest,
@@ -642,5 +655,26 @@ mod tests {
         let other = sha256(b"another manifest");
         assert!(pull(honest, &other, &to).await.is_err());
         assert!(!to.exists());
+    }
+
+    #[tokio::test]
+    async fn waits_for_a_registry_that_refuses_connections_at_first() {
+        let blob = b"the archive".to_vec();
+        let manifest = manifest(&blob);
+        let digest = sha256(&manifest);
+        let addr = std::net::TcpListener::bind("127.0.0.1:0")
+            .unwrap()
+            .local_addr()
+            .unwrap();
+        let late = blob.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_secs(2)).await;
+            let listener = tokio::net::TcpListener::bind(addr).await.unwrap();
+            serve_on(listener, manifest, late);
+        });
+        let to = scratch("late");
+        pull(addr, &digest, &to).await.unwrap();
+        assert_eq!(std::fs::read(&to).unwrap(), blob);
+        std::fs::remove_file(&to).unwrap();
     }
 }
