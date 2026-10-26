@@ -1,0 +1,125 @@
+# Zeabur Builder: the controller, the shared config and egress policy of each namespace's
+# buildkitd, and the `dockerfile` and `railpack` ClusterBuilders. Helm installs the CRDs in crds/
+# on the first install only; on an upgrade, apply crds/crds.yaml first.
+
+image:
+  # Published for linux/amd64 and linux/arm64 by the release workflow, signed.
+  repository: ghcr.io/zeabur-oss/builder
+  # Defaults to the chart's appVersion. Ignored when digest is set.
+  tag: ""
+  # The image by content: sha256:<64 hex digits>. A released chart sets it to the image index
+  # published with it.
+  digest: ""
+  pullPolicy: IfNotPresent
+
+# The build Job's image: buildctl, git and ssh. Same tag and digest rules as image.
+jobImage:
+  repository: ghcr.io/zeabur-oss/builder-job
+  tag: ""
+  digest: ""
+
+# The planner of the `railpack` ClusterBuilder. Same tag and digest rules as image.
+railpackImage:
+  repository: ghcr.io/zeabur-oss/builder-railpack
+  tag: ""
+  digest: ""
+
+# The Railpack frontend. Its version must match the railpack in railpackImage.
+railpackFrontend: ghcr.io/railwayapp/railpack-frontend:v0.43.0
+
+# Each namespace's buildkitd, rootful. The admission policy below allows only this image.
+buildkitdImage: docker.io/moby/buildkit:v0.34.1@sha256:99368f3e46177c6405b9740e4461d91cee004128daeecca78d4ceac50ec1da5c
+
+# A ValidatingAdmissionPolicy that limits what the controller's ServiceAccount may create: Jobs
+# only in the shape of a build Job, and StatefulSets only with buildkitdImage, in this namespace.
+# Read or change it with `kubectl get validatingadmissionpolicy`.
+admissionPolicy:
+  # Images a build Job may run besides jobImage and railpackImage, such as the planner of a
+  # ClusterBuilder of your own.
+  extraImages: []
+  # Namespaces where the controller may not create Jobs, besides kube-*, this namespace and the
+  # registry's namespaces.
+  extraDeniedNamespaces: []
+
+registry:
+  # Where images go when a Build names no image, such as zot.zot.svc:5000. Required.
+  host: ""
+  # The Secret whose tls.key (PKCS#8 Ed25519) signs tokens that registry.host trusts, such as the
+  # catalog Zot's zot-token-signer in zot. Set: each run pushes with a short-lived token for its
+  # own Build's repositories only, clients ask a Build for an upload token, and the repositories
+  # of deleted Builds are deleted. The chart lets the controller read this one Secret. Required:
+  # the chart fails without namespace and secret. An image on another registry uses the Build's
+  # spec.output.pushSecretRef.
+  tokenKey:
+    namespace: ""
+    secret: ""
+  # The CA that signed the registry's certificate (PEM), when a public CA did not. buildkitd and
+  # the archive download trust it.
+  ca: ""
+  # Copy the CA from a Secret at install time, such as the catalog Zot's zot-tls in zot. Used when
+  # ca is empty. `helm template` cannot read the cluster and leaves it out.
+  caFrom:
+    namespace: ""
+    secret: ""
+    key: ca.crt
+  # true: the registry speaks plain HTTP. Only for a test cluster.
+  http: false
+  # Pods that buildkitd may reach to push and pull, when the registry runs in the cluster. Empty
+  # namespace: the registry is outside the cluster and the public-address rule below applies.
+  inCluster:
+    namespace: ""
+    podLabels: {}
+    port: 5000
+
+buildkitd:
+  # Gateway frontends a Dockerfile may name in `# syntax=`. railpackFrontend is always allowed.
+  allowedFrontends:
+    - docker.io/docker/dockerfile
+    - docker.io/docker/dockerfile-upstream
+  # Addresses RUN steps and buildkitd may not reach: Pods, Services, nodes and the cloud metadata
+  # endpoint. These cover k3s's Pod (10.42.0.0/16) and Service (10.43.0.0/16) CIDRs and most node
+  # networks. A cluster on public addresses must add its own CIDRs. IPv4 only.
+  blockedCidrs:
+    - 10.0.0.0/8
+    - 100.64.0.0/10
+    - 127.0.0.0/8
+    - 169.254.0.0/16
+    - 172.16.0.0/12
+    - 192.168.0.0/16
+
+# Extra controller flags, such as --buildkitd-cache-size=10Gi or --buildkitd-host-users=true
+# (Kubernetes older than 1.33).
+extraArgs: []
+
+resources:
+  requests: {cpu: 10m, memory: 32Mi}
+  limits: {memory: 256Mi}
+
+githubApp:
+  # The App's Secret and the ConfigMap that grants installations to namespaces, both in this
+  # namespace. Create them with `zeabur-builder github-app create`.
+  secretName: github-app
+  grantsName: github-app-installations
+
+webhooks:
+  # Off by default: no listener, no Service, no route.
+  enabled: false
+  port: 8080
+  # Deliveries go to <path>/<provider>: github, github-app, gitlab, gitea, forgejo, bitbucket or
+  # generic.
+  path: /hooks
+  maxBodyBytes: 1048576
+  # Deliveries per second, and the burst, across all senders.
+  rate: 10
+  burst: 50
+  ingress:
+    enabled: false
+    className: ""
+    host: ""
+    annotations: {}
+    # Name of a TLS Secret for the host; none means plain HTTP at the Ingress.
+    tlsSecretName: ""
+  httpRoute:
+    enabled: false
+    parentRefs: []
+    hostnames: []

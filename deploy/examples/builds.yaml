@@ -1,0 +1,47 @@
+# Sample Builds: a Dockerfile repository, a repository without a Dockerfile (Railpack), and two
+# that fail on purpose, one at the source and one in the build. team-b builds once too, so that
+# scripts/example-isolation.sh finds a buildkitd in each namespace.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: team-a
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: team-b
+---
+apiVersion: builder.zeabur.com/v1alpha1
+kind: Build
+metadata: {name: whoami, namespace: team-b}
+spec:
+  source: {git: {url: https://github.com/traefik/whoami}}
+  builderRef: dockerfile
+---
+apiVersion: builder.zeabur.com/v1alpha1
+kind: Build
+metadata: {name: whoami, namespace: team-a}
+spec:
+  source: {git: {url: https://github.com/traefik/whoami}}
+  builderRef: dockerfile
+---
+apiVersion: builder.zeabur.com/v1alpha1
+kind: Build
+metadata: {name: hello-python, namespace: team-a}
+spec:
+  source: {git: {url: https://github.com/dockersamples/helloworld-demo-python, ref: main}}
+  builderRef: railpack
+---
+apiVersion: builder.zeabur.com/v1alpha1
+kind: Build
+metadata: {name: no-such-ref, namespace: team-a}
+spec:
+  source: {git: {url: https://github.com/traefik/whoami, ref: no-such-branch}}
+  builderRef: dockerfile
+---
+apiVersion: builder.zeabur.com/v1alpha1
+kind: Build
+metadata: {name: no-such-dockerfile, namespace: team-a}
+spec:
+  source: {git: {url: https://github.com/traefik/whoami, ref: master, dockerfile: Dockerfile.missing}}
+  builderRef: dockerfile

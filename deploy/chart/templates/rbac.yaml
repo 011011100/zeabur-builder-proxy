@@ -1,0 +1,113 @@
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: zeabur-builder
+  labels: {{- include "builder.labels" . | nindent 4 }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ .Release.Name }}-zeabur-builder
+  labels: {{- include "builder.labels" . | nindent 4 }}
+rules:
+  - apiGroups: [builder.zeabur.com]
+    resources: [builds, buildruns, clusterbuilders]
+    verbs: [get, list, watch, create, delete]
+  - apiGroups: [builder.zeabur.com]
+    resources: [builds/status, buildruns/status]
+    verbs: [get, patch]
+  - apiGroups: [batch]
+    resources: [jobs]
+    verbs: [get, list, watch, create, delete]
+  - apiGroups: [""]
+    resources: [pods]
+    verbs: [get, list, watch]
+  # A namespace's max-concurrent-builds annotation, and which namespaces still exist.
+  - apiGroups: [""]
+    resources: [namespaces]
+    verbs: [get, list]
+  # Credentials and webhook secrets Builds name, the Secrets copied into build namespaces, and
+  # upload tokens. Cluster-wide get is wider than needed (open issue in README.md).
+  - apiGroups: [""]
+    resources: [secrets]
+    verbs: [get, create, update, delete]
+  - apiGroups: [events.k8s.io]
+    resources: [events]
+    verbs: [create, patch]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: {{ .Release.Name }}-zeabur-builder
+  labels: {{- include "builder.labels" . | nindent 4 }}
+roleRef: {apiGroup: rbac.authorization.k8s.io, kind: ClusterRole, name: {{ .Release.Name }}-zeabur-builder}
+subjects:
+  - {kind: ServiceAccount, name: zeabur-builder, namespace: {{ .Release.Namespace }}}
+---
+# Each namespace's buildkitd, the GitHub App's installation grants and the leader election Lease,
+# in this namespace only.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: zeabur-builder
+  labels: {{- include "builder.labels" . | nindent 4 }}
+rules:
+  - apiGroups: [apps]
+    resources: [statefulsets]
+    verbs: [get, list, watch, create, patch, delete]
+  - apiGroups: [apps]
+    resources: [statefulsets/scale]
+    verbs: [patch]
+  - apiGroups: [""]
+    resources: [services]
+    verbs: [get, create, patch, delete]
+  - apiGroups: [networking.k8s.io]
+    resources: [networkpolicies]
+    verbs: [get, create, patch, delete]
+  - apiGroups: [""]
+    resources: [configmaps]
+    resourceNames: [{{ .Values.githubApp.grantsName }}]
+    verbs: [get]
+  # The leader election Lease. `create` cannot be limited to one name.
+  - apiGroups: [coordination.k8s.io]
+    resources: [leases]
+    verbs: [create]
+  - apiGroups: [coordination.k8s.io]
+    resources: [leases]
+    resourceNames: [zeabur-builder]
+    verbs: [get, patch]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: zeabur-builder
+  labels: {{- include "builder.labels" . | nindent 4 }}
+roleRef: {apiGroup: rbac.authorization.k8s.io, kind: Role, name: zeabur-builder}
+subjects:
+  - {kind: ServiceAccount, name: zeabur-builder, namespace: {{ .Release.Namespace }}}
+{{- $_ := include "builder.tokenKey" . }}
+{{- with .Values.registry.tokenKey }}
+---
+# The registry token key, in the registry's namespace: this one Secret, read only.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ $.Release.Name }}-zeabur-builder-token-key
+  namespace: {{ .namespace }}
+  labels: {{- include "builder.labels" $ | nindent 4 }}
+rules:
+  - apiGroups: [""]
+    resources: [secrets]
+    resourceNames: [{{ .secret }}]
+    verbs: [get]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ $.Release.Name }}-zeabur-builder-token-key
+  namespace: {{ .namespace }}
+  labels: {{- include "builder.labels" $ | nindent 4 }}
+roleRef: {apiGroup: rbac.authorization.k8s.io, kind: Role, name: {{ $.Release.Name }}-zeabur-builder-token-key}
+subjects:
+  - {kind: ServiceAccount, name: zeabur-builder, namespace: {{ $.Release.Namespace }}}
+{{- end }}

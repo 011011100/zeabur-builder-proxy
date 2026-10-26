@@ -1,0 +1,6 @@
+/target
+/.direnv
+result
+result-*
+.DS_Store
+.claude/settings.local.json

@@ -1,0 +1,7 @@
+# The controller: one static binary and Mozilla's CA bundle (for HTTPS to Git servers); no shell,
+# no package manager. Runs as a non-root user. Built by scripts/build-images.sh.
+FROM scratch
+COPY --chmod=0555 zeabur-builder /zeabur-builder
+COPY etc /etc
+USER 65532:65532
+ENTRYPOINT ["/zeabur-builder"]

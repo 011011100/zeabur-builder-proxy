@@ -1,0 +1,44 @@
+[package]
+name = "zeabur-builder"
+description = "Zeabur Builder: a Kubernetes operator that turns Git commits into container images with BuildKit"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+repository = "https://github.com/zeabur-oss/builder"
+readme = "../../README.md"
+keywords = ["kubernetes", "buildkit", "operator"]
+categories = ["development-tools::build-utils", "command-line-utilities"]
+
+[lints]
+workspace = true
+
+[dependencies]
+zeabur-builder-core.workspace = true
+zeabur-builder-api.workspace = true
+zeabur-builder-jobspec.workspace = true
+aws-lc-rs.workspace = true
+base64.workspace = true
+bytes.workspace = true
+clap.workspace = true
+futures-util.workspace = true
+http.workspace = true
+http-body-util.workspace = true
+hyper.workspace = true
+hyper-rustls.workspace = true
+hyper-util.workspace = true
+jiff.workspace = true
+k8s-openapi.workspace = true
+kube = { workspace = true, features = ["client", "runtime", "rustls-tls", "aws-lc-rs"] }
+kube-lease-manager.workspace = true
+rcgen.workspace = true
+rustls.workspace = true
+rustls-native-certs.workspace = true
+russh.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true

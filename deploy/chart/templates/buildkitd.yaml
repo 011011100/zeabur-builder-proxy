@@ -1,0 +1,88 @@
+# What every namespace's buildkitd shares: its config, and the egress policy of its RUN steps.
+# The controller creates each namespace's StatefulSet, headless Service and ingress NetworkPolicy
+# in this namespace the first time the namespace builds.
+{{- $registry := .Values.registry }}
+{{- $ca := include "builder.registryCA" . }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: buildkitd
+  labels: {{- include "builder.labels" . | nindent 4 }}
+data:
+  buildkitd.toml: |
+    # RUN --network=host and --security=insecure stay refused.
+    insecure-entitlements = []
+
+    [worker.oci]
+      enabled = true
+      # Each RUN step gets its own network namespace on a bridge, masqueraded to the Pod's
+      # address, so the egress policy below applies to it. "auto" would give RUN the Pod's own
+      # network namespace when /etc/buildkit/cni.json is missing.
+      networkMode = "bridge"
+      gc = true
+      [[worker.oci.gcpolicy]]
+        all = true
+        maxUsedSpace = "80%"
+        # Prune before the node's disk reaches kubelet's eviction threshold (by default 10% free
+        # on nodefs, 15% on imagefs, 5% on k3s), whatever the cache size.
+        minFreeSpace = "20%"
+    [worker.containerd]
+      enabled = false
+
+    # Gateway frontends, including those a Dockerfile names in `# syntax=`, only from these
+    # repositories.
+    [frontend."gateway.v0"]
+      allowedRepositories = [
+        {{- range .Values.buildkitd.allowedFrontends }}
+        {{ . | quote }},
+        {{- end }}
+        {{ (splitList ":" .Values.railpackFrontend | first) | quote }},
+      ]
+    {{- if or $registry.http $ca }}
+
+    [registry.{{ required "registry.host is required" $registry.host | quote }}]
+      {{- if $registry.http }}
+      http = true
+      {{- end }}
+      {{- if $ca }}
+      ca = ["/etc/buildkit/registry-ca.crt"]
+      {{- end }}
+    {{- end }}
+  {{- if $ca }}
+  registry-ca.crt: | {{- $ca | nindent 4 }}
+  {{- end }}
+---
+# buildkitd may resolve names, reach the registry and reach public addresses; not Pods,
+# Services, nodes or the cloud metadata endpoint.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: buildkitd-egress
+  labels: {{- include "builder.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels: {app.kubernetes.io/name: buildkitd}
+  policyTypes: [Egress]
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels: {kubernetes.io/metadata.name: kube-system}
+          podSelector:
+            matchLabels: {k8s-app: kube-dns}
+      ports: [{port: 53, protocol: UDP}, {port: 53, protocol: TCP}]
+    {{- with $registry.inCluster }}
+    {{- if .namespace }}
+    - to:
+        - namespaceSelector:
+            matchLabels: {kubernetes.io/metadata.name: {{ .namespace }}}
+          {{- with .podLabels }}
+          podSelector:
+            matchLabels: {{- toYaml . | nindent 14 }}
+          {{- end }}
+      ports: [{port: {{ .port }}, protocol: TCP}]
+    {{- end }}
+    {{- end }}
+    - to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+            except: {{- toYaml .Values.buildkitd.blockedCidrs | nindent 14 }}

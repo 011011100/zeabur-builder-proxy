@@ -1,0 +1,22 @@
+# The two builders Zeabur offers. Builds name them in spec.builderRef.
+apiVersion: builder.zeabur.com/v1alpha1
+kind: ClusterBuilder
+metadata:
+  name: dockerfile
+  labels: {{- include "builder.labels" . | nindent 4 }}
+spec:
+  type: dockerfile
+  frontend: {type: dockerfile.v0}
+---
+apiVersion: builder.zeabur.com/v1alpha1
+kind: ClusterBuilder
+metadata:
+  name: railpack
+  labels: {{- include "builder.labels" . | nindent 4 }}
+spec:
+  type: railpack
+  planner:
+    image: {{ include "builder.image" (list .Values.railpackImage .Chart) | quote }}
+  frontend:
+    type: gateway.v0
+    source: {{ .Values.railpackFrontend | quote }}
