@@ -1,69 +1,69 @@
 ---
 title: 安全性與信任模型
-description: 了解 Zeabur Builder 的信任邊界、執行不信任程式碼的設定，以及私下回報漏洞的方式。
+description: 了解 Zeabur Builder 的信任邊界、執行不信任程式碼的設定，以及如何私下回報漏洞。
 source: "7c01114a93ca"
 ---
 
-以 Namespace 區隔團隊的建置來源、Secret、快取與映像檔推送權限。同一個 Namespace 內的建置彼此信任；執行不信任的程式碼時，使用 `--buildkitd-runtime-class` 指定沙箱執行環境。
+Zeabur Builder 使用 Namespace 隔開各團隊的建置來源、Secret、快取與映像檔推送權限。同一個 Namespace 內的建置彼此信任。執行不信任的程式碼時，請使用 `--buildkitd-runtime-class` 指定沙盒執行環境。
 
 ## 回報漏洞
 
-在 GitHub 儲存庫使用 **Report a vulnerability**，以 private vulnerability reporting 私下回報漏洞。不要為安全問題開啟公開 issue。
+請在 GitHub 儲存庫選擇 **Report a vulnerability**，使用 private vulnerability reporting 私下回報漏洞。不要為安全問題開啟公開 issue。
 
 安全政策請見 [SECURITY.md](https://github.com/zeabur-oss/builder/blob/main/SECURITY.md)。
 
 ## 支援範圍
 
-Zeabur Builder 尚無發行版，目前的修正只會合併到 `main`。
+Zeabur Builder 尚未推出發行版，目前只會將修正合併到 `main`。
 
 ## 信任模型
 
-隔離單位是 Namespace。共用叢集的不同團隊無法讀取彼此的原始碼、Secret 或建置快取，也無法推送到彼此的映像檔。
+Zeabur Builder 以 Namespace 為隔離單位。即使多個團隊共用叢集，各團隊也無法讀取其他團隊的原始程式碼、Secret 或建置快取，也無法推送其他團隊的映像檔。
 
 ### buildkitd、憑證與建置快取
 
-每個建置 Namespace 都有自己的 buildkitd、快取、憑證授權單位（CA）與用戶端憑證。建置快取留在 buildkitd 的磁碟區，不會傳到映像檔倉庫（registry）。
+每個建置 Namespace 都有自己的 buildkitd、快取、憑證授權單位（CA）與用戶端憑證。建置快取留在 buildkitd 的磁碟區，不會傳到 registry。
 
-使用 registry token 金鑰時，每次執行都使用短效 token 推送，權限只涵蓋該次執行所屬 `Build` 的儲存庫。推送到其他 registry 時，則使用 `Build` 所在 Namespace 內的推送用 Secret。
+使用 registry 權杖金鑰時，每次執行都會使用短效權杖推送映像檔。權杖只能用在該次執行所屬 `Build` 的儲存庫。推送到其他 registry 時，則使用 `Build` 所在 Namespace 內的推送用 Secret。
 
 同一個 Namespace 內的建置共用 buildkitd。因此，`RUN` 步驟可以讀取同一個 Namespace 內其他建置的快取掛載。
 
 ### 封存檔來源
 
-封存檔來源只會從 `<registry.host>/<namespace>/<build>/source` 讀取，並使用該次執行的 registry 憑證。
+封存檔來源只會從 `<registry.host>/<namespace>/<build>/source` 讀取，並使用該次執行的 registry 認證資訊。
 
-registry 決定還有誰能讀取封存檔。Zeabur Catalog 的 Zot 與測試用 registry 只允許持有該儲存庫 token 的使用者讀取。Job 解開封存檔時，不會寫入來源資料夾以外的位置。
+還有哪些人能讀取封存檔，取決於 registry。使用 Zeabur Catalog 的 Zot 或測試用 registry 時，使用者必須持有該儲存庫的權杖才能讀取封存檔。Job 解開封存檔時，不會將檔案寫到來源資料夾以外的位置。
 
-### Registry token 金鑰與有效期限
+### Registry 權杖金鑰與有效期限
 
-任何能讀取 registry token 金鑰的人，都能推送到任意儲存庫，也能刪除任意儲存庫。只有控制器可以讀取這把金鑰。
+任何能讀取 registry 權杖金鑰的人，都能推送到任意儲存庫，也能刪除任意儲存庫。只有控制器可以讀取這把金鑰。
 
-token 無法撤銷。刪除 Namespace 後，如果另一個團隊建立同名的 Namespace，舊 Namespace 的 token 在到期前仍能推送到新 Namespace 的儲存庫。使用預設 Job 期限時，這段時間最長為 70 分鐘。
+權杖無法撤銷。如果刪除 Namespace 後，另一個團隊建立了同名的 Namespace，舊 Namespace 的權杖到期前，還是能推送到新 Namespace 的儲存庫。使用預設 Job 期限時，這段時間最長為 70 分鐘。
 
 ### 映像檔的讀取權限
 
-為了讓節點拉取映像檔，任何能連到 registry 的人都能讀取其中的映像檔。不要把機密資訊放進映像檔。
+為了讓節點拉取映像檔，registry 開放所有能連線的人讀取映像檔。不要把機密資訊放進映像檔。
 
 ### 控制器權限
 
-控制器具有等同叢集管理員的能力：它能在所有 Namespace 建立 Job、寫入 Secret，以及建立具特權的 buildkitd StatefulSet。
+控制器具有等同叢集管理員的能力。它能在所有 Namespace 建立 Job、寫入 Secret，以及建立具特權的 buildkitd StatefulSet。
 
-Helm chart 的 ValidatingAdmissionPolicies 將控制器 ServiceAccount 建立的資源限制為：
+Helm chart 附的 ValidatingAdmissionPolicies 只允許控制器的 ServiceAccount 建立這兩種資源：
 
-- 建置 Job：使用 chart 指定的映像檔，不具特權、不存取主機、不掛載 ServiceAccount token，且不得位於 `kube-*`、控制器自身或 registry 的 Namespace。
+- 建置 Job：使用 chart 指定的映像檔，不具特權、不存取主機、不掛載 ServiceAccount 權杖，且不得位於 `kube-*`、控制器自身或 registry 的 Namespace。
 - buildkitd StatefulSet：使用 chart 指定的 buildkitd 映像檔。
 
-即使有這些限制，取得控制器 token 的攻擊者仍能讀取所有允許執行建置的 Namespace 內的 Secret。詳見[控制器的權限](../operations/controller-permissions.mdx)。
+即使有這些限制，只要攻擊者取得控制器權杖，仍能讀取每個允許執行建置的 Namespace 內的 Secret。詳見[控制器的權限](../operations/controller-permissions.mdx)。
 
 ### 建置步驟的網路存取
 
-每個 `RUN` 步驟都有自己的network namespace，可以連到網際網路與 registry。
+每個 `RUN` 步驟都有自己的 network namespace，可以連到網際網路與 registry。
 
-[deploy/chart/templates/buildkitd.yaml](https://github.com/zeabur-oss/builder/blob/main/deploy/chart/templates/buildkitd.yaml) 中的出口流量政策會阻擋它存取 Pod、Service、節點與雲端中繼資料端點（IPv4）。
+[deploy/chart/templates/buildkitd.yaml](https://github.com/zeabur-oss/builder/blob/main/deploy/chart/templates/buildkitd.yaml) 中的出口流量政策會阻擋 `RUN` 步驟存取 Pod、Service、節點與雲端中繼資料端點（IPv4）。
 
 ### buildkitd 的主機隔離
 
-buildkitd 在 user namespace 內以特權模式執行，設定為 `hostUsers: false`。建置內的 root 會對應到節點上的非特權使用者，阻止跨團隊存取。
+buildkitd 在 user namespace 內以特權模式執行，設定為 `hostUsers: false`。建置裡的 root 在節點上只是一般使用者，所以團隊之間仍然碰不到彼此。
 
 這項隔離無法阻止攻擊者利用核心漏洞逃離容器。
 
@@ -71,8 +71,8 @@ buildkitd 在 user namespace 內以特權模式執行，設定為 `hostUsers: fa
 
 <Callout type="warn">
 
-對於不信任的人提供的程式碼，Namespace 邊界的隔離強度不足。
+如果程式碼來自你不信任的人，光靠 Namespace 隔離並不足夠。
 
 </Callout>
 
-使用 `--buildkitd-runtime-class` 設定 buildkitd 的 `runtimeClassName`，指定 gVisor 或 Kata 等沙箱執行環境，並使用專用節點。
+使用 `--buildkitd-runtime-class` 設定 buildkitd 的 `runtimeClassName`，指定 gVisor 或 Kata 等沙盒執行環境，並使用專用節點。

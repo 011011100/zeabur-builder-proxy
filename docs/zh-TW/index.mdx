@@ -1,38 +1,38 @@
 ---
 title: 開始使用 Zeabur Builder
-description: 在 Kubernetes 上從 Git 用 BuildKit 建置映像檔，並把結果交給你的部署工具。
+description: 在 Kubernetes 上用 BuildKit 從 Git 建置映像檔，再把結果交給你的部署工具。
 source: "968b6f881daa"
 ---
 
-Zeabur Builder 是一個 Kubernetes operator。你寫一個 `Build` 指向 Git 儲存庫，它為每個新 commit 建置映像檔，推送到映像檔倉庫，並把 `<repository>:<tag>@<digest>` 寫進 `status.latestImage`。
+Zeabur Builder 是一個 Kubernetes operator。你只要建立一個 `Build`，指定 Git 儲存庫，Zeabur Builder 就會為每個新 commit 建置映像檔，再推送到 registry。完成後，它會把 `<repository>:<tag>@<digest>` 寫進 `status.latestImage`。
 
-Zeabur Builder 只建置映像檔。測試、部署與日誌儲存交給你的 pipeline、部署工具與日誌收集工具。
+Zeabur Builder 只負責建置映像檔。測試、部署和日誌儲存則交給你的 pipeline、部署工具和日誌收集工具。
 
 <Callout type="info">
 
-Zeabur Builder 還沒有發行版，API 是 `v1alpha1`。這份文件描述 `main` 分支現在的行為。
+Zeabur Builder 還沒有發行版，目前的 API 是 `v1alpha1`。這份文件說明 `main` 分支目前的行為。
 
 </Callout>
 
 ## 我想先跑起來
 
-用 Helm chart 裝好控制器，再建立第一個 `Build`。
+先用 Helm chart 安裝控制器，再建立第一個 `Build`。
 
 - [安裝](get-started/install.mdx)
 - [建立第一個 Build](get-started/first-build.mdx)
 
 ## 我想管理 Build
 
-- [觸發建置](builds/triggers.mdx)：輪詢、push webhook 與手動重建。
-- [私有儲存庫](builds/private-repos.mdx)：用 `credentialsRef` 或 GitHub App。
+- [觸發建置](builds/triggers.mdx)：輪詢、push webhook 和手動重建。
+- [私有儲存庫](builds/private-repos.mdx)：使用 `credentialsRef` 或 GitHub App。
 - [從上傳的資料夾建置](builds/archive-source.mdx)：不經過 Git。
-- [部署建置好的映像檔](builds/rollout.mdx)：標籤與 Keel 通知。
-- [推送到外部映像檔倉庫](builds/external-registries.mdx)
+- [部署建置好的映像檔](builds/rollout.mdx)：tag 和 Keel 通知。
+- [推送到外部 registry](builds/external-registries.mdx)
 
 ## 我是叢集管理員
 
-- [Registry token](operations/registry-tokens.mdx)：token、上傳、清理與金鑰輪替。
-- [控制器的權限](operations/controller-permissions.mdx)：把控制器當成叢集管理員。
+- [Registry 權杖](operations/registry-tokens.mdx)：權杖、上傳、清理和金鑰輪替。
+- [控制器的權限](operations/controller-permissions.mdx)：將控制器視為叢集管理員。
 - [發行檔與驗證](operations/releases.mdx)
 
 ## 我想了解它怎麼運作

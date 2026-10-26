@@ -1,10 +1,10 @@
 ---
 title: 建立第一個 Build
-description: 建立指向 Git 儲存庫的 Build，查看每個新 commit 建置出的映像檔與建置結果。
+description: 建立指向 Git 儲存庫的 Build，檢視每個新 commit 建置出的映像檔與建置結果。
 source: "301367e347b8"
 ---
 
-寫一個 `Build` 指向 Git 儲存庫，控制器就會為每個新 commit 建置映像檔，並將結果寫入 `status.latestImage`。
+建立一個 `Build`，指定 Git 儲存庫。控制器就會為每個新 commit 建置映像檔，並將結果寫入 `status.latestImage`。
 
 <Steps>
 
@@ -12,7 +12,7 @@ source: "301367e347b8"
 
 ### 建立 Build
 
-在叢集中建立以下 `Build`，使用 `dockerfile` 建置器建置 Git 儲存庫中的 Dockerfile：
+在叢集中建立以下 `Build`，使用 `dockerfile` 建置器，依照 Git 儲存庫中的 Dockerfile 建置映像檔：
 
 ```yaml
 apiVersion: builder.zeabur.com/v1alpha1
@@ -23,22 +23,22 @@ spec:
   builderRef: dockerfile
 ```
 
-範例省略了 `ref`，因此會追蹤儲存庫的預設分支。你可以從 `status.resolvedRef` 查看控制器解析出的分支。
+這個範例沒有指定 `ref`，因此會追蹤儲存庫的預設分支。你可以檢視 `status.resolvedRef`，確認控制器解析出的分支。
 
 `builderRef` 支援兩個建置器：
 
 | 建置器 | 用途 |
 | --- | --- |
-| `dockerfile` | 建置儲存庫中的 Dockerfile。 |
-| `railpack` | 使用 [Railpack](https://railpack.com) 規劃沒有 Dockerfile 的儲存庫建置。產出的映像檔以 UID 1000 執行，可在 Pod Security `restricted` 下啟動。 |
+| `dockerfile` | 依照儲存庫中的 Dockerfile 建置映像檔。 |
+| `railpack` | 使用 [Railpack](https://railpack.com) 為沒有 Dockerfile 的儲存庫規劃建置流程。產出的映像檔使用 UID 1000 執行，可在 Pod Security `restricted` 下啟動。 |
 
-需要傳入建置變數時，使用 `spec.env`。值可以直接指定，也可以取自 Secret 的 key。Zeabur Builder 會以 BuildKit secrets 將這些值傳入建置。
+需要傳入建置變數時，請使用 `spec.env`。你可以直接指定值，也可以從 Secret 的 key 取值。Zeabur Builder 會使用 BuildKit secrets，將這些值傳入建置流程。
 
 </Step>
 
 <Step>
 
-### 查看建置狀態與日誌
+### 檢視建置狀態與日誌
 
 在 `Build` 所在的 Namespace 執行：
 
@@ -47,15 +47,15 @@ kubectl get builds
 kubectl get buildruns
 ```
 
-`kubectl get builds` 顯示每個 Build 的建置器、來源、修訂版本與就緒狀態。加上 `-o wide` 可查看映像檔：
+`kubectl get builds` 會顯示每個 Build 的建置器、來源、修訂版本與就緒狀態。加上 `-o wide` 就能檢視映像檔：
 
 ```sh
 kubectl get builds -o wide
 ```
 
-`kubectl get buildruns` 顯示每次建置的階段、原因、開始時間與結束時間。
+`kubectl get buildruns` 會顯示每次建置的階段、原因、開始時間與結束時間。
 
-建置日誌位於該次建置 Job 的 Pod 日誌中。查看該 Pod 的日誌，即可讀取建置輸出。
+每次建置的日誌都在該次建置 Job 的 Pod 日誌中。檢視該 Pod 的日誌，就能看到建置輸出。
 
 </Step>
 
@@ -63,30 +63,30 @@ kubectl get builds -o wide
 
 ## 確認結果
 
-建置完成後，控制器會將映像檔推送到映像檔倉庫（registry）的以下路徑：
+建置完成後，控制器會將映像檔推送到 registry 的以下路徑：
 
 ```text
 <registry.host>/<namespace>/<name>
 ```
 
-`status.latestImage` 會記錄映像檔，格式如下：
+控制器會在 `status.latestImage` 記錄映像檔，格式如下：
 
 ```text
 <repository>:<tag>@<digest>
 ```
 
-每次建置都有自己的標籤（tag），由分支、Unix 時間與 commit 組成，例如：
+每次建置都有自己的 tag，由分支、Unix 時間與 commit 組成，例如：
 
 ```text
 main-1761058800-3e1a9c2
 ```
 
-這個格式可供部署工具排序，較新的建置排在後面。你可以用 `spec.output.tagTemplate` 與 `extraTags` 調整標籤。
+部署工具可以根據這個格式排序，較新的建置會排在後面。你可以用 `spec.output.tagTemplate` 與 `extraTags` 調整 tag。
 
-`status.latestImage` 以控制器最近找到的 commit 為準。較舊 commit 的建置即使較晚完成，也不會覆寫這個欄位。
+`status.latestImage` 以控制器最近找到的 commit 為準。即使較舊 commit 的建置較晚完成，也不會覆寫這個欄位。
 
 ## Zeabur Builder 做什麼、不做什麼
 
 Zeabur Builder 只負責建置映像檔。測試交給你的 pipeline，部署交給部署工具，日誌儲存交給日誌收集工具。
 
-取得映像檔後，可接著設定[部署建置好的映像檔](../builds/rollout.mdx)。
+取得映像檔後，可以接著設定[部署建置好的映像檔](../builds/rollout.mdx)。

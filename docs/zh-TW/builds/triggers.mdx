@@ -4,15 +4,15 @@ description: 設定輪詢與 push webhook、手動重建，並選擇新 commit �
 source: "7168eb75c8dd"
 ---
 
-你可以用輪詢、push webhook、[GitHub App](./private-repos.mdx) 或手動重建，觸發 Zeabur Builder 建置。
+你可以用輪詢、push webhook、[GitHub App](./private-repos.mdx) 或手動重建來觸發 Zeabur Builder 建置。
 
 ## 輪詢
 
-控制器預設每分鐘向 Git 伺服器查詢 ref。輪詢間隔由 `spec.triggers.pollInterval` 設定。
+控制器預設每分鐘向 Git 伺服器查詢一次 ref。你可以用 `spec.triggers.pollInterval` 設定輪詢間隔。
 
 ## 設定 push webhook
 
-push webhook 會喚醒追蹤該儲存庫與分支的 Build。控制器會檢查簽章，並自行解析 ref；webhook 傳送內容不會指定建置使用的 commit。
+push webhook 會喚醒追蹤該儲存庫與分支的 Build。控制器會檢查簽章，再自行解析 ref。webhook 的內容不能指定要建置哪個 commit。
 
 <Steps>
 
@@ -44,7 +44,7 @@ spec:
 
 將儲存庫的 webhook 網址設為 `https://<host>/hooks/<provider>`，並使用與 Secret 相同的密鑰。
 
-依 Git 服務選擇 `<provider>`：
+依照你使用的 Git 服務選擇 `<provider>`：
 
 | 服務 | `<provider>` |
 | --- | --- |
@@ -55,7 +55,7 @@ spec:
 | Bitbucket | `bitbucket` |
 | [Standard Webhooks](https://www.standardwebhooks.com/) | `generic` |
 
-啟用 push webhook 後，輪詢仍會持續。
+啟用 push webhook 後，控制器仍會持續輪詢。
 
 </Step>
 
@@ -63,13 +63,13 @@ spec:
 
 ## 手動重建與暫停自動建置
 
-將 Build 的 `builder.zeabur.com/rebuild` annotation 改為新值，即可重新建置目前的 commit。
+將 Build 的 `builder.zeabur.com/rebuild` annotation 改為新值，就能重新增置目前的 commit。
 
-`spec.suspend` 可停止自動建置。
+你可以用 `spec.suspend` 停止自動建置。
 
 ## 處理執行中的建置
 
-`spec.concurrency` 決定新 commit 到來時，如何處理執行中的建置：
+你可以用 `spec.concurrency` 設定新 commit 到來時，要如何處理執行中的建置：
 
 | 設定值 | 行為 |
 | --- | --- |

@@ -4,7 +4,7 @@ description: 了解 Zeabur Builder 如何從 Git commit 建置映像檔，以及
 source: "15b8542a967b"
 ---
 
-建立 `Build`，指定 Git 儲存庫與建置器。控制器會為新的 commit 建置映像檔、推送到映像檔倉庫（registry），並將映像檔資訊寫入 `BuildRun` 與 `Build`。
+建立 `Build`，指定 Git 儲存庫與建置器。控制器會為新的 commit 建置映像檔，推送到 registry，再將映像檔資訊寫入 `BuildRun` 與 `Build`。
 
 ## 建置流程
 
@@ -14,7 +14,7 @@ source: "15b8542a967b"
 
 ### 解析 Git commit
 
-控制器使用 Git 的 smart HTTP 或 SSH 協定，將 `Build` 的 ref 解析為 commit。
+控制器會使用 Git 的 smart HTTP 或 SSH 協定，找出 `Build` 的 ref 對應的 commit。
 
 省略 `ref` 時，控制器會追蹤儲存庫的預設分支，並將分支名稱寫入 `status.resolvedRef`。
 
@@ -24,7 +24,7 @@ source: "15b8542a967b"
 
 ### 建立 BuildRun 與 Job
 
-控制器發現新的 commit 後，會建立 `BuildRun`，再為這次建置建立 Job。
+控制器找到新的 commit 後，會建立 `BuildRun`，再為這次建置建立 Job。
 
 </Step>
 
@@ -34,7 +34,7 @@ source: "15b8542a967b"
 
 Job 會擷取該 commit。如果建置器提供規劃器，Job 會先執行規劃器，再執行 `buildctl`，連線到所屬 Namespace 的 buildkitd。
 
-控制器會需要時啟動 buildkitd。Dockerfile 的 `RUN` 步驟在 buildkitd 中執行，與 Pod、Service 和節點隔離。
+控制器會在需要時啟動 buildkitd。Dockerfile 的 `RUN` 步驟會在 buildkitd 中執行，與 Pod、Service 和節點隔離。
 
 </Step>
 
@@ -42,9 +42,9 @@ Job 會擷取該 commit。如果建置器提供規劃器，Job 會先執行規�
 
 ### 推送映像檔並記錄結果
 
-建置完成後，映像檔會推送到 `<registry.host>/<namespace>/<name>`，digest 與標籤（tag）會寫入 `BuildRun` 和 `Build`。
+建置完成後，映像檔會推送到 `<registry.host>/<namespace>/<name>`，digest 與 tag 會寫入 `BuildRun` 和 `Build`。
 
-`Build` 的 `status.latestImage` 會以 `<repository>:<tag>@<digest>` 格式記錄映像檔。
+`Build` 的 `status.latestImage` 會用 `<repository>:<tag>@<digest>` 格式記錄映像檔。
 
 </Step>
 
@@ -54,37 +54,37 @@ Job 會擷取該 commit。如果建置器提供規劃器，Job 會先執行規�
 
 每個執行建置的 Namespace 都有自己的 buildkitd、快取、憑證授權單位（CA）與 registry 路徑。
 
-快取會在建置之間保留於 buildkitd 的磁碟區，因此 `RUN --mount=type=cache` 的內容可以保留。這些快取不會推送到 registry。
+buildkitd 的磁碟區會保留快取，供後續建置使用，因此 `RUN --mount=type=cache` 的內容可以保留。這些快取不會推送到 registry。
 
 buildkitd 閒置 10 分鐘後會縮到零。
 
 ## 建置權限與隔離
 
-每次建置都有一個 Job。Job 執行 `buildctl`，不需要特權。
+每次建置都有一個 Job。Job 會執行 `buildctl`，不需要特權。
 
-`RUN` 步驟在 buildkitd 中執行，與 Pod、Service 和節點隔離。
+`RUN` 步驟會在 buildkitd 中執行，與 Pod、Service 和節點隔離。
 
 ## 多個 commit 的結果順序
 
-控制器以最後找到的 commit 為準。舊 commit 的建置即使較晚完成，也不會覆寫 `status.latestImage`。
+控制器會以最後找到的 commit 為準。即使舊 commit 的建置較晚完成，也不會覆寫 `status.latestImage`。
 
 ## 自訂資源
 
 Zeabur Builder 使用 `Build`、`BuildRun` 與 `ClusterBuilder` 三種自訂資源，API 版本為 `v1alpha1`。
 
-`Build` 指定 Git 儲存庫與建置器。控制器為新的 commit 建立 `BuildRun`，記錄該次建置的狀態與結果。
+`Build` 用來指定 Git 儲存庫與建置器。控制器會為新的 commit 建立 `BuildRun`，記錄這次建置的狀態與結果。
 
 ## 確認結果
 
-查看各個 Build 的建置器、來源、版本與就緒狀態：
+檢視各個 Build 的建置器、來源、版本與就緒狀態：
 
 ```sh
 kubectl get builds
 ```
 
-加上 `-o wide` 可查看映像檔。
+加上 `-o wide` 就能檢視映像檔。
 
-查看各次建置的階段、原因、開始與結束時間：
+檢視每次建置的階段、原因、開始與結束時間：
 
 ```sh
 kubectl get buildruns

@@ -1,10 +1,10 @@
 ---
-title: 推送到外部映像檔倉庫
-description: 設定推送憑證，將 Build 產生的映像檔推送到外部映像檔倉庫。
+title: 推送到外部 registry
+description: 設定推送用的認證資訊，把 Build 產生的映像檔推送到外部 registry。
 source: "9cbc07804411"
 ---
 
-在 Build 所在的 Namespace 建立推送用的 Secret，並在 Build 指定映像檔與 Secret，就能將映像檔推送到 `registry.host` 以外的映像檔倉庫（registry）。
+在 Build 所在的 Namespace 建立推送用的 Secret，再在 Build 指定映像檔與 Secret，就能把映像檔推送到 `registry.host` 以外的 registry。
 
 <Steps>
 
@@ -20,7 +20,7 @@ kubectl -n team-a create secret docker-registry ghcr-push \
 kubectl -n team-a label secret ghcr-push builder.zeabur.com/push-credentials=true
 ```
 
-外部 registry 的帳號權限決定你能推送到哪些位置。
+你能推送到哪些位置，取決於外部 registry 的帳號權限。
 
 </Step>
 
@@ -28,7 +28,7 @@ kubectl -n team-a label secret ghcr-push builder.zeabur.com/push-credentials=tru
 
 ### 在 Build 指定映像檔與 Secret
 
-將 Build 的 `spec.output.image` 設為外部 registry 的映像檔名稱，並在 `spec.output.pushSecretRef` 指定 Secret：
+在 Build 的 `spec.output.image` 填外部 registry 的映像檔名稱，再在 `spec.output.pushSecretRef` 指定 Secret：
 
 ```yaml
 spec:
@@ -37,7 +37,7 @@ spec:
     pushSecretRef: {name: ghcr-push}
 ```
 
-如果 Secret 含有 `registry.host` 的條目，該次 run 的 token 會取代這個條目。
+如果 Secret 裡有 `registry.host` 的條目，這次 run 的權杖會取代這個條目。
 
 </Step>
 
@@ -47,4 +47,4 @@ spec:
 
 | 畫面或結果 | 接著處理 |
 | --- | --- |
-| run 停在 `RegistryCredentialsMissing` 狀態等待 | 確認 Build 所在的 Namespace 有指定的 Secret，且 Secret 帶有 `builder.zeabur.com/push-credentials: "true"` 標籤。Secret 不存在或缺少標籤時，run 會維持等待狀態。 |
+| run 停在 `RegistryCredentialsMissing` 狀態等待 | 確認 Build 所在的 Namespace 裡有指定的 Secret，而且 Secret 帶有 `builder.zeabur.com/push-credentials: "true"` 標籤。如果 Secret 不存在或缺少標籤，run 就會繼續等待。 |

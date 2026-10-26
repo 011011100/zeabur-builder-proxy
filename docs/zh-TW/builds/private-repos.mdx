@@ -4,15 +4,15 @@ description: 使用 credentialsRef 或 GitHub App，讓 Build 取得私有儲存
 source: "c7c63e18646d"
 ---
 
-你可以用 `spec.source.credentialsRef` 指定 Secret，以 basic-auth token 或 ssh-auth deploy key 存取私有儲存庫；deploy key 須搭配 `known_hosts`，Secret 須加上指定標籤。私有 GitHub 儲存庫也可以使用 GitHub App，讓 Build 取得短效 installation token。
+你可以用 `spec.source.credentialsRef` 指定 Secret，搭配 basic-auth 權杖或 ssh-auth deploy key 存取私有儲存庫。使用 deploy key 時，必須搭配 `known_hosts`，Secret 也必須加上指定標籤。私有 GitHub 儲存庫也可以使用 GitHub App，讓 Build 取得短效 installation 權杖。
 
 ## 使用 credentialsRef
 
-將 `spec.source.credentialsRef` 指向存放憑證的 Secret。Secret 支援這兩種型別：
+將 `spec.source.credentialsRef` 指向存放認證資訊的 Secret。Secret 支援以下兩種型別：
 
 | Secret 型別 | 內容 |
 | --- | --- |
-| `kubernetes.io/basic-auth` | token |
+| `kubernetes.io/basic-auth` | 權杖 |
 | `kubernetes.io/ssh-auth` | deploy key 與 `known_hosts` |
 
 在 Secret 加上以下標籤：
@@ -23,7 +23,7 @@ builder.zeabur.com/git-credentials: "true"
 
 ## 使用 GitHub App
 
-叢集管理員只需建立一次 GitHub App，並將設定存到控制器的 Namespace。Build 再指定要使用的 installation。
+叢集管理員只需建立一次 GitHub App，並將設定存到控制器的 Namespace。接著，在 Build 指定要使用的 installation。
 
 <Steps>
 
@@ -41,7 +41,7 @@ kubectl -n builder-system create configmap github-app-installations \
   --from-literal=12345678=team-a,team-b   # installation id: namespaces allowed to use it
 ```
 
-`github-app-installations` ConfigMap 以 installation ID 為鍵，值為允許使用該 installation 的 Namespace。上例允許 `team-a` 與 `team-b` 使用 installation 12345678。
+在 `github-app-installations` ConfigMap 中，鍵是 installation ID，值是允許使用該 installation 的 Namespace。上例允許 `team-a` 與 `team-b` 使用 installation 12345678。
 
 </Step>
 
@@ -62,6 +62,6 @@ spec:
 
 </Steps>
 
-GitHub App 會提供短效 installation token，供 Job 以唯讀權限存取私有儲存庫。每個 commit 都會收到 commit status。
+GitHub App 會提供短效 installation 權杖，讓 Job 以唯讀權限存取私有儲存庫。每個 commit 都會收到 commit status。
 
-App 的 push 事件會喚醒對應的 Build，不需要為每個 Build 設定 Secret。啟用 webhook 時，這些 Build 每 10 分鐘輪詢一次。其他觸發方式見[觸發建置](./triggers.mdx)。
+App 的 push 事件會喚醒對應的 Build，不需要為每個 Build 設定 Secret。啟用 webhook 時，這些 Build 每 10 分鐘輪詢一次。其他觸發方式請見[觸發建置](./triggers.mdx)。

@@ -4,22 +4,22 @@ description: 了解發行流程會產出的映像檔、chart 與 Sigstore 簽章
 source: "9275a9de94f9"
 ---
 
-Zeabur Builder 目前還沒有發行版。這裡描述 `main` 分支的發行流程一旦執行會產出的檔案與簽章。安裝映像檔前，你可以用 `cosign verify` 驗證簽章。
+Zeabur Builder 目前還沒有發行版。本頁說明 `main` 分支的發行流程，以及執行後會產出哪些檔案與簽章。安裝映像檔前，你可以用 `cosign verify` 驗證簽章。
 
 ## 發行流程
 
-`v<version>` 標籤（tag）會觸發發行流程：
+`v<version>` tag 會觸發發行流程：
 
 - 建置 `linux/amd64` 與 `linux/arm64` 的映像檔，並在 k3s 叢集上執行煙霧測試。
-- 依 digest 將 `ghcr.io/zeabur-oss/builder`、`builder-job` 與 `builder-railpack` 發佈到映像檔倉庫（registry）。
-- 在 chart 中固定這些映像檔的 digest，並將 chart 推送到 `oci://ghcr.io/zeabur-oss/charts/zeabur-builder`。
-- 使用 Sigstore，以無金鑰方式為所有映像檔與 chart 簽章。
+- 依 digest 將 `ghcr.io/zeabur-oss/builder`、`builder-job` 與 `builder-railpack` 發布到 registry。
+- 在 chart 中固定這些映像檔的 digest，再將 chart 推送到 `oci://ghcr.io/zeabur-oss/charts/zeabur-builder`。
+- 用 Sigstore 的無金鑰簽章功能，為所有映像檔與 chart 簽章。
 
-流程完成後，維護者再發佈草稿版本。
+流程完成後，維護者再發布草稿版本。
 
 ## 驗證映像檔
 
-安裝前，將 `<digest>` 換成映像檔的 digest，並將 `<version>` 換成對應的版本，執行：
+安裝前，先將 `<digest>` 換成映像檔的 digest，並將 `<version>` 換成對應的版本，再執行以下指令：
 
 ```sh
 cosign verify ghcr.io/zeabur-oss/builder@sha256:<digest> \
