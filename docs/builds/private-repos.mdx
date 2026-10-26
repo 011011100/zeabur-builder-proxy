@@ -1,0 +1,66 @@
+---
+title: Build private repositories
+description: Use credentialsRef or a GitHub App to give Build access to private repository code and trigger builds.
+---
+
+Use `spec.source.credentialsRef` to reference a Secret with a basic-auth token or an ssh-auth deploy key to access a private repository. Deploy keys require `known_hosts`, and the Secret must have the required label. For private GitHub repositories, you can also use a GitHub App to give Build a short-lived installation token.
+
+## Use credentialsRef
+
+Point `spec.source.credentialsRef` to the Secret that holds the credentials. The Secret supports these two types:
+
+| Secret type | Contents |
+| --- | --- |
+| `kubernetes.io/basic-auth` | token |
+| `kubernetes.io/ssh-auth` | deploy key and `known_hosts` |
+
+Add the following label to the Secret:
+
+```yaml
+builder.zeabur.com/git-credentials: "true"
+```
+
+## Use a GitHub App
+
+A cluster administrator creates a GitHub App once and stores its configuration in the controller's Namespace. Each Build then specifies which installation to use.
+
+<Steps>
+
+<Step>
+
+### Create a GitHub App and configure the allowed Namespaces
+
+Run the following commands. `zeabur-builder github-app create` opens the manifest flow on 127.0.0.1:
+
+```sh
+zeabur-builder github-app create --webhook-url https://<host>/hooks/github-app \
+  > github-app.json   # opens the manifest flow on 127.0.0.1
+kubectl -n builder-system apply -f github-app.json
+kubectl -n builder-system create configmap github-app-installations \
+  --from-literal=12345678=team-a,team-b   # installation id: namespaces allowed to use it
+```
+
+The `github-app-installations` ConfigMap uses installation IDs as keys. Each value lists the Namespaces permitted to use that installation. The example above permits `team-a` and `team-b` to use installation 12345678.
+
+</Step>
+
+<Step>
+
+### Specify the installation in a Build
+
+Set the installation ID in the Build's `spec.source.githubApp`:
+
+```yaml
+spec:
+  source:
+    git: {url: https://github.com/acme/private-api}
+    githubApp: {installationId: 12345678}
+```
+
+</Step>
+
+</Steps>
+
+The GitHub App provides a short-lived installation token that the Job uses for read-only access to the private repository. Each commit receives a commit status.
+
+The App's push events wake the corresponding Builds without a separate Secret for each Build. With the webhook enabled, these Builds poll every 10 minutes. For other ways to trigger builds, see [Trigger builds](./triggers.mdx).

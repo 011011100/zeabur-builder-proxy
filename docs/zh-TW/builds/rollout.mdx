@@ -1,0 +1,41 @@
+---
+title: 部署建置好的映像檔
+description: 使用可排序的標籤搭配部署工具，並設定 Build 在建置成功後通知 Keel。
+source: "f696fd068011"
+---
+
+使用可排序的標籤，讓 Flux image automation、Argo CD Image Updater 與 Keel 輪詢映像檔倉庫（registry）時能撿起新映像檔。設定 `spec.notify` 後，`Build` 會在每次建置成功後通知 Keel，省去等待輪詢的時間。
+
+## 標籤格式
+
+每次建置都會產生一個標籤（tag），依序包含分支名稱、Unix time 與 commit：
+
+```text
+main-1761058800-3e1a9c2
+```
+
+這些標籤可排序，最新的標籤排在最後。你可以用 `spec.output.tagTemplate` 與 `extraTags` 調整標籤。
+
+Zeabur Builder 負責建置與推送映像檔。部署由你的部署工具負責。
+
+## 通知 Keel
+
+在 `Build` 的 `spec.notify` 加入 Keel webhook：
+
+```yaml
+spec:
+  notify:
+    - {type: keel, url: http://keel.keel.svc:9300/v1/webhooks/native}
+```
+
+每次建置成功後，控制器會送出以下內容：
+
+```text
+{"name": <repository>, "tag": <tag>}
+```
+
+`name` 是映像檔的 repository，`tag` 是建置產生的標籤。控制器會嘗試 3 次，並將通知結果記錄為 `Build` 上的 Event。
+
+## 確認結果
+
+查看 `Build` 上的 Event，確認 Keel 通知的結果。

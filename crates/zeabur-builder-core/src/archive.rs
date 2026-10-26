@@ -2,9 +2,9 @@
 //! which tar entries the Job may write.
 //!
 //! A client packs the source folder as a gzip tar and pushes it as an OCI artifact
-//! (`docs/archive-source.md`): an image manifest with `artifactType` [`ARTIFACT_TYPE`], the empty
-//! config, and one layer of [`LAYER_MEDIA_TYPE`]. This is the form `oras push --artifact-type`
-//! writes ([OCI image spec], "Guidelines for artifact usage").
+//! (`docs/builds/archive-source.mdx`): an image manifest with `artifactType` [`ARTIFACT_TYPE`], the
+//! empty config, and one layer of [`LAYER_MEDIA_TYPE`]. This is the form `oras push
+//! --artifact-type` writes ([OCI image spec], "Guidelines for artifact usage").
 //!
 //! The repository is [`repository`]: the registry, the `Build`'s namespace, its name, and
 //! `source`. A `Build` names only a digest, so it cannot read the archive of another namespace or

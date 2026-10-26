@@ -78,7 +78,7 @@ EOF
 k -n "$a" get secret zeabur-builder-buildkit-client -o json |
   jq --arg n "stolen-from-$a" '{apiVersion, kind, type, data, metadata: {name: $n}}' |
   k -n "$b" apply -f - >/dev/null
-# A token for $a/probe only, as an admin gets one from the controller (README, Registry tokens).
+# A token for $a/probe only, as an admin gets one from the controller (docs/operations/registry-tokens.mdx).
 token=$(k -n builder-system exec deploy/zeabur-builder -- \
   /zeabur-builder registry-token --repository "$a/probe" --push)
 k -n "$a" create secret generic probe-push --type kubernetes.io/dockerconfigjson \

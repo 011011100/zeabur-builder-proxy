@@ -3,7 +3,7 @@
 #   scripts/deploy-example.sh <context>
 #   scripts/example-archive.sh <context>
 # Asks A/app for an upload token, pushes a small Dockerfile app with it to
-# <registry>/A/app/source, as docs/archive-source.md describes, and builds it in A. A Build of the same name in B and another
+# <registry>/A/app/source, as docs/builds/archive-source.mdx describes, and builds it in A. A Build of the same name in B and another
 # Build in A name the same digest and must fail at the source. Removes its Builds at the end.
 # Environment: A and B (team-a, team-b), TIMEOUT (600).
 set -euo pipefail

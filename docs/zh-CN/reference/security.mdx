@@ -1,0 +1,78 @@
+---
+title: 安全性与信任模型
+description: 了解 Zeabur Builder 的信任边界、运行不可信代码的配置，以及私下报告漏洞的方式。
+source: "7c01114a93ca"
+---
+
+用 Namespace 隔离各团队的构建来源、Secret、缓存与镜像推送权限。同一个 Namespace 内的构建彼此信任；运行不可信代码时，使用 `--buildkitd-runtime-class` 指定沙箱运行环境。
+
+## 报告漏洞
+
+在 GitHub 仓库中使用 **Report a vulnerability**，通过 private vulnerability reporting 私下报告漏洞。不要为安全问题创建公开 issue。
+
+安全政策见 [SECURITY.md](https://github.com/zeabur-oss/builder/blob/main/SECURITY.md)。
+
+## 支持范围
+
+Zeabur Builder 尚未发布版本，目前的修复只会合并到 `main`。
+
+## 信任模型
+
+隔离单位是 Namespace。共享集群的不同团队无法读取彼此的源代码、Secret 或构建缓存，也无法推送到彼此的镜像。
+
+### buildkitd、证书与构建缓存
+
+每个构建 Namespace 都有自己的 buildkitd、缓存、证书颁发机构（CA）与客户端证书。构建缓存保留在 buildkitd 的卷中，不会传到镜像仓库（registry）。
+
+使用 registry 令牌密钥时，每次运行都使用短期令牌推送，权限只覆盖该次运行所属 `Build` 的仓库。推送到其他 registry 时，则使用 `Build` 所在 Namespace 内用于推送的 Secret。
+
+同一个 Namespace 内的构建共享 buildkitd。因此，`RUN` 步骤可以读取同一个 Namespace 内其他构建的缓存挂载。
+
+### 归档文件来源
+
+归档文件来源只会从 `<registry.host>/<namespace>/<build>/source` 读取，并使用该次运行的 registry 凭据。
+
+registry 决定还有谁能读取归档文件。Zeabur Catalog 的 Zot 与测试用 registry 只允许持有该仓库令牌的用户读取。Job 解压归档文件时，不会写入源文件夹以外的位置。
+
+### Registry 令牌密钥与有效期
+
+任何能读取 registry 令牌密钥的人，都能推送到任意仓库，也能删除任意仓库。只有控制器可以读取这把密钥。
+
+令牌无法撤销。删除 Namespace 后，如果另一个团队创建同名的 Namespace，旧 Namespace 的令牌在到期前仍能推送到新 Namespace 的仓库。使用默认 Job 期限时，这段时间最长为 70 分钟。
+
+### 镜像的读取权限
+
+为了让节点拉取镜像，任何能连接到 registry 的人都能读取其中的镜像。不要把机密信息放进镜像。
+
+### 控制器权限
+
+控制器具备等同于集群管理员的能力：它能在所有 Namespace 中创建 Job、写入 Secret，以及创建特权模式的 buildkitd StatefulSet。
+
+Helm chart 的 ValidatingAdmissionPolicies 将控制器 ServiceAccount 创建的资源限制为：
+
+- 构建 Job：使用 chart 指定的镜像，不使用特权模式、不访问主机、不挂载 ServiceAccount 令牌，且不得位于 `kube-*`、控制器自身或 registry 的 Namespace。
+- buildkitd StatefulSet：使用 chart 指定的 buildkitd 镜像。
+
+即使有这些限制，取得控制器令牌的攻击者仍能读取所有允许运行构建的 Namespace 内的 Secret。详见[控制器的权限](../operations/controller-permissions.mdx)。
+
+### 构建步骤的网络访问
+
+每个 `RUN` 步骤都有自己的 network namespace，可以连接到互联网与 registry。
+
+[deploy/chart/templates/buildkitd.yaml](https://github.com/zeabur-oss/builder/blob/main/deploy/chart/templates/buildkitd.yaml) 中的出站流量策略会阻止它访问 Pod、Service、节点与云元数据端点（IPv4）。
+
+### buildkitd 的主机隔离
+
+buildkitd 在 user namespace 内以特权模式运行，配置为 `hostUsers: false`。构建内的 root 会映射到节点上的非特权用户，阻止跨团队访问。
+
+这项隔离无法阻止攻击者利用内核漏洞逃离容器。
+
+## 运行不可信代码
+
+<Callout type="warn">
+
+对于不可信的人提供的代码，Namespace 边界的隔离强度不足。
+
+</Callout>
+
+使用 `--buildkitd-runtime-class` 配置 buildkitd 的 `runtimeClassName`，指定 gVisor 或 Kata 等沙箱运行环境，并使用专用节点。

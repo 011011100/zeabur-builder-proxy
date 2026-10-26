@@ -1,0 +1,28 @@
+---
+title: 发行文件与验证
+description: 了解发行流程会生成的镜像、chart 和 Sigstore 签名，并用 cosign verify 验证镜像。
+source: "9275a9de94f9"
+---
+
+Zeabur Builder 目前还没有发行版。这里介绍 `main` 分支的发行流程执行后会生成的文件和签名。安装镜像前，你可以用 `cosign verify` 验证签名。
+
+## 发行流程
+
+`v<version>` 标签（tag）会触发发行流程：
+
+- 构建 `linux/amd64` 和 `linux/arm64` 的镜像，并在 k3s 集群上运行冒烟测试。
+- 按 digest 将 `ghcr.io/zeabur-oss/builder`、`builder-job` 和 `builder-railpack` 发布到镜像仓库（registry）。
+- 在 chart 中固定这些镜像的 digest，并将 chart 推送到 `oci://ghcr.io/zeabur-oss/charts/zeabur-builder`。
+- 使用 Sigstore，以无密钥方式为所有镜像和 chart 签名。
+
+流程完成后，维护者再发布草稿版本。
+
+## 验证镜像
+
+安装前，将 `<digest>` 换成镜像的 digest，并将 `<version>` 换成对应的版本，执行：
+
+```sh
+cosign verify ghcr.io/zeabur-oss/builder@sha256:<digest> \
+  --certificate-identity https://github.com/zeabur-oss/builder/.github/workflows/release.yml@refs/tags/v<version> \
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com
+```

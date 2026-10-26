@@ -1,0 +1,179 @@
+---
+title: Registry token 與清理
+description: 了解 Registry token 的時效與權限，使用 kubectl 和 ORAS 上傳來源或映像檔，並管理清理與金鑰輪替。
+source: "9ad98b88f606"
+---
+
+映像檔倉庫（registry）只信任一把 Ed25519 金鑰，只有控制器能讀取這把金鑰。控制器為每次使用簽發限定倉庫、會過期的 token。你可以用 token 上傳來源封存檔，管理員也能推送不屬於任何 Build 的映像檔。
+
+## Token 類型與時效
+
+| 類型 | 權限與範圍 | 時效 |
+| --- | --- | --- |
+| run | 推送與拉取映像檔倉庫 `<namespace>/<build>`，以及拉取來源封存檔倉庫 `<namespace>/<build>/source`。 | Job 的執行期限加上 10 分鐘。 |
+| upload | 推送到來源封存檔倉庫 `<namespace>/<build>/source`。 | 15 分鐘。 |
+
+控制器會在 token 中明確指定每個倉庫名稱。
+
+如果 Build 的映像檔位於 `registry.host`，但倉庫路徑不屬於該 Build，建置就會失敗。其他 registry 的映像檔使用推送用的 Secret，詳見[推送到外部映像檔倉庫](../builds/external-registries.mdx)。
+
+## 上傳來源封存檔
+
+### 開始前
+
+- 準備 `kubectl` 和 [ORAS](https://oras.land)。
+- 確認你有編輯目標 Build 的權限。
+- 確認 ORAS 能連到 `zot.zot.svc:5000`，並信任 Secret `zot/zot-tls` 中的 CA。從叢集外上傳時，使用下方的 port-forward 方式。
+
+<Steps>
+
+<Step>
+
+### 申請 upload token
+
+將 Build 上的 annotation `builder.zeabur.com/upload-token-request` 設為新值。控制器會建立 Secret `<build>-upload`，並在 `.status.uploadToken.request` 回報這次請求的值。
+
+```sh
+kubectl -n team-a annotate build/api --overwrite builder.zeabur.com/upload-token-request=u1
+kubectl -n team-a wait build/api --for=jsonpath='{.status.uploadToken.request}'=u1
+```
+
+上傳完成前，`archive.digest` 可以保持未設定。這時 Build 會等待上傳，`SourceReady` 顯示 `WaitingForUpload`。
+
+</Step>
+
+<Step>
+
+### 使用 ORAS 上傳
+
+如果 ORAS 能直接連到叢集內的 registry，讀取 Secret 中的認證設定後上傳：
+
+```sh
+kubectl -n team-a get secret api-upload -o jsonpath='{.data.\.dockerconfigjson}' |
+  base64 -d > auth.json
+oras push --registry-config auth.json zot.zot.svc:5000/team-a/api/source:upload-1 \
+  --artifact-type application/vnd.zeabur.source.v1+tar \
+  source.tar.gz:application/vnd.oci.image.layer.v1.tar+gzip
+```
+
+從叢集外上傳時，先開啟 port-forward：
+
+```sh
+kubectl -n zot port-forward svc/zot 5000:5000
+```
+
+將 Secret 的 `token` 欄位提供給 `localhost:5000`，並保留 TLS：
+
+```sh
+printf '{"auths":{"localhost:5000":{"registrytoken":"%s"}}}' \
+  "$(kubectl -n team-a get secret api-upload -o jsonpath='{.data.token}' | base64 -d)" > auth.json
+kubectl -n zot get secret zot-tls -o jsonpath='{.data.ca\.crt}' | base64 -d > ca.crt
+oras push --registry-config auth.json --plain-http=false --ca-file ca.crt \
+  localhost:5000/team-a/api/source:upload-1 ...
+```
+
+上方的 `...` 代表直接連線範例中的 artifact type 與來源檔案參數。
+
+</Step>
+
+<Step>
+
+### 設定來源 digest
+
+將 `archive.digest` 設為 `oras push` 輸出的 digest。
+
+</Step>
+
+</Steps>
+
+## 管理員推送映像檔
+
+管理員可以從控制器的 Pod 取得 token，不必建立 Build：
+
+```sh
+TOKEN=$(kubectl -n builder-system exec deploy/zeabur-builder -- \
+  /zeabur-builder registry-token --repository zeabur_admin/tools --push)
+printf '{"auths":{"zot.zot.svc:5000":{"registrytoken":"%s"}}}' "$TOKEN" > auth.json
+oras push --registry-config auth.json zot.zot.svc:5000/zeabur_admin/tools:v1 ./file
+```
+
+這類映像檔的倉庫路徑應避開 `<namespace>/<name>` 格式。例如，第一段名稱可以包含 Namespace 名稱不允許的 `_` 或 `.`。否則，控制器會在清理時刪除這些映像檔。
+
+## 清理映像檔與來源
+
+刪除 Build 時，無論單獨刪除或隨 Namespace 一起刪除，控制器都會刪除下列倉庫及其所有標籤（tag）：
+
+- `<namespace>/<build>/source`
+- `<namespace>/<build>`
+
+控制器會處理刪除事件，也會在啟動時及每 10 分鐘掃描 registry 的倉庫目錄，補上遺漏的清理。因此，映像檔會在刪除後的一個掃描週期內移除。
+
+Build 沒有 finalizer，Namespace 刪除不必等待控制器。
+
+新 Build 會先清除同名舊 Build 留下的映像檔與來源，再簽發指定這些倉庫的 token。新擁有者不會看到舊資料。
+
+如果控制器尚未安裝，映像檔會保留到控制器重新安裝。控制器啟動後的第一次掃描會刪除這些映像檔。
+
+控制器運作期間，管理員可以使用 `registry-token --delete` 取得 token，再用 `DELETE /v2/<repository>/manifests/<digest>` 手動刪除映像檔。
+
+<Callout type="warn">
+
+在 Zot 中，手動刪除映像檔倉庫的所有標籤，也會刪除其下的倉庫，包括 `<repository>/source` 中的來源封存檔。
+
+</Callout>
+
+## 輪替金鑰
+
+zot 只在啟動時讀取一次公鑰。
+
+<Callout type="warn">
+
+registry 重新啟動後，舊金鑰簽發的 token 會立即失效。執行中的建置會失敗，之後可以重新建置。
+
+</Callout>
+
+<Steps>
+
+<Step>
+
+### 刪除簽署金鑰 Secret
+
+使用 Zeabur Catalog 的 Zot 時，執行：
+
+```sh
+kubectl -n zot delete secret zot-token-signer
+```
+
+</Step>
+
+<Step>
+
+### 等待新金鑰
+
+等待 cert-manager 簽發新的 Secret。
+
+</Step>
+
+<Step>
+
+### 重新啟動 registry
+
+```sh
+kubectl -n zot rollout restart statefulset/zot
+```
+
+</Step>
+
+</Steps>
+
+## 權限
+
+Helm chart 會在金鑰所在的 Namespace 新增 Role，只授予該 Secret 的 `get` 權限。
+
+控制器使用既有的 Secret 權限寫入 `<build>-upload` Secret。
+
+## 已知限制
+
+- **刪除 Build 不會撤銷 token。** Token 會持續有效，直到到期。run token 能在清理後再次推送映像檔，控制器會在下一次掃描時刪除這些映像檔。
+- **Token 綁定倉庫名稱，不綁定 Namespace UID。** 刪除 Namespace 後，如果有人建立同名 Namespace，舊 Namespace 的 run token 仍能推送到新 Namespace 的倉庫，直到 token 到期。使用預設 Job 執行期限時，最長為 70 分鐘（60 分鐘加上 10 分鐘）。將已刪除的 Namespace 名稱交給另一個團隊前，先等待 70 分鐘。
+- **叢集內能連到 registry 的任何人都能拉取所有映像檔，節點也使用相同的拉取方式。** 不要把機密資訊放進映像檔，改用 Secret 提供給工作負載。

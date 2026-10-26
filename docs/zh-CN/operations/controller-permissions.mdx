@@ -1,0 +1,81 @@
+---
+title: 控制器的权限
+description: 了解控制器的集群权限与 ValidatingAdmissionPolicy 的限制，并用 kubectl 查看和编辑策略。
+source: "da4c4ef9182d"
+---
+
+把控制器当作集群管理员。了解控制器的权限与 admission policy 的限制，才能判断攻击者入侵控制器或窃取令牌后能做哪些事。
+
+## 控制器能做什么
+
+控制器的 ServiceAccount 有以下权限：
+
+- 在所有 Namespace 创建 Job。
+- 读写所有 Namespace 的 Secret。
+- 在 `builder-system` 创建 StatefulSet，其中的 Pod 可以使用特权模式。
+
+拿到控制器或其令牌的人也能执行这些操作。
+
+## 两个 ValidatingAdmissionPolicy 的限制
+
+Helm chart 提供两个 ValidatingAdmissionPolicy，限制控制器的 ServiceAccount 能创建哪些资源。
+
+### Job 策略
+
+`<release>-zeabur-builder-jobs` 只允许符合构建 Job 规范的 Job：
+
+- 镜像仅限 `jobImage`、`railpackImage` 和 `admissionPolicy.extraImages`。
+- 不允许特权模式、额外的 capabilities，也不允许使用宿主机的网络、PID、IPC、端口或路径。
+- 只能使用该 Namespace 的 `default` ServiceAccount，且不携带令牌。
+- 不得在 `kube-*` Namespace、控制器所在的 Namespace、镜像仓库（registry）所在的 Namespace，或 `admissionPolicy.extraDeniedNamespaces` 中的 Namespace 创建 Job。
+
+### StatefulSet 策略
+
+`<release>-zeabur-builder-buildkitd` 只允许在控制器所在的 Namespace 创建 StatefulSet：
+
+- 镜像仅限 `buildkitdImage`。
+- 不允许使用宿主机的 Namespace、端口或路径。
+
+## 策略能拦住和拦不住的事
+
+这两个策略可以阻止持有失窃令牌的人运行特权 Pod、使用其他 ServiceAccount，或在系统 Namespace 中运行构建。
+
+策略无法阻止攻击者读取允许构建的 Namespace 中的 Secret。构建 Job 可以挂载该 Namespace 中的任何 Secret。
+
+## 查看和编辑策略
+
+这些策略都是普通的 Kubernetes 对象，可以用 `kubectl` 查看和编辑。
+
+<Steps>
+
+<Step>
+
+### 查看策略与绑定
+
+```sh
+kubectl get validatingadmissionpolicy,validatingadmissionpolicybinding
+```
+
+</Step>
+
+<Step>
+
+### 编辑 Job 策略
+
+```sh
+kubectl edit validatingadmissionpolicy builder-zeabur-builder-jobs
+```
+
+</Step>
+
+</Steps>
+
+<Callout type="warn">
+
+`helm upgrade` 会根据 chart values 重新写入策略，覆盖你直接编辑的内容。
+
+</Callout>
+
+## 使用自定义 ClusterBuilder
+
+如果自定义 ClusterBuilder 使用其他 planner 镜像，你必须将该镜像加入 `admissionPolicy.extraImages`。

@@ -1,0 +1,41 @@
+---
+title: 部署构建好的镜像
+description: 使用可排序的标签搭配部署工具，并配置 Build 在构建成功后通知 Keel。
+source: "f696fd068011"
+---
+
+使用可排序的标签，让 Flux image automation、Argo CD Image Updater 和 Keel 在轮询镜像仓库（registry）时能发现新镜像。配置 `spec.notify` 后，`Build` 会在每次构建成功后通知 Keel，省去等待轮询的时间。
+
+## 标签格式
+
+每次构建都会生成一个标签（tag），依次包含分支名称、Unix time 和 commit：
+
+```text
+main-1761058800-3e1a9c2
+```
+
+这些标签可以排序，最新的标签排在最后。你可以用 `spec.output.tagTemplate` 和 `extraTags` 调整标签。
+
+Zeabur Builder 负责构建和推送镜像。你的部署工具负责部署。
+
+## 通知 Keel
+
+在 `Build` 的 `spec.notify` 中添加 Keel webhook：
+
+```yaml
+spec:
+  notify:
+    - {type: keel, url: http://keel.keel.svc:9300/v1/webhooks/native}
+```
+
+每次构建成功后，控制器会发送以下内容：
+
+```text
+{"name": <repository>, "tag": <tag>}
+```
+
+`name` 是镜像的 repository，`tag` 是构建生成的标签。控制器会尝试 3 次，并将通知结果记录为 `Build` 上的 Event。
+
+## 确认结果
+
+查看 `Build` 上的 Event，确认 Keel 通知的结果。

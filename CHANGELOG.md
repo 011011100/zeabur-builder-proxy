@@ -14,7 +14,7 @@ All notable changes to Zeabur Builder. The format follows
 - Images for linux/amd64 and linux/arm64, published by digest and signed with Sigstore; the chart
   pins them by digest.
 - A ValidatingAdmissionPolicy in the chart limits the controller's ServiceAccount to build Jobs
-  and buildkitd StatefulSets (README, Controller permissions). `buildkitdImage` sets buildkitd's
+  and buildkitd StatefulSets (docs/operations/controller-permissions.mdx). `buildkitdImage` sets buildkitd's
   image.
 - `spec.output.pushSecretRef`: a push Secret in the `Build`'s namespace for an image on another
   registry.

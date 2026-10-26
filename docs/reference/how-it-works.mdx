@@ -1,0 +1,92 @@
+---
+title: How it works
+description: Learn how Zeabur Builder builds images from Git commits and manages build resources, caching, and isolation.
+---
+
+Create a `Build` and specify a Git repository and builder. The controller builds an image for each new commit, pushes it to a container registry, and writes the image information to `BuildRun` and `Build`.
+
+## Build process
+
+<Steps>
+
+<Step>
+
+### Resolve the Git commit
+
+The controller uses Git's smart HTTP or SSH protocol to resolve the `Build` ref to a commit.
+
+If you omit `ref`, the controller tracks the repository's default branch and writes the branch name to `status.resolvedRef`.
+
+</Step>
+
+<Step>
+
+### Create a BuildRun and Job
+
+When the controller finds a new commit, it creates a `BuildRun`, then creates a Job for that build.
+
+</Step>
+
+<Step>
+
+### Run the build
+
+The Job fetches the commit. If the builder provides a planner, the Job runs the planner first, then runs `buildctl` to connect to buildkitd in its Namespace.
+
+The controller starts buildkitd when needed. Dockerfile `RUN` steps execute in buildkitd, isolated from Pods, Services, and nodes.
+
+</Step>
+
+<Step>
+
+### Push the image and record the results
+
+After the build completes, the Job pushes the image to `<registry.host>/<namespace>/<name>` and writes the digest and tags to `BuildRun` and `Build`.
+
+The `Build` field `status.latestImage` records the image in the format `<repository>:<tag>@<digest>`.
+
+</Step>
+
+</Steps>
+
+## Build resources per Namespace
+
+Each Namespace that runs builds has its own buildkitd, cache, certificate authority (CA), and registry path.
+
+The cache persists on the buildkitd volume between builds, so the contents of `RUN --mount=type=cache` can persist. These caches aren't pushed to the registry.
+
+buildkitd scales to zero after 10 minutes of inactivity.
+
+## Build permissions and isolation
+
+Each build has one Job. The Job runs `buildctl` and doesn't need privileges.
+
+`RUN` steps execute in buildkitd, isolated from Pods, Services, and nodes.
+
+## Result ordering across commits
+
+The controller uses the most recently discovered commit. A build for an older commit won't overwrite `status.latestImage`, even if it finishes later.
+
+## Custom resources
+
+Zeabur Builder uses three custom resources: `Build`, `BuildRun`, and `ClusterBuilder`. Their API version is `v1alpha1`.
+
+`Build` specifies the Git repository and builder. The controller creates a `BuildRun` for each new commit to record the build's status and results.
+
+## Check the results
+
+View the builder, source, version, and readiness status of each Build:
+
+```sh
+kubectl get builds
+```
+
+Add `-o wide` to view the image.
+
+View the phase, reason, start time, and end time of each build:
+
+```sh
+kubectl get buildruns
+```
+
+Build logs are the logs from the Job's Pod.

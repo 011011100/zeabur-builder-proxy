@@ -1,0 +1,77 @@
+---
+title: Security and trust model
+description: Understand Zeabur Builder's trust boundaries, settings for running untrusted code, and how to report vulnerabilities privately.
+---
+
+Use Namespaces to separate teams' build sources, Secrets, caches, and image push permissions. Builds within the same Namespace trust each other. When running untrusted code, use `--buildkitd-runtime-class` to specify a sandbox runtime.
+
+## Report a vulnerability
+
+Use **Report a vulnerability** in the GitHub repository to report vulnerabilities privately through private vulnerability reporting. Don't open public issues for security problems.
+
+See [SECURITY.md](https://github.com/zeabur-oss/builder/blob/main/SECURITY.md) for the security policy.
+
+## Supported versions
+
+Zeabur Builder has no releases yet. Fixes currently merge only into `main`.
+
+## Trust model
+
+The Namespace is the unit of isolation. Different teams sharing a cluster can't read each other's source code, Secrets, or build caches, or push to each other's image repositories.
+
+### buildkitd, certificates, and build caches
+
+Each build Namespace has its own buildkitd, cache, certificate authority (CA), and client certificates. Build caches stay on buildkitd's volume and aren't sent to the image registry.
+
+When using a registry token key, each run uses a short-lived token to push images. The token's permissions cover only the repository for that run's `Build`. Pushes to other registries use a push Secret in the `Build`'s Namespace.
+
+Builds within the same Namespace share buildkitd. As a result, `RUN` steps can read cache mounts from other builds in the same Namespace.
+
+### Archive sources
+
+Archive sources are read only from `<registry.host>/<namespace>/<build>/source`, using the registry credentials for that run.
+
+The registry determines who else can read the archives. Zot in Zeabur Catalog and the test registry restrict reads to users who hold a token for that repository. When the Job extracts an archive, it doesn't write outside the source directory.
+
+### Registry token keys and expiration
+
+Anyone who can read the registry token key can push to and delete any repository. Only the controller can read this key.
+
+Tokens can't be revoked. If another team creates a Namespace with the same name after a Namespace is deleted, tokens from the old Namespace can still push to the new Namespace's repositories until they expire. With the default Job deadline, this window lasts up to 70 minutes.
+
+### Image read access
+
+Anyone who can reach the registry can read its images so that nodes can pull them. Don't put sensitive information in images.
+
+### Controller permissions
+
+The controller has capabilities equivalent to a cluster administrator: it can create Jobs, write Secrets, and create privileged buildkitd StatefulSets in all Namespaces.
+
+The Helm chart's ValidatingAdmissionPolicies restrict resources created by the controller ServiceAccount as follows:
+
+- Build Jobs: Must use the image specified by the chart, run without privileges or host access, and mount no ServiceAccount token. They must not run in `kube-*` Namespaces, the controller's own Namespace, or the registry's Namespace.
+- buildkitd StatefulSets: Must use the buildkitd image specified by the chart.
+
+Even with these restrictions, an attacker who obtains the controller token can still read Secrets in all Namespaces where builds are permitted. See [Controller permissions](../operations/controller-permissions.mdx).
+
+### Network access from build steps
+
+Each `RUN` step has its own network namespace and can reach the internet and the registry.
+
+The egress policy in [deploy/chart/templates/buildkitd.yaml](https://github.com/zeabur-oss/builder/blob/main/deploy/chart/templates/buildkitd.yaml) blocks its access to Pods, Services, nodes, and cloud metadata endpoints (IPv4).
+
+### buildkitd host isolation
+
+buildkitd runs in privileged mode within a user namespace, with `hostUsers: false`. Root inside a build maps to an unprivileged user on the node to prevent cross-team access.
+
+This isolation doesn't prevent attackers from exploiting kernel vulnerabilities to escape the container.
+
+## Run untrusted code
+
+<Callout type="warn">
+
+Namespace boundaries don't provide sufficient isolation for code from people you don't trust.
+
+</Callout>
+
+Use `--buildkitd-runtime-class` to set buildkitd's `runtimeClassName` to a sandbox runtime such as gVisor or Kata, and use dedicated nodes.

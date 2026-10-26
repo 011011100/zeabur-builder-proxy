@@ -1,0 +1,76 @@
+---
+title: Trigger builds
+description: Configure polling and push webhooks, rebuild manually, and choose how to handle running builds when a new commit arrives.
+---
+
+You can trigger Zeabur Builder builds with polling, push webhooks, a [GitHub App](./private-repos.mdx), or manual rebuilds.
+
+## Polling
+
+The controller queries the Git server for the ref every minute by default. Set the polling interval with `spec.triggers.pollInterval`.
+
+## Configure a push webhook
+
+A push webhook wakes up Builds that track the repository and branch. The controller verifies the signature and resolves the ref itself; the webhook payload doesn't specify which commit to build.
+
+<Steps>
+
+<Step>
+
+### Enable the receiver
+
+Enable `webhooks.enabled` in the Helm chart, then configure `webhooks.ingress` or `webhooks.httpRoute`.
+
+</Step>
+
+<Step>
+
+### Specify the Build's Secret
+
+Specify the Secret name and key in each Build's `spec.triggers.webhook.secretRef`:
+
+```yaml
+spec:
+  triggers:
+    webhook: {secretRef: {name: api-webhook, key: secret}}
+```
+
+</Step>
+
+<Step>
+
+### Configure the repository's webhook
+
+Set the repository's webhook URL to `https://<host>/hooks/<provider>` and use the same secret as the Secret.
+
+Choose `<provider>` for your Git service:
+
+| Service | `<provider>` |
+| --- | --- |
+| GitHub | `github` |
+| GitLab | `gitlab` |
+| Gitea | `gitea` |
+| Forgejo | `forgejo` |
+| Bitbucket | `bitbucket` |
+| [Standard Webhooks](https://www.standardwebhooks.com/) | `generic` |
+
+Polling continues after you enable a push webhook.
+
+</Step>
+
+</Steps>
+
+## Rebuild manually and suspend automatic builds
+
+Change the Build's `builder.zeabur.com/rebuild` annotation to a new value to rebuild the current commit.
+
+Use `spec.suspend` to stop automatic builds.
+
+## Handle running builds
+
+`spec.concurrency` determines how to handle running builds when a new commit arrives:
+
+| Value | Behavior |
+| --- | --- |
+| `Replace` (default) | Cancels the running build. |
+| `Queue` | Lets the running build finish. |

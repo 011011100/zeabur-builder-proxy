@@ -1,0 +1,84 @@
+---
+title: 安装 Zeabur Builder
+description: 用 Helm chart 安装 Zeabur Builder，并配置镜像仓库和构建器所需的访问权限。
+source: "a1adf110eecd"
+---
+
+用 Helm chart 一次装好控制器、CRD、`dockerfile` 和 `railpack` ClusterBuilder、buildkitd 配置和出站网络策略，以及限制控制器权限的 ValidatingAdmissionPolicy。
+
+## 开始前
+
+- 准备 Kubernetes 1.33 或更新版本的集群，供 buildkitd 使用 user namespace。较旧的集群需要在 `extraArgs` 中加上 `--buildkitd-host-users=true`。
+- 使用支持执行 NetworkPolicy 的 CNI。
+- 准备镜像仓库（registry）。
+- 在节点上为各 Namespace 的构建缓存预留磁盘空间，默认为 20 GiB。
+- buildkitd 以 privileged 模式运行，其所在的 Namespace 必须允许 Pod Security 级别 `privileged`。
+
+<Steps>
+
+<Step>
+
+### 安装 chart
+
+Helm 安装命令如下。安装前，还需要补上下一步的必要 registry 配置。
+
+```sh
+helm install builder oci://ghcr.io/zeabur-oss/charts/zeabur-builder --version <version> \
+  -n builder-system --create-namespace --set registry.host=<registry>
+```
+
+<Callout type="info">
+
+Zeabur Builder 还没有发布版本，命令中的 `<version>` 要等首个版本发布后才有可用的值。目前 `scripts/deploy-example.sh` 会从这份源码的 `deploy/chart` 安装 chart。
+
+</Callout>
+
+发行版 chart 会用 digest 固定使用的三个镜像。验证方法见[发行文件与验证](../operations/releases.mdx)。
+
+</Step>
+
+<Step>
+
+### 配置镜像仓库
+
+[deploy/chart/values.yaml](https://github.com/zeabur-oss/builder/blob/main/deploy/chart/values.yaml) 列出了所有配置项。根据你的 registry 填写以下配置：
+
+| 配置项 | 用途 |
+| --- | --- |
+| `registry.host` | 镜像推送的目标地址，路径格式为 `<host>/<namespace>/<build>`。 |
+| `registry.tokenKey` | 必填。指定 Secret，其中的密钥用于签署 registry 信任的令牌。详见 [Registry 令牌](../operations/registry-tokens.mdx)。 |
+| `registry.ca` 或 `registry.caFrom` | registry 使用私有证书时，提供其 CA。 |
+| `registry.inCluster` | registry 在集群内运行时，指定其 Namespace、Pod 标签和端口，让出站网络策略允许 buildkitd 访问。 |
+
+缺少 `registry.tokenKey.namespace` 或 `registry.tokenKey.secret` 时，chart 无法安装或渲染。
+
+控制器也需要连接 registry，才能删除镜像仓库。registry 所在 Namespace 的 NetworkPolicy 必须允许这项连接。控制器的权限范围见[控制器的权限](../operations/controller-permissions.mdx)。
+
+</Step>
+
+<Step>
+
+### 搭配 Zeabur Catalog 的 Zot
+
+[Zeabur Catalog](https://github.com/zeabur-oss/catalog) 的 Zot 只接受使用 `zot-token-signer` 签署的令牌推送镜像。搭配这个 Zot 时，使用以下配置：
+
+```sh
+helm install builder oci://ghcr.io/zeabur-oss/charts/zeabur-builder --version <version> \
+  -n builder-system --create-namespace --set registry.host=zot.zot.svc:5000 \
+  --set registry.caFrom.namespace=zot --set registry.caFrom.secret=zot-tls \
+  --set registry.inCluster.namespace=zot \
+  --set registry.inCluster.podLabels.app\\.kubernetes\\.io/name=zot \
+  --set registry.tokenKey.namespace=zot --set registry.tokenKey.secret=zot-token-signer
+```
+
+</Step>
+
+</Steps>
+
+## 升级 CRD
+
+Helm 不会升级 CRD。执行 `helm upgrade` 前，先 apply 新版 chart 的 `crds/crds.yaml`。
+
+## 在测试集群安装
+
+在测试集群上，`scripts/deploy-example.sh` 会从当前源码安装 chart，并部署测试用 registry 和示例 Build。用法见 [CONTRIBUTING.md](https://github.com/zeabur-oss/builder/blob/main/CONTRIBUTING.md#tests-against-a-cluster)。

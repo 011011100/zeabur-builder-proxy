@@ -1,0 +1,93 @@
+---
+title: 工作原理
+description: 了解 Zeabur Builder 如何从 Git commit 构建镜像，以及构建资源、缓存与隔离方式。
+source: "15b8542a967b"
+---
+
+创建 `Build`，指定 Git 仓库与构建器。控制器会为新的 commit 构建镜像、推送到镜像仓库（registry），并将镜像信息写入 `BuildRun` 与 `Build`。
+
+## 构建流程
+
+<Steps>
+
+<Step>
+
+### 解析 Git commit
+
+控制器使用 Git 的 smart HTTP 或 SSH 协议，将 `Build` 的 ref 解析为 commit。
+
+省略 `ref` 时，控制器会跟踪仓库的默认分支，并将分支名称写入 `status.resolvedRef`。
+
+</Step>
+
+<Step>
+
+### 创建 BuildRun 与 Job
+
+控制器发现新的 commit 后，会创建 `BuildRun`，再为这次构建创建 Job。
+
+</Step>
+
+<Step>
+
+### 执行构建
+
+Job 会拉取该 commit。如果构建器提供规划器，Job 会先执行规划器，再执行 `buildctl`，连接到所属 Namespace 的 buildkitd。
+
+控制器会在需要时启动 buildkitd。Dockerfile 的 `RUN` 步骤在 buildkitd 中执行，与 Pod、Service 和节点隔离。
+
+</Step>
+
+<Step>
+
+### 推送镜像并记录结果
+
+构建完成后，Job 会将镜像推送到 `<registry.host>/<namespace>/<name>`，并将 digest 与标签（tag）写入 `BuildRun` 和 `Build`。
+
+`Build` 的 `status.latestImage` 会以 `<repository>:<tag>@<digest>` 格式记录镜像。
+
+</Step>
+
+</Steps>
+
+## 每个 Namespace 的构建资源
+
+每个执行构建的 Namespace 都有自己的 buildkitd、缓存、证书颁发机构（CA）与 registry 路径。
+
+buildkitd 的存储卷会在多次构建之间保留缓存，因此 `RUN --mount=type=cache` 的内容可以保留。这些缓存不会推送到 registry。
+
+buildkitd 空闲 10 分钟后会缩容到零。
+
+## 构建权限与隔离
+
+每次构建都有一个 Job。Job 执行 `buildctl`，不需要特权。
+
+`RUN` 步骤在 buildkitd 中执行，与 Pod、Service 和节点隔离。
+
+## 多个 commit 的结果顺序
+
+控制器以最后找到的 commit 为准。旧 commit 的构建即使更晚完成，也不会覆盖 `status.latestImage`。
+
+## 自定义资源
+
+Zeabur Builder 使用 `Build`、`BuildRun` 与 `ClusterBuilder` 三种自定义资源，API 版本为 `v1alpha1`。
+
+`Build` 指定 Git 仓库与构建器。控制器为新的 commit 创建 `BuildRun`，记录该次构建的状态与结果。
+
+## 确认结果
+
+查看各个 Build 的构建器、来源、版本与就绪状态：
+
+```sh
+kubectl get builds
+```
+
+加上 `-o wide` 可查看镜像。
+
+查看各次构建的阶段、原因、开始与结束时间：
+
+```sh
+kubectl get buildruns
+```
+
+构建日志就是 Job 的 Pod 日志。

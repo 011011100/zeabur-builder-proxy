@@ -1,0 +1,178 @@
+---
+title: Registry tokens and cleanup
+description: Learn about registry token lifetimes and permissions, upload source archives or images with kubectl and ORAS, and manage cleanup and key rotation.
+---
+
+The image registry trusts a single Ed25519 key. Only the controller can read this key. The controller issues an expiring, repository-scoped token for each use. You can use a token to upload source archives, and admins can push images that don't belong to any Build.
+
+## Token types and lifetimes
+
+| Type | Permissions and scope | Lifetime |
+| --- | --- | --- |
+| run | Push and pull from the image repository `<namespace>/<build>`, and pull from the source archive repository `<namespace>/<build>/source`. | The Job's execution deadline plus 10 minutes. |
+| upload | Push to the source archive repository `<namespace>/<build>/source`. | 15 minutes. |
+
+The controller explicitly specifies each repository name in the token.
+
+If a Build's image is hosted at `registry.host` but its repository path doesn't belong to that Build, the build fails. Images in other registries use a Secret for push credentials. See [Push to external registries](../builds/external-registries.mdx).
+
+## Upload a source archive
+
+### Before you begin
+
+- Have `kubectl` and [ORAS](https://oras.land) ready.
+- Make sure you have permission to edit the target Build.
+- Make sure ORAS can connect to `zot.zot.svc:5000` and trusts the CA in the Secret `zot/zot-tls`. To upload from outside the cluster, use the port-forward method below.
+
+<Steps>
+
+<Step>
+
+### Request an upload token
+
+Set the Build's `builder.zeabur.com/upload-token-request` annotation to a new value. The controller creates the Secret `<build>-upload` and reports the request value in `.status.uploadToken.request`.
+
+```sh
+kubectl -n team-a annotate build/api --overwrite builder.zeabur.com/upload-token-request=u1
+kubectl -n team-a wait build/api --for=jsonpath='{.status.uploadToken.request}'=u1
+```
+
+You can leave `archive.digest` unset until the upload finishes. The Build waits for the upload, and `SourceReady` shows `WaitingForUpload`.
+
+</Step>
+
+<Step>
+
+### Upload with ORAS
+
+If ORAS can connect directly to the registry inside the cluster, read the credentials from the Secret and upload:
+
+```sh
+kubectl -n team-a get secret api-upload -o jsonpath='{.data.\.dockerconfigjson}' |
+  base64 -d > auth.json
+oras push --registry-config auth.json zot.zot.svc:5000/team-a/api/source:upload-1 \
+  --artifact-type application/vnd.zeabur.source.v1+tar \
+  source.tar.gz:application/vnd.oci.image.layer.v1.tar+gzip
+```
+
+To upload from outside the cluster, start port-forwarding first:
+
+```sh
+kubectl -n zot port-forward svc/zot 5000:5000
+```
+
+Supply the Secret's `token` field to `localhost:5000` and keep TLS enabled:
+
+```sh
+printf '{"auths":{"localhost:5000":{"registrytoken":"%s"}}}' \
+  "$(kubectl -n team-a get secret api-upload -o jsonpath='{.data.token}' | base64 -d)" > auth.json
+kubectl -n zot get secret zot-tls -o jsonpath='{.data.ca\.crt}' | base64 -d > ca.crt
+oras push --registry-config auth.json --plain-http=false --ca-file ca.crt \
+  localhost:5000/team-a/api/source:upload-1 ...
+```
+
+The `...` above stands for the artifact type and source file arguments from the direct connection example.
+
+</Step>
+
+<Step>
+
+### Set the source digest
+
+Set `archive.digest` to the digest from the `oras push` output.
+
+</Step>
+
+</Steps>
+
+## Push images as an admin
+
+Admins can get a token from the controller's Pod without creating a Build:
+
+```sh
+TOKEN=$(kubectl -n builder-system exec deploy/zeabur-builder -- \
+  /zeabur-builder registry-token --repository zeabur_admin/tools --push)
+printf '{"auths":{"zot.zot.svc:5000":{"registrytoken":"%s"}}}' "$TOKEN" > auth.json
+oras push --registry-config auth.json zot.zot.svc:5000/zeabur_admin/tools:v1 ./file
+```
+
+Avoid the `<namespace>/<name>` format for these images' repository paths. For example, the first path segment can contain `_` or `.`, which Namespace names don't permit. Otherwise, the controller deletes these images during cleanup.
+
+## Clean up images and sources
+
+When you delete a Build, either on its own or along with its Namespace, the controller deletes the following repositories and all their tags:
+
+- `<namespace>/<build>/source`
+- `<namespace>/<build>`
+
+The controller handles deletion events. It also scans the registry's repository catalog at startup and every 10 minutes to catch missed cleanup. Images are therefore removed within one scan cycle after deletion.
+
+Builds have no finalizer, so Namespace deletion doesn't need to wait for the controller.
+
+A new Build first removes images and sources left by an old Build with the same name, then issues tokens for those repositories. The new owner won't see the old data.
+
+If the controller isn't installed, images remain until you reinstall it. The controller deletes these images during its first scan after startup.
+
+While the controller is running, admins can use `registry-token --delete` to get a token, then manually delete images with `DELETE /v2/<repository>/manifests/<digest>`.
+
+<Callout type="warn">
+
+In Zot, manually deleting all tags in an image repository also deletes its child repositories, including source archives in `<repository>/source`.
+
+</Callout>
+
+## Rotate keys
+
+zot reads the public key only once, at startup.
+
+<Callout type="warn">
+
+After the registry restarts, tokens signed with the old key immediately become invalid. Running builds fail. You can rebuild them afterward.
+
+</Callout>
+
+<Steps>
+
+<Step>
+
+### Delete the signing key Secret
+
+If you use Zot from the Zeabur Catalog, run:
+
+```sh
+kubectl -n zot delete secret zot-token-signer
+```
+
+</Step>
+
+<Step>
+
+### Wait for a new key
+
+Wait for cert-manager to issue a new Secret.
+
+</Step>
+
+<Step>
+
+### Restart the registry
+
+```sh
+kubectl -n zot rollout restart statefulset/zot
+```
+
+</Step>
+
+</Steps>
+
+## Permissions
+
+The Helm chart adds a Role in the Namespace that holds the key. The Role grants only `get` permission for that Secret.
+
+The controller uses its existing Secret permissions to write the `<build>-upload` Secret.
+
+## Known limitations
+
+- **Deleting a Build doesn't revoke its tokens.** Tokens remain valid until they expire. A run token can push images again after cleanup. The controller deletes those images during the next scan.
+- **Tokens bind to repository names, not Namespace UIDs.** After you delete a Namespace, if someone creates a Namespace with the same name, the old Namespace's run tokens can still push to the new Namespace's repositories until the tokens expire. With the default Job execution deadline, this window lasts up to 70 minutes (60 minutes plus 10 minutes). Wait 70 minutes before handing a deleted Namespace's name to another team.
+- **Anyone inside the cluster who can reach the registry can pull all images. Nodes use the same pull method.** Don't put secrets in images. Use Secrets to supply them to workloads.

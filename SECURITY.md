@@ -31,7 +31,7 @@ source, secrets or build cache, and cannot push to each other's images:
   ValidatingAdmissionPolicies allow its ServiceAccount only build Jobs (the chart's images, no
   privilege, no host access, no ServiceAccount token, not in `kube-*`, its own or the registry's
   namespaces) and buildkitd StatefulSets with the chart's buildkitd image. A stolen token can
-  still read the Secrets of any namespace where builds may run (README, Controller permissions).
+  still read the Secrets of any namespace where builds may run (docs/operations/controller-permissions.mdx).
 - Builds in one namespace trust each other. They share a buildkitd, so a `RUN` step can read the
   cache mounts of other builds in the same namespace.
 - Each `RUN` step has its own network namespace. It reaches the internet and the registry; the

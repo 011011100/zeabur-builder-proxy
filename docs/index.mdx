@@ -1,0 +1,41 @@
+---
+title: Get started with Zeabur Builder
+description: Build images from Git with BuildKit on Kubernetes, and pass the results to your deployment tool.
+---
+
+Zeabur Builder is a Kubernetes operator. You create a `Build` that points to a Git repository. It builds an image for each new commit, pushes the image to a registry, and writes `<repository>:<tag>@<digest>` to `status.latestImage`.
+
+Zeabur Builder only builds images. Your pipeline, deployment tool, and log collector handle testing, deployment, and log storage.
+
+<Callout type="info">
+
+Zeabur Builder has no releases yet, and its API is `v1alpha1`. This documentation describes the current behavior of the `main` branch.
+
+</Callout>
+
+## I want to get started
+
+Install the controller with the Helm chart, then create your first `Build`.
+
+- [Install](get-started/install.mdx)
+- [Create your first Build](get-started/first-build.mdx)
+
+## I want to manage Builds
+
+- [Trigger builds](builds/triggers.mdx): Polling, push webhooks, and manual rebuilds.
+- [Private repositories](builds/private-repos.mdx): Use `credentialsRef` or a GitHub App.
+- [Build from an uploaded folder](builds/archive-source.mdx): Build without Git.
+- [Deploy built images](builds/rollout.mdx): Tags and Keel notifications.
+- [Push to external registries](builds/external-registries.mdx)
+
+## I'm a cluster administrator
+
+- [Registry tokens](operations/registry-tokens.mdx): Tokens, uploads, cleanup, and key rotation.
+- [Controller permissions](operations/controller-permissions.mdx): Treat the controller as a cluster administrator.
+- [Release artifacts and verification](operations/releases.mdx)
+
+## I want to understand how it works
+
+- [How it works](reference/how-it-works.mdx)
+- [Current status](reference/status.mdx)
+- [Security and trust model](reference/security.mdx)

@@ -1,0 +1,67 @@
+---
+title: 构建私有仓库
+description: 使用 credentialsRef 或 GitHub App，让 Build 获取私有仓库的代码并触发构建。
+source: "c7c63e18646d"
+---
+
+你可以用 `spec.source.credentialsRef` 指定 Secret，通过 basic-auth 令牌或 ssh-auth deploy key 访问私有仓库；deploy key 需要搭配 `known_hosts`，Secret 需要添加指定标签。私有 GitHub 仓库也可以使用 GitHub App，让 Build 获取短期 installation 令牌。
+
+## 使用 credentialsRef
+
+将 `spec.source.credentialsRef` 指向存储凭据的 Secret。Secret 支持以下两种类型：
+
+| Secret 类型 | 内容 |
+| --- | --- |
+| `kubernetes.io/basic-auth` | 令牌 |
+| `kubernetes.io/ssh-auth` | deploy key 和 `known_hosts` |
+
+为 Secret 添加以下标签：
+
+```yaml
+builder.zeabur.com/git-credentials: "true"
+```
+
+## 使用 GitHub App
+
+集群管理员只需创建一次 GitHub App，并将配置保存到控制器的 Namespace。Build 再指定要使用的 installation。
+
+<Steps>
+
+<Step>
+
+### 创建 GitHub App 并配置可用的 Namespace
+
+运行以下命令。`zeabur-builder github-app create` 会在 127.0.0.1 启动 manifest 流程：
+
+```sh
+zeabur-builder github-app create --webhook-url https://<host>/hooks/github-app \
+  > github-app.json   # opens the manifest flow on 127.0.0.1
+kubectl -n builder-system apply -f github-app.json
+kubectl -n builder-system create configmap github-app-installations \
+  --from-literal=12345678=team-a,team-b   # installation id: namespaces allowed to use it
+```
+
+`github-app-installations` ConfigMap 以 installation ID 为键，值为允许使用该 installation 的 Namespace。上例允许 `team-a` 和 `team-b` 使用 installation 12345678。
+
+</Step>
+
+<Step>
+
+### 在 Build 中指定 installation
+
+在 Build 的 `spec.source.githubApp` 中填入 installation ID：
+
+```yaml
+spec:
+  source:
+    git: {url: https://github.com/acme/private-api}
+    githubApp: {installationId: 12345678}
+```
+
+</Step>
+
+</Steps>
+
+GitHub App 会提供短期 installation 令牌，供 Job 以只读权限访问私有仓库。每个 commit 都会收到 commit status。
+
+App 的 push 事件会唤醒对应的 Build，无需为每个 Build 配置 Secret。启用 webhook 时，这些 Build 每 10 分钟轮询一次。其他触发方式见[触发构建](./triggers.mdx)。

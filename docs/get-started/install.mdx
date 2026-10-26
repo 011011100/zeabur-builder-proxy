@@ -1,0 +1,83 @@
+---
+title: Install Zeabur Builder
+description: Install Zeabur Builder with a Helm chart, and configure the registry and access permissions the builders need.
+---
+
+Use the Helm chart to install the controller, CRDs, `dockerfile` and `railpack` ClusterBuilders, buildkitd configuration and egress policies, and a ValidatingAdmissionPolicy that restricts the controller's permissions.
+
+## Before you begin
+
+- Prepare a cluster running Kubernetes 1.33 or later so buildkitd can use user namespaces. For older clusters, add `--buildkitd-host-users=true` to `extraArgs`.
+- Use a CNI that enforces NetworkPolicy.
+- Prepare a container registry.
+- Reserve disk space on the nodes for each Namespace's build cache. The default is 20 GiB.
+- buildkitd runs in privileged mode. Its Namespace must allow the `privileged` Pod Security level.
+
+<Steps>
+
+<Step>
+
+### Install the chart
+
+Use the following Helm command to install the chart. Before you run it, add the required registry settings from the next step.
+
+```sh
+helm install builder oci://ghcr.io/zeabur-oss/charts/zeabur-builder --version <version> \
+  -n builder-system --create-namespace --set registry.host=<registry>
+```
+
+<Callout type="info">
+
+Zeabur Builder doesn't have a release yet. A value for `<version>` in this command will be available after the first release. For now, `scripts/deploy-example.sh` installs the chart from `deploy/chart` in this source tree.
+
+</Callout>
+
+The release chart pins its three images by digest. See [Releases and verification](../operations/releases.mdx) for verification instructions.
+
+</Step>
+
+<Step>
+
+### Configure the registry
+
+[deploy/chart/values.yaml](https://github.com/zeabur-oss/builder/blob/main/deploy/chart/values.yaml) lists all configuration values. Set the following values for your registry:
+
+| Value | Purpose |
+| --- | --- |
+| `registry.host` | The destination for image pushes. Paths use the format `<host>/<namespace>/<build>`. |
+| `registry.tokenKey` | Required. Specifies the Secret containing the key used to sign tokens the registry trusts. See [Registry tokens](../operations/registry-tokens.mdx). |
+| `registry.ca` or `registry.caFrom` | Provides the registry's CA if the registry uses a private certificate. |
+| `registry.inCluster` | Specifies the Namespace, Pod labels, and port of a registry running inside the cluster so the egress policy permits buildkitd to access it. |
+
+The chart can't install or render if `registry.tokenKey.namespace` or `registry.tokenKey.secret` is missing.
+
+The controller also needs to connect to the registry to delete repositories. The NetworkPolicy in the registry's Namespace must permit this connection. See [Controller permissions](../operations/controller-permissions.mdx) for the scope of the controller's permissions.
+
+</Step>
+
+<Step>
+
+### Use Zot from Zeabur Catalog
+
+Zot from [Zeabur Catalog](https://github.com/zeabur-oss/catalog) only accepts image pushes with tokens signed by `zot-token-signer`. Use the following settings with this Zot instance:
+
+```sh
+helm install builder oci://ghcr.io/zeabur-oss/charts/zeabur-builder --version <version> \
+  -n builder-system --create-namespace --set registry.host=zot.zot.svc:5000 \
+  --set registry.caFrom.namespace=zot --set registry.caFrom.secret=zot-tls \
+  --set registry.inCluster.namespace=zot \
+  --set registry.inCluster.podLabels.app\\.kubernetes\\.io/name=zot \
+  --set registry.tokenKey.namespace=zot --set registry.tokenKey.secret=zot-token-signer
+```
+
+</Step>
+
+</Steps>
+
+## Upgrade CRDs
+
+Helm doesn't upgrade CRDs. Before running `helm upgrade`, apply `crds/crds.yaml` from the new chart version.
+
+## Install in a test cluster
+
+In a test cluster, `scripts/deploy-example.sh` installs the chart from the current source tree and deploys a test registry and an example Build. See [CONTRIBUTING.md](https://github.com/zeabur-oss/builder/blob/main/CONTRIBUTING.md#tests-against-a-cluster) for usage instructions.

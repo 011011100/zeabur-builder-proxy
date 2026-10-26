@@ -1,0 +1,125 @@
+---
+title: Build from an uploaded folder
+description: Upload a folder as an OCI artifact and specify its manifest digest in a Build to build an image from the uploaded content.
+---
+
+Package a folder and push it to a container registry, then set the OCI artifact's manifest digest in `Build` to build an image from the uploaded folder without a Git ref.
+
+## Before you begin
+
+- Prepare the folder to build. The client that holds the folder, such as Zeabur or `zeaburctl`, handles the upload.
+- Prepare an upload token for the `Build`. The client requests a token by adding the `builder.zeabur.com/upload-token-request` annotation to the `Build`, then uses that token to push. See [Registry tokens](../operations/registry-tokens.mdx) for instructions.
+- To run the commands below, prepare [ORAS](https://oras.land) and the `auth.json` from the Secret used for `Build` uploads.
+
+## Upload and configure the Build
+
+<Steps>
+
+<Step>
+
+### Check the artifact's repository location
+
+The `Build` determines the artifact's repository location, which always uses this format:
+
+```text
+<registry.host>/<namespace>/<build name>/source
+```
+
+The `Build` only needs a digest. The Job downloads the archive from the repository for this `Build` in the Job's own Namespace.
+
+Even with the correct digest, a `Build` can't read archives from another Namespace or another `Build`. If the registry can't find the manifest in that repository, the build fails with `SourceFailed`.
+
+</Step>
+
+<Step>
+
+### Package the folder and push the artifact
+
+The client must push the artifact before writing the digest to the `Build`. For a new `Build`, you can leave `digest` unset until the upload finishes.
+
+The artifact uses an [OCI image manifest](https://github.com/opencontainers/image-spec/blob/v1.1.1/manifest.md), the same format that `oras push` writes:
+
+| Field | Value |
+|---|---|
+| `mediaType` | `application/vnd.oci.image.manifest.v1+json` |
+| `artifactType` | `application/vnd.zeabur.source.v1+tar` |
+| `config` | Empty descriptor: `application/vnd.oci.empty.v1+json`, with `{}` as its content |
+| `layers` | Exactly one layer of type `application/vnd.oci.image.layer.v1.tar+gzip`, containing a gzip-compressed tar archive of the folder |
+
+Run the following commands from the folder to upload, using the `auth.json` from the Secret used for `Build` uploads:
+
+```sh
+tar -czf /tmp/source.tar.gz .
+cd /tmp && oras push --registry-config auth.json \
+  zot.zot.svc:5000/team-a/api/source:upload-$(date +%s) \
+  --artifact-type application/vnd.zeabur.source.v1+tar \
+  source.tar.gz:application/vnd.oci.image.layer.v1.tar+gzip
+```
+
+`oras push` prints the digest. [`scripts/example-archive.sh`](https://github.com/zeabur-oss/builder/blob/main/scripts/example-archive.sh) performs the same operation with `curl`.
+
+<Callout type="warn">
+
+Include a tag when pushing the manifest. Don't push by digest alone. Registries such as Zot, which [Zeabur Catalog](https://github.com/zeabur-oss/catalog) uses, delete untagged manifests and can remove these uploads before the build starts.
+
+</Callout>
+
+</Step>
+
+<Step>
+
+### Write the manifest digest to the Build
+
+Set `spec.source.archive.digest` to the manifest digest from the upload:
+
+```yaml
+apiVersion: builder.zeabur.com/v1alpha1
+kind: Build
+metadata: {name: api, namespace: team-a}
+spec:
+  source:
+    archive: {digest: "sha256:<manifest digest>"}
+  builderRef: railpack
+```
+
+Set exactly one of `git` or `archive` in `source`. Archive sources support `contextDir` and `dockerfile`, as Git sources do, but don't support `credentialsRef`, `githubApp`, or webhook triggers.
+
+To build newly uploaded content, update `digest`.
+
+The Job reads the archive with a copy of the registry credentials for this build and trusts the registry CA specified by `registry.ca` or `registry.caFrom`. This build's token can only read archives for its own `Build`.
+
+The Job verifies the manifest and layer against their digests and rejects manifests with an incorrect type or multiple layers.
+
+</Step>
+
+</Steps>
+
+## Size limits and extraction rules
+
+- The compressed layer can be at most 256 MiB, and the decompressed tar stream can be at most 1 GiB. The Job stops extraction when it reaches either limit.
+- If an archive entry's path is absolute or contains `..`, the Job stops extraction.
+- Symbolic links must use relative target paths and must not point above the folder's root directory.
+- Hard links must point to regular files that appear earlier in the archive.
+- Extraction doesn't follow symbolic links when writing content.
+- Extraction skips device files and FIFOs.
+- Files with any executable permission bit in the archive receive permissions of 0755 after extraction; all other files receive 0644. Extraction doesn't preserve ownership or timestamps.
+
+## Check the result
+
+The `BuildRun` field `revision` and the `Build` fields `status.remoteRevision` and `status.latestRevision` all record the manifest digest. `status.resolvedRef` remains empty.
+
+Image tags use `archive` as the branch name and the first seven hexadecimal digits of the digest, for example:
+
+```text
+archive-1761058800-3e1a9c2
+```
+
+The build doesn't send commit statuses.
+
+## Retention of older archives
+
+Each upload stays in the registry until the registry removes it or you delete its `Build`. See [Registry tokens](../operations/registry-tokens.mdx) for cleanup behavior when you delete a `Build`.
+
+Zot in Zeabur Catalog retains the 20 most recently pushed tags in each repository and deletes untagged manifests after two hours. As a result, `<namespace>/<build>/source` retains the latest 20 uploads.
+
+If you use another registry, configure a retention policy for `*/*/source`.

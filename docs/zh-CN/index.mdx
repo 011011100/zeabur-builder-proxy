@@ -1,0 +1,42 @@
+---
+title: 开始使用 Zeabur Builder
+description: 在 Kubernetes 上用 BuildKit 从 Git 构建镜像，并把结果交给你的部署工具。
+source: "968b6f881daa"
+---
+
+Zeabur Builder 是一个 Kubernetes operator。你创建一个 `Build`，指向 Git 仓库。它会为每个新 commit 构建镜像，推送到镜像仓库，并把 `<repository>:<tag>@<digest>` 写入 `status.latestImage`。
+
+Zeabur Builder 只构建镜像。测试、部署和日志存储交给你的 pipeline、部署工具和日志收集工具。
+
+<Callout type="info">
+
+Zeabur Builder 还没有发行版，API 是 `v1alpha1`。这份文档描述 `main` 分支当前的行为。
+
+</Callout>
+
+## 我想先跑起来
+
+用 Helm chart 装好控制器，再创建第一个 `Build`。
+
+- [安装](get-started/install.mdx)
+- [创建第一个 Build](get-started/first-build.mdx)
+
+## 我想管理 Build
+
+- [触发构建](builds/triggers.mdx)：轮询、push webhook 和手动重新构建。
+- [私有仓库](builds/private-repos.mdx)：用 `credentialsRef` 或 GitHub App。
+- [从上传的文件夹构建](builds/archive-source.mdx)：不经过 Git。
+- [部署构建好的镜像](builds/rollout.mdx)：标签和 Keel 通知。
+- [推送到外部镜像仓库](builds/external-registries.mdx)
+
+## 我是集群管理员
+
+- [Registry 令牌](operations/registry-tokens.mdx)：令牌、上传、清理和密钥轮换。
+- [控制器的权限](operations/controller-permissions.mdx)：把控制器当作集群管理员。
+- [发行文件与验证](operations/releases.mdx)
+
+## 我想了解它怎么工作
+
+- [工作原理](reference/how-it-works.mdx)
+- [当前进度](reference/status.mdx)
+- [安全性与信任模型](reference/security.mdx)

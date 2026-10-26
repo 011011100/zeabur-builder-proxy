@@ -1,0 +1,49 @@
+---
+title: Push to an external registry
+description: Configure push credentials to push images produced by a Build to an external registry.
+---
+
+To push an image to a registry other than `registry.host`, create a Secret for push credentials in the Build's Namespace, then specify the image and Secret in the Build.
+
+<Steps>
+
+<Step>
+
+### Create a Secret for push credentials
+
+Create a Secret of type `kubernetes.io/dockerconfigjson` in the Build's Namespace and add the `builder.zeabur.com/push-credentials: "true"` label:
+
+```sh
+kubectl -n team-a create secret docker-registry ghcr-push \
+  --docker-server=ghcr.io --docker-username=acme --docker-password=<token>
+kubectl -n team-a label secret ghcr-push builder.zeabur.com/push-credentials=true
+```
+
+Your account's permissions on the external registry determine where you can push images.
+
+</Step>
+
+<Step>
+
+### Specify the image and Secret in the Build
+
+Set the Build's `spec.output.image` to the image name in the external registry, and specify the Secret in `spec.output.pushSecretRef`:
+
+```yaml
+spec:
+  output:
+    image: ghcr.io/acme/api
+    pushSecretRef: {name: ghcr-push}
+```
+
+If the Secret contains an entry for `registry.host`, the token for that run replaces the entry.
+
+</Step>
+
+</Steps>
+
+## Troubleshooting
+
+| Symptom or result | Next step |
+| --- | --- |
+| The run waits in the `RegistryCredentialsMissing` state | Check that the specified Secret exists in the Build's Namespace and has the `builder.zeabur.com/push-credentials: "true"` label. The run keeps waiting if the Secret doesn't exist or lacks the label. |

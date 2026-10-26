@@ -1,0 +1,81 @@
+---
+title: 控制器的權限
+description: 了解控制器的叢集權限與 ValidatingAdmissionPolicy 的限制，並用 kubectl 查看及編輯政策。
+source: "da4c4ef9182d"
+---
+
+把控制器當成叢集管理員看待。掌握控制器的權限與 admission policy 的限制，才能判斷控制器或 token 遭入侵後，攻擊者能做哪些事。
+
+## 控制器能做什麼
+
+控制器的 ServiceAccount 有以下權限：
+
+- 在所有 Namespace 建立 Job。
+- 讀寫所有 Namespace 的 Secret。
+- 在 `builder-system` 建立 StatefulSet，其中的 Pod 可使用特權模式。
+
+取得控制器或其 token 的人，也能執行這些操作。
+
+## 兩個 ValidatingAdmissionPolicy 的限制
+
+Helm chart 提供兩個 ValidatingAdmissionPolicy，限制控制器的 ServiceAccount 能建立哪些資源。
+
+### Job 政策
+
+`<release>-zeabur-builder-jobs` 只允許符合建置 Job 規格的 Job：
+
+- 映像檔只限 `jobImage`、`railpackImage` 與 `admissionPolicy.extraImages`。
+- 不允許特權模式、額外的 capabilities，也不允許使用主機的網路、PID、IPC、連接埠或路徑。
+- 只能使用該 Namespace 的 `default` ServiceAccount，且不帶 token。
+- 不得在 `kube-*` Namespace、控制器所在的 Namespace、映像檔倉庫（registry）所在的 Namespace，或 `admissionPolicy.extraDeniedNamespaces` 中的 Namespace 建立 Job。
+
+### StatefulSet 政策
+
+`<release>-zeabur-builder-buildkitd` 只允許在控制器所在的 Namespace 建立 StatefulSet：
+
+- 映像檔只限 `buildkitdImage`。
+- 不允許使用主機的 Namespace、連接埠或路徑。
+
+## 政策擋得住與擋不住的事
+
+這兩個政策可阻止持有遭竊 token 的人執行特權 Pod、使用其他 ServiceAccount，或在系統 Namespace 執行建置。
+
+政策無法阻止攻擊者讀取允許建置的 Namespace 中的 Secret。建置 Job 可以掛載該 Namespace 中的任何 Secret。
+
+## 查看與編輯政策
+
+這些政策都是一般的 Kubernetes 物件，可用 `kubectl` 查看與編輯。
+
+<Steps>
+
+<Step>
+
+### 查看政策與綁定
+
+```sh
+kubectl get validatingadmissionpolicy,validatingadmissionpolicybinding
+```
+
+</Step>
+
+<Step>
+
+### 編輯 Job 政策
+
+```sh
+kubectl edit validatingadmissionpolicy builder-zeabur-builder-jobs
+```
+
+</Step>
+
+</Steps>
+
+<Callout type="warn">
+
+`helm upgrade` 會依 chart values 重新寫入政策，覆寫你直接編輯的內容。
+
+</Callout>
+
+## 使用自訂 ClusterBuilder
+
+自訂 ClusterBuilder 若使用其他 planner 映像檔，必須將該映像檔加入 `admissionPolicy.extraImages`。

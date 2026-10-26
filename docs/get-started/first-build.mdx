@@ -1,0 +1,91 @@
+---
+title: Create your first Build
+description: Create a Build that points to a Git repository, and view the image and build results for each new commit.
+---
+
+Create a `Build` that points to a Git repository. The controller builds an image for each new commit and writes the result to `status.latestImage`.
+
+<Steps>
+
+<Step>
+
+### Create a Build
+
+Create the following `Build` in your cluster to build the repository's Dockerfile with the `dockerfile` builder:
+
+```yaml
+apiVersion: builder.zeabur.com/v1alpha1
+kind: Build
+metadata: {name: whoami, namespace: team-a}
+spec:
+  source: {git: {url: https://github.com/traefik/whoami}}
+  builderRef: dockerfile
+```
+
+This example omits `ref`, so it tracks the repository's default branch. Check `status.resolvedRef` for the branch the controller resolved.
+
+`builderRef` supports two builders:
+
+| Builder | Purpose |
+| --- | --- |
+| `dockerfile` | Builds the repository's Dockerfile. |
+| `railpack` | Uses [Railpack](https://railpack.com) to plan builds for repositories without a Dockerfile. The resulting image runs as UID 1000 and can start under Pod Security `restricted`. |
+
+Use `spec.env` to pass build variables. You can specify values directly or read them from keys in a Secret. Zeabur Builder passes these values to the build as BuildKit secrets.
+
+</Step>
+
+<Step>
+
+### Check build status and logs
+
+Run these commands in the Namespace that contains the `Build`:
+
+```sh
+kubectl get builds
+kubectl get buildruns
+```
+
+`kubectl get builds` shows each Build's builder, source, revision, and readiness status. Add `-o wide` to view the image:
+
+```sh
+kubectl get builds -o wide
+```
+
+`kubectl get buildruns` shows each build's phase, reason, start time, and end time.
+
+Build logs are in the Pod logs for that build's Job. View that Pod's logs to read the build output.
+
+</Step>
+
+</Steps>
+
+## Verify the result
+
+After the build completes, the controller pushes the image to the following path in the registry:
+
+```text
+<registry.host>/<namespace>/<name>
+```
+
+`status.latestImage` records the image in this format:
+
+```text
+<repository>:<tag>@<digest>
+```
+
+Each build has its own tag made up of the branch, Unix time, and commit. For example:
+
+```text
+main-1761058800-3e1a9c2
+```
+
+Deployment tools can sort this format with newer builds last. You can customize tags with `spec.output.tagTemplate` and `extraTags`.
+
+`status.latestImage` reflects the most recent commit the controller found. A build for an older commit won't overwrite this field, even if that build finishes later.
+
+## What Zeabur Builder does and doesn't do
+
+Zeabur Builder only builds images. Your pipeline handles testing, your deployment tools handle deployment, and your log collection tools handle log storage.
+
+Once you have an image, continue with [Deploy the built image](../builds/rollout.mdx).

@@ -140,7 +140,7 @@ pub struct SourceSpec {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub git: Option<GitSource>,
     /// An archive pushed as an OCI artifact to `<registry>/<namespace>/<name>/source`
-    /// (`docs/archive-source.md`).
+    /// (`docs/builds/archive-source.mdx`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub archive: Option<ArchiveSource>,
     /// Credentials for a plain Git server: a `kubernetes.io/ssh-auth` Secret (with `known_hosts`)

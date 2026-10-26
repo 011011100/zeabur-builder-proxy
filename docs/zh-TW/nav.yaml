@@ -1,0 +1,25 @@
+- group: get-started
+  label: 開始使用
+  pages:
+    install: 安裝 Zeabur Builder
+    first-build: 建立第一個 Build
+- group: builds
+  label: 建置
+  pages:
+    triggers: 觸發建置
+    private-repos: 建置私有儲存庫
+    archive-source: 從上傳的資料夾建置
+    rollout: 部署建置好的映像檔
+    external-registries: 推送到外部映像檔倉庫
+- group: operations
+  label: 維運
+  pages:
+    registry-tokens: Registry token 與清理
+    controller-permissions: 控制器的權限
+    releases: 發行檔與驗證
+- group: reference
+  label: 參考
+  pages:
+    how-it-works: 運作方式
+    status: 目前進度
+    security: 安全性與信任模型

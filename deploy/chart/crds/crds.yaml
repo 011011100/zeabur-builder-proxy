@@ -434,7 +434,7 @@
                     "description": "Where the source comes from.",
                     "properties": {
                       "archive": {
-                        "description": "An archive pushed as an OCI artifact to `<registry>/<namespace>/<name>/source`\n(`docs/archive-source.md`).",
+                        "description": "An archive pushed as an OCI artifact to `<registry>/<namespace>/<name>/source`\n(`docs/builds/archive-source.mdx`).",
                         "nullable": true,
                         "properties": {
                           "contextDir": {

@@ -1,0 +1,67 @@
+---
+title: 建置私有儲存庫
+description: 使用 credentialsRef 或 GitHub App，讓 Build 取得私有儲存庫的程式碼並觸發建置。
+source: "c7c63e18646d"
+---
+
+你可以用 `spec.source.credentialsRef` 指定 Secret，以 basic-auth token 或 ssh-auth deploy key 存取私有儲存庫；deploy key 須搭配 `known_hosts`，Secret 須加上指定標籤。私有 GitHub 儲存庫也可以使用 GitHub App，讓 Build 取得短效 installation token。
+
+## 使用 credentialsRef
+
+將 `spec.source.credentialsRef` 指向存放憑證的 Secret。Secret 支援這兩種型別：
+
+| Secret 型別 | 內容 |
+| --- | --- |
+| `kubernetes.io/basic-auth` | token |
+| `kubernetes.io/ssh-auth` | deploy key 與 `known_hosts` |
+
+在 Secret 加上以下標籤：
+
+```yaml
+builder.zeabur.com/git-credentials: "true"
+```
+
+## 使用 GitHub App
+
+叢集管理員只需建立一次 GitHub App，並將設定存到控制器的 Namespace。Build 再指定要使用的 installation。
+
+<Steps>
+
+<Step>
+
+### 建立 GitHub App 並設定可用的 Namespace
+
+執行以下指令。`zeabur-builder github-app create` 會在 127.0.0.1 開啟 manifest 流程：
+
+```sh
+zeabur-builder github-app create --webhook-url https://<host>/hooks/github-app \
+  > github-app.json   # opens the manifest flow on 127.0.0.1
+kubectl -n builder-system apply -f github-app.json
+kubectl -n builder-system create configmap github-app-installations \
+  --from-literal=12345678=team-a,team-b   # installation id: namespaces allowed to use it
+```
+
+`github-app-installations` ConfigMap 以 installation ID 為鍵，值為允許使用該 installation 的 Namespace。上例允許 `team-a` 與 `team-b` 使用 installation 12345678。
+
+</Step>
+
+<Step>
+
+### 在 Build 指定 installation
+
+在 Build 的 `spec.source.githubApp` 填入 installation ID：
+
+```yaml
+spec:
+  source:
+    git: {url: https://github.com/acme/private-api}
+    githubApp: {installationId: 12345678}
+```
+
+</Step>
+
+</Steps>
+
+GitHub App 會提供短效 installation token，供 Job 以唯讀權限存取私有儲存庫。每個 commit 都會收到 commit status。
+
+App 的 push 事件會喚醒對應的 Build，不需要為每個 Build 設定 Secret。啟用 webhook 時，這些 Build 每 10 分鐘輪詢一次。其他觸發方式見[觸發建置](./triggers.mdx)。

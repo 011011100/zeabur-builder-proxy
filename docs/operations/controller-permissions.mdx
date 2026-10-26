@@ -1,0 +1,80 @@
+---
+title: Controller permissions
+description: Understand the controller's cluster permissions and the limits of ValidatingAdmissionPolicy, and use kubectl to view and edit policies.
+---
+
+Treat the controller as a cluster admin. Understanding the controller's permissions and the limits of admission policies helps you assess what an attacker can do if they compromise the controller or its token.
+
+## What the controller can do
+
+The controller's ServiceAccount has the following permissions:
+
+- Create Jobs in all Namespaces.
+- Read and write Secrets in all Namespaces.
+- Create StatefulSets in `builder-system`, whose Pods can run in privileged mode.
+
+Anyone who gains control of the controller or its token can perform these operations.
+
+## Limits of the two ValidatingAdmissionPolicies
+
+The Helm chart provides two ValidatingAdmissionPolicies that restrict which resources the controller's ServiceAccount can create.
+
+### Job policy
+
+`<release>-zeabur-builder-jobs` only permits Jobs that meet the build Job requirements:
+
+- Images are limited to `jobImage`, `railpackImage`, and `admissionPolicy.extraImages`.
+- Privileged mode, extra capabilities, and use of the host's network, PID, IPC, ports, or paths are prohibited.
+- Jobs must use the Namespace's `default` ServiceAccount without a token.
+- Jobs cannot be created in `kube-*` Namespaces, the controller's Namespace, the image registry's Namespace, or any Namespace in `admissionPolicy.extraDeniedNamespaces`.
+
+### StatefulSet policy
+
+`<release>-zeabur-builder-buildkitd` only permits StatefulSets in the controller's Namespace:
+
+- Images are limited to `buildkitdImage`.
+- Use of the host's namespaces, ports, or paths is prohibited.
+
+## What the policies can and cannot block
+
+These two policies can prevent someone with a stolen token from running privileged Pods, using other ServiceAccounts, or running builds in system Namespaces.
+
+The policies cannot prevent an attacker from reading Secrets in Namespaces that permit builds. A build Job can mount any Secret in its Namespace.
+
+## View and edit policies
+
+These policies are standard Kubernetes objects. You can view and edit them with `kubectl`.
+
+<Steps>
+
+<Step>
+
+### View policies and bindings
+
+```sh
+kubectl get validatingadmissionpolicy,validatingadmissionpolicybinding
+```
+
+</Step>
+
+<Step>
+
+### Edit the Job policy
+
+```sh
+kubectl edit validatingadmissionpolicy builder-zeabur-builder-jobs
+```
+
+</Step>
+
+</Steps>
+
+<Callout type="warn">
+
+`helm upgrade` rewrites the policies based on the chart values and overwrites your direct edits.
+
+</Callout>
+
+## Use a custom ClusterBuilder
+
+If a custom ClusterBuilder uses a different planner image, you must add that image to `admissionPolicy.extraImages`.

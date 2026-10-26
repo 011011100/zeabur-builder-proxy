@@ -1,0 +1,126 @@
+---
+title: 從上傳的資料夾建置
+description: 將資料夾上傳為 OCI artifact，並在 Build 指定 manifest digest，從上傳的內容建置映像檔。
+source: "803da7d0d72d"
+---
+
+將資料夾打包並推送到映像檔倉庫（registry），再把 OCI artifact 的 manifest digest 寫入 `Build`，就能從上傳的資料夾建置映像檔，不必使用 Git ref。
+
+## 開始前
+
+- 準備要建置的資料夾。持有資料夾的用戶端，例如 Zeabur 或 `zeaburctl`，負責上傳。
+- 準備 `Build` 的上傳 token。用戶端在 `Build` 加上 `builder.zeabur.com/upload-token-request` annotation 來要求 token，再用這個 token 推送。取得方式見 [Registry token](../operations/registry-tokens.mdx)。
+- 若要使用下方指令，需準備 [ORAS](https://oras.land)，以及 `Build` 上傳用 Secret 中的 `auth.json`。
+
+## 上傳並設定 Build
+
+<Steps>
+
+<Step>
+
+### 確認 artifact 的倉庫位置
+
+`Build` 決定 artifact 的倉庫位置，格式固定為：
+
+```text
+<registry.host>/<namespace>/<build name>/source
+```
+
+`Build` 只需指定 digest。Job 會從自己所屬 Namespace 中、對應這個 `Build` 的倉庫下載封存檔。
+
+即使 digest 正確，`Build` 也無法讀取其他 Namespace 或其他 `Build` 的封存檔。registry 在該倉庫找不到 manifest 時，這次建置會以 `SourceFailed` 失敗。
+
+</Step>
+
+<Step>
+
+### 打包資料夾並推送 artifact
+
+用戶端必須先推送 artifact，再將 digest 寫入 `Build`。新的 `Build` 可以先不設定 `digest`，等上傳完成後再填入。
+
+artifact 使用 [OCI image manifest](https://github.com/opencontainers/image-spec/blob/v1.1.1/manifest.md)，格式與 `oras push` 寫入的格式相同：
+
+| 欄位 | 值 |
+|---|---|
+| `mediaType` | `application/vnd.oci.image.manifest.v1+json` |
+| `artifactType` | `application/vnd.zeabur.source.v1+tar` |
+| `config` | 空 descriptor：`application/vnd.oci.empty.v1+json`，內容為 `{}` |
+| `layers` | 恰好一個，類型為 `application/vnd.oci.image.layer.v1.tar+gzip`，內容是以 gzip 壓縮的資料夾 tar 封存檔 |
+
+在要上傳的資料夾中執行以下指令，使用 `Build` 上傳用 Secret 中的 `auth.json`：
+
+```sh
+tar -czf /tmp/source.tar.gz .
+cd /tmp && oras push --registry-config auth.json \
+  zot.zot.svc:5000/team-a/api/source:upload-$(date +%s) \
+  --artifact-type application/vnd.zeabur.source.v1+tar \
+  source.tar.gz:application/vnd.oci.image.layer.v1.tar+gzip
+```
+
+`oras push` 會輸出 digest。[`scripts/example-archive.sh`](https://github.com/zeabur-oss/builder/blob/main/scripts/example-archive.sh) 使用 `curl` 完成相同操作。
+
+<Callout type="warn">
+
+推送 manifest 時要加上標籤（tag），不要只用 digest 推送。[Zeabur Catalog](https://github.com/zeabur-oss/catalog) 使用的 Zot 等 registry 會刪除沒有標籤的 manifest，建置開始前就會清掉這類上傳內容。
+
+</Callout>
+
+</Step>
+
+<Step>
+
+### 將 manifest digest 寫入 Build
+
+將上傳後取得的 manifest digest 填入 `spec.source.archive.digest`：
+
+```yaml
+apiVersion: builder.zeabur.com/v1alpha1
+kind: Build
+metadata: {name: api, namespace: team-a}
+spec:
+  source:
+    archive: {digest: "sha256:<manifest digest>"}
+  builderRef: railpack
+```
+
+`source` 必須在 `git` 和 `archive` 中擇一設定。封存檔來源和 Git 來源一樣支援 `contextDir` 與 `dockerfile`，但不支援 `credentialsRef`、`githubApp` 或 webhook 觸發。
+
+要建置新上傳的內容，更新 `digest`。
+
+Job 使用這次建置的 registry 憑證副本讀取封存檔，並信任 `registry.ca` 或 `registry.caFrom` 指定的 registry CA。這次建置的 token 只能讀取所屬 `Build` 的封存檔。
+
+Job 會依 digest 驗證 manifest 和 layer，並拒絕類型不符或包含多個 layer 的 manifest。
+
+</Step>
+
+</Steps>
+
+## 大小限制與解壓規則
+
+- layer 壓縮後最多為 256 MiB，解壓後的 tar 串流最多為 1 GiB。達到上限時，Job 會停止解壓。
+- 封存項目的路徑若為絕對路徑或包含 `..`，Job 會停止解壓。
+- 符號連結必須使用相對目標路徑，且不能向上超出資料夾根目錄。
+- 硬連結必須指向封存檔中較早出現的一般檔案。
+- 解壓時不會沿著符號連結寫入內容。
+- 解壓時會略過裝置檔案與 FIFO。
+- 封存檔中的檔案若有執行權限位元，解壓後的權限為 0755；否則為 0644。擁有者與時間資訊不會保留。
+
+## 確認結果
+
+`BuildRun` 的 `revision`，以及 `Build` 的 `status.remoteRevision` 和 `status.latestRevision`，都會記錄 manifest digest。`status.resolvedRef` 維持空白。
+
+映像檔標籤以 `archive` 作為分支名稱，並使用 digest 開頭的七個十六進位數字，例如：
+
+```text
+archive-1761058800-3e1a9c2
+```
+
+建置不會傳送 commit status。
+
+## 舊封存檔的保留方式
+
+每次上傳的內容都會留在 registry，直到 registry 清除它，或你刪除所屬的 `Build`。刪除 `Build` 時的清理方式見 [Registry token](../operations/registry-tokens.mdx)。
+
+Zeabur Catalog 中的 Zot 會保留每個倉庫最近推送的 20 個標籤，並在兩小時後刪除沒有標籤的 manifest。因此，`<namespace>/<build>/source` 會保留最近的 20 次上傳。
+
+如果使用其他 registry，請為 `*/*/source` 設定保留政策。

@@ -1,0 +1,77 @@
+---
+title: 觸發建置
+description: 設定輪詢與 push webhook、手動重建，並選擇新 commit 到來時如何處理執行中的建置。
+source: "7168eb75c8dd"
+---
+
+你可以用輪詢、push webhook、[GitHub App](./private-repos.mdx) 或手動重建，觸發 Zeabur Builder 建置。
+
+## 輪詢
+
+控制器預設每分鐘向 Git 伺服器查詢 ref。輪詢間隔由 `spec.triggers.pollInterval` 設定。
+
+## 設定 push webhook
+
+push webhook 會喚醒追蹤該儲存庫與分支的 Build。控制器會檢查簽章，並自行解析 ref；webhook 傳送內容不會指定建置使用的 commit。
+
+<Steps>
+
+<Step>
+
+### 啟用接收器
+
+在 Helm chart 中啟用 `webhooks.enabled`，再設定 `webhooks.ingress` 或 `webhooks.httpRoute`。
+
+</Step>
+
+<Step>
+
+### 指定 Build 的 Secret
+
+在每個 Build 的 `spec.triggers.webhook.secretRef` 指定 Secret 名稱與 key：
+
+```yaml
+spec:
+  triggers:
+    webhook: {secretRef: {name: api-webhook, key: secret}}
+```
+
+</Step>
+
+<Step>
+
+### 設定儲存庫的 webhook
+
+將儲存庫的 webhook 網址設為 `https://<host>/hooks/<provider>`，並使用與 Secret 相同的密鑰。
+
+依 Git 服務選擇 `<provider>`：
+
+| 服務 | `<provider>` |
+| --- | --- |
+| GitHub | `github` |
+| GitLab | `gitlab` |
+| Gitea | `gitea` |
+| Forgejo | `forgejo` |
+| Bitbucket | `bitbucket` |
+| [Standard Webhooks](https://www.standardwebhooks.com/) | `generic` |
+
+啟用 push webhook 後，輪詢仍會持續。
+
+</Step>
+
+</Steps>
+
+## 手動重建與暫停自動建置
+
+將 Build 的 `builder.zeabur.com/rebuild` annotation 改為新值，即可重新建置目前的 commit。
+
+`spec.suspend` 可停止自動建置。
+
+## 處理執行中的建置
+
+`spec.concurrency` 決定新 commit 到來時，如何處理執行中的建置：
+
+| 設定值 | 行為 |
+| --- | --- |
+| `Replace`（預設） | 取消執行中的建置。 |
+| `Queue` | 讓執行中的建置完成。 |
