@@ -1,7 +1,7 @@
 ---
 title: 部署构建好的镜像
 description: 使用可排序的标签搭配部署工具，并配置 Build 在构建成功后通知 Keel。
-source: "f696fd068011"
+source: "3c9b39e2f3fb"
 ---
 
 使用可排序的标签，让 Flux image automation、Argo CD Image Updater 和 Keel 在轮询镜像仓库（registry）时能发现新镜像。配置 `spec.notify` 后，`Build` 会在每次构建成功后通知 Keel，省去等待轮询的时间。
@@ -15,8 +15,6 @@ main-1761058800-3e1a9c2
 ```
 
 这些标签可以排序，最新的标签排在最后。你可以用 `spec.output.tagTemplate` 和 `extraTags` 调整标签。
-
-Zeabur Builder 负责构建和推送镜像。你的部署工具负责部署。
 
 ## 通知 Keel
 

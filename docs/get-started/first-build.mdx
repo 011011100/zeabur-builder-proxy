@@ -82,10 +82,4 @@ main-1761058800-3e1a9c2
 
 Deployment tools can sort this format with newer builds last. You can customize tags with `spec.output.tagTemplate` and `extraTags`.
 
-`status.latestImage` reflects the most recent commit the controller found. A build for an older commit won't overwrite this field, even if that build finishes later.
-
-## What Zeabur Builder does and doesn't do
-
-Zeabur Builder only builds images. Your pipeline handles testing, your deployment tools handle deployment, and your log collection tools handle log storage.
-
 Once you have an image, continue with [Deploy the built image](../builds/rollout.mdx).

@@ -11,10 +11,6 @@ Use **Report a vulnerability** in the GitHub repository to report vulnerabilitie
 
 See [SECURITY.md](https://github.com/zeabur-oss/builder/blob/main/SECURITY.md) for the security policy.
 
-## Supported versions
-
-Zeabur Builder has no releases yet. Fixes currently merge only into `main`.
-
 ## Trust model
 
 The Namespace is the unit of isolation. Different teams sharing a cluster can't read each other's source code, Secrets, or build caches, or push to each other's image repositories.
@@ -31,13 +27,11 @@ Builds within the same Namespace share buildkitd. As a result, `RUN` steps can r
 
 Archive sources are read only from `<registry.host>/<namespace>/<build>/source`, using the registry credentials for that run.
 
-The registry determines who else can read the archives. Zot in Zeabur Catalog and the test registry restrict reads to users who hold a token for that repository. When the Job extracts an archive, it doesn't write outside the source directory.
+The registry determines who else can read the archives. Zot in Zeabur Catalog and the test registry restrict reads to users who hold a token for that repository.
 
 ### Registry token keys and expiration
 
 Anyone who can read the registry token key can push to and delete any repository. Only the controller can read this key.
-
-Tokens can't be revoked. If another team creates a Namespace with the same name after a Namespace is deleted, tokens from the old Namespace can still push to the new Namespace's repositories until they expire. With the default Job deadline, this window lasts up to 70 minutes.
 
 ### Image read access
 
@@ -63,8 +57,6 @@ The egress policy in [deploy/chart/templates/buildkitd.yaml](https://github.com/
 ### buildkitd host isolation
 
 buildkitd runs in privileged mode within a user namespace, with `hostUsers: false`. Root inside a build maps to an unprivileged user on the node to prevent cross-team access.
-
-This isolation doesn't prevent attackers from exploiting kernel vulnerabilities to escape the container.
 
 ## Run untrusted code
 

@@ -1,10 +1,10 @@
 ---
 title: 控制器的权限
 description: 了解控制器的集群权限与 ValidatingAdmissionPolicy 的限制，并用 kubectl 查看和编辑策略。
-source: "da4c4ef9182d"
+source: "05b58533b203"
 ---
 
-把控制器当作集群管理员。了解控制器的权限与 admission policy 的限制，才能判断攻击者入侵控制器或窃取令牌后能做哪些事。
+把控制器当作集群管理员。
 
 ## 控制器能做什么
 
@@ -36,11 +36,9 @@ Helm chart 提供两个 ValidatingAdmissionPolicy，限制控制器的 ServiceAc
 - 镜像仅限 `buildkitdImage`。
 - 不允许使用宿主机的 Namespace、端口或路径。
 
-## 策略能拦住和拦不住的事
+## 策略拦不住的事
 
-这两个策略可以阻止持有失窃令牌的人运行特权 Pod、使用其他 ServiceAccount，或在系统 Namespace 中运行构建。
-
-策略无法阻止攻击者读取允许构建的 Namespace 中的 Secret。构建 Job 可以挂载该 Namespace 中的任何 Secret。
+策略无法阻止读取允许构建的 Namespace 中的 Secret。构建 Job 可以挂载该 Namespace 中的任何 Secret。
 
 ## 查看和编辑策略
 

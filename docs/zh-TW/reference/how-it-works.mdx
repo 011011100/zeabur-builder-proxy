@@ -1,7 +1,7 @@
 ---
 title: 運作方式
 description: 了解 Zeabur Builder 如何從 Git commit 建置映像檔，以及建置資源、快取與隔離方式。
-source: "15b8542a967b"
+source: "0b042950f738"
 ---
 
 建立 `Build`，指定 Git 儲存庫與建置器。控制器會為新的 commit 建置映像檔，推送到 registry，再將映像檔資訊寫入 `BuildRun` 與 `Build`。
@@ -61,12 +61,6 @@ buildkitd 閒置 10 分鐘後會縮到零。
 ## 建置權限與隔離
 
 每次建置都有一個 Job。Job 會執行 `buildctl`，不需要特權。
-
-`RUN` 步驟會在 buildkitd 中執行，與 Pod、Service 和節點隔離。
-
-## 多個 commit 的結果順序
-
-控制器會以最後找到的 commit 為準。即使舊 commit 的建置較晚完成，也不會覆寫 `status.latestImage`。
 
 ## 自訂資源
 

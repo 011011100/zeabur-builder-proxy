@@ -1,7 +1,7 @@
 ---
 title: 触发构建
 description: 配置轮询与 push webhook、手动重新构建，并选择新 commit 到来时如何处理运行中的构建。
-source: "7168eb75c8dd"
+source: "973bdfa31405"
 ---
 
 你可以用轮询、push webhook、[GitHub App](./private-repos.mdx) 或手动重新构建，触发 Zeabur Builder 构建。
@@ -12,7 +12,7 @@ source: "7168eb75c8dd"
 
 ## 配置 push webhook
 
-push webhook 会唤醒跟踪该仓库与分支的 Build。控制器会检查签名，并自行解析 ref；webhook 发送的内容不会指定构建使用的 commit。
+push webhook 会唤醒跟踪该仓库与分支的 Build。
 
 <Steps>
 

@@ -1,7 +1,7 @@
 ---
 title: 从上传的文件夹构建
 description: 将文件夹上传为 OCI artifact，并在 Build 中指定 manifest digest，从上传的内容构建镜像。
-source: "803da7d0d72d"
+source: "6eb8e95802b9"
 ---
 
 将文件夹打包并推送到镜像仓库（registry），再把 OCI artifact 的 manifest digest 写入 `Build`，就能从上传的文件夹构建镜像，无需使用 Git ref。
@@ -28,7 +28,7 @@ source: "803da7d0d72d"
 
 `Build` 只需指定 digest。Job 会从自身所属 Namespace 中、对应这个 `Build` 的仓库下载归档文件。
 
-即使 digest 正确，`Build` 也无法读取其他 Namespace 或其他 `Build` 的归档文件。如果 registry 在该仓库中找不到 manifest，本次构建会失败，原因为 `SourceFailed`。
+如果 registry 在该仓库中找不到 manifest，本次构建会失败，原因为 `SourceFailed`。
 
 </Step>
 
@@ -87,10 +87,6 @@ spec:
 
 要构建新上传的内容，更新 `digest`。
 
-Job 使用本次构建的 registry 凭据副本读取归档文件，并信任 `registry.ca` 或 `registry.caFrom` 指定的 registry CA。本次构建的令牌只能读取所属 `Build` 的归档文件。
-
-Job 会根据 digest 验证 manifest 和 layer，并拒绝类型不符或包含多个 layer 的 manifest。
-
 </Step>
 
 </Steps>
@@ -101,7 +97,6 @@ Job 会根据 digest 验证 manifest 和 layer，并拒绝类型不符或包含�
 - 如果归档条目的路径为绝对路径或包含 `..`，Job 会停止解压。
 - 符号链接必须使用相对目标路径，且不能向上超出文件夹根目录。
 - 硬链接必须指向归档文件中更早出现的普通文件。
-- 解压时不会沿着符号链接写入内容。
 - 解压时会跳过设备文件与 FIFO。
 - 如果归档文件中的文件带有执行权限位，解压后的权限为 0755；否则为 0644。解压时不会保留所有者与时间信息。
 

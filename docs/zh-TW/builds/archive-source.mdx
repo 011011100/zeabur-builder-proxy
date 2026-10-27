@@ -1,7 +1,7 @@
 ---
 title: 從上傳的資料夾建置
 description: 將資料夾上傳為 OCI artifact，再將 manifest digest 填入 Build，就能用上傳的內容建置映像檔。
-source: "803da7d0d72d"
+source: "6eb8e95802b9"
 ---
 
 將資料夾打包並推送到 registry，再把 OCI artifact 的 manifest digest 寫入 `Build`，就能用上傳的資料夾建置映像檔，不必使用 Git ref。
@@ -28,7 +28,7 @@ source: "803da7d0d72d"
 
 `Build` 只需指定 digest。Job 會在自己的 Namespace 中，從對應這個 `Build` 的倉庫下載封存檔。
 
-即使 digest 正確，`Build` 也無法讀取其他 Namespace 或其他 `Build` 的封存檔。如果 registry 在該倉庫找不到 manifest，這次建置就會失敗，原因為 `SourceFailed`。
+如果 registry 在該倉庫找不到 manifest，這次建置就會失敗，原因為 `SourceFailed`。
 
 </Step>
 
@@ -87,10 +87,6 @@ spec:
 
 要建置新上傳的內容，請更新 `digest`。
 
-Job 會用這次建置的 registry 認證資訊副本讀取封存檔，並信任 `registry.ca` 或 `registry.caFrom` 指定的 registry CA。這次建置的權杖只讀得到這個 `Build` 的封存檔。
-
-Job 會依 digest 驗證 manifest 和 layer，並拒絕類型不符或包含多個 layer 的 manifest。
-
 </Step>
 
 </Steps>
@@ -101,7 +97,6 @@ Job 會依 digest 驗證 manifest 和 layer，並拒絕類型不符或包含多�
 - 如果封存項目的路徑是絕對路徑或包含 `..`，Job 會停止解壓縮。
 - 符號連結的目標必須是相對路徑，且不能向上超出資料夾根目錄。
 - 硬連結必須指向封存檔中較早出現的一般檔案。
-- 解壓縮時不會沿著符號連結寫入內容。
 - 解壓縮時會略過裝置檔案與 FIFO。
 - 如果封存檔中的檔案有執行權限位元，解壓縮後的權限為 0755，否則為 0644。解壓縮時不會保留擁有者與時間資訊。
 

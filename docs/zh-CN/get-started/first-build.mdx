@@ -1,7 +1,7 @@
 ---
 title: 创建第一个 Build
 description: 创建指向 Git 仓库的 Build，查看每个新 commit 构建出的镜像和构建结果。
-source: "301367e347b8"
+source: "c957d9286f51"
 ---
 
 创建一个 `Build` 指向 Git 仓库，控制器就会为每个新 commit 构建镜像，并将结果写入 `status.latestImage`。
@@ -82,11 +82,5 @@ main-1761058800-3e1a9c2
 ```
 
 部署工具可以按这个格式排序，较新的构建排在后面。你可以用 `spec.output.tagTemplate` 和 `extraTags` 调整标签。
-
-`status.latestImage` 以控制器最近找到的 commit 为准。较旧 commit 的构建即使较晚完成，也不会覆盖这个字段。
-
-## Zeabur Builder 做什么、不做什么
-
-Zeabur Builder 只负责构建镜像。测试交给你的 pipeline，部署交给部署工具，日志存储交给日志收集工具。
 
 获取镜像后，你可以接着配置[部署构建好的镜像](../builds/rollout.mdx)。

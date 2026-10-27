@@ -12,8 +12,6 @@ The image registry trusts a single Ed25519 key. Only the controller can read thi
 | run | Push and pull from the image repository `<namespace>/<build>`, and pull from the source archive repository `<namespace>/<build>/source`. | The Job's execution deadline plus 10 minutes. |
 | upload | Push to the source archive repository `<namespace>/<build>/source`. | 15 minutes. |
 
-The controller explicitly specifies each repository name in the token.
-
 If a Build's image is hosted at `registry.host` but its repository path doesn't belong to that Build, the build fails. Images in other registries use a Secret for push credentials. See [Push to external registries](../builds/external-registries.mdx).
 
 ## Upload a source archive
@@ -107,12 +105,6 @@ When you delete a Build, either on its own or along with its Namespace, the cont
 
 The controller handles deletion events. It also scans the registry's repository catalog at startup and every 10 minutes to catch missed cleanup. Images are therefore removed within one scan cycle after deletion.
 
-Builds have no finalizer, so Namespace deletion doesn't need to wait for the controller.
-
-A new Build first removes images and sources left by an old Build with the same name, then issues tokens for those repositories. The new owner won't see the old data.
-
-If the controller isn't installed, images remain until you reinstall it. The controller deletes these images during its first scan after startup.
-
 While the controller is running, admins can use `registry-token --delete` to get a token, then manually delete images with `DELETE /v2/<repository>/manifests/<digest>`.
 
 <Callout type="warn">
@@ -175,4 +167,3 @@ The controller uses its existing Secret permissions to write the `<build>-upload
 
 - **Deleting a Build doesn't revoke its tokens.** Tokens remain valid until they expire. A run token can push images again after cleanup. The controller deletes those images during the next scan.
 - **Tokens bind to repository names, not Namespace UIDs.** After you delete a Namespace, if someone creates a Namespace with the same name, the old Namespace's run tokens can still push to the new Namespace's repositories until the tokens expire. With the default Job execution deadline, this window lasts up to 70 minutes (60 minutes plus 10 minutes). Wait 70 minutes before handing a deleted Namespace's name to another team.
-- **Anyone inside the cluster who can reach the registry can pull all images. Nodes use the same pull method.** Don't put secrets in images. Use Secrets to supply them to workloads.

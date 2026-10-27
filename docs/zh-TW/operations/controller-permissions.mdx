@@ -1,10 +1,10 @@
 ---
 title: 控制器的權限
 description: 了解控制器在叢集中能做什麼、ValidatingAdmissionPolicy 能擋住哪些操作，以及如何用 kubectl 檢視與編輯政策。
-source: "da4c4ef9182d"
+source: "05b58533b203"
 ---
 
-請把控制器當成叢集管理員。先了解控制器能做什麼、admission policy 能擋住哪些操作，才能判斷攻擊者入侵控制器或取得權杖後，能做哪些事。
+請把控制器當成叢集管理員。
 
 ## 控制器能做什麼
 
@@ -36,11 +36,9 @@ Helm chart 提供兩個 ValidatingAdmissionPolicy，用來限制控制器的 Ser
 - 映像檔只能使用 `buildkitdImage`。
 - 不允許使用主機的 Namespace、連接埠或路徑。
 
-## 政策擋得住與擋不住的事
+## 政策擋不住的事
 
-即使攻擊者竊取了權杖，這兩個政策仍可阻止他執行特權 Pod、使用其他 ServiceAccount，或在系統 Namespace 執行建置。
-
-但在允許建置的 Namespace 中，政策無法阻止攻擊者讀取 Secret。建置 Job 可以掛載該 Namespace 中的任何 Secret。
+政策無法阻止讀取允許建置的 Namespace 中的 Secret。建置 Job 可以掛載該 Namespace 中的任何 Secret。
 
 ## 檢視與編輯政策
 

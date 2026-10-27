@@ -1,7 +1,7 @@
 ---
 title: Registry 令牌与清理
 description: 了解 Registry 令牌的有效期与权限，使用 kubectl 和 ORAS 上传源代码或镜像，并管理清理与密钥轮换。
-source: "9ad98b88f606"
+source: "0d29f5828f63"
 ---
 
 镜像仓库（registry）只信任一把 Ed25519 密钥，只有控制器能读取这把密钥。控制器为每次使用签发限定仓库、有有效期的令牌（token）。你可以用令牌上传源代码归档，管理员也能推送不属于任何 Build 的镜像。
@@ -12,8 +12,6 @@ source: "9ad98b88f606"
 | --- | --- | --- |
 | run | 推送与拉取镜像仓库 `<namespace>/<build>`，以及拉取源代码归档仓库 `<namespace>/<build>/source`。 | Job 的运行时限加上 10 分钟。 |
 | upload | 推送到源代码归档仓库 `<namespace>/<build>/source`。 | 15 分钟。 |
-
-控制器会在令牌中明确指定每个仓库名称。
 
 如果 Build 的镜像位于 `registry.host`，但仓库路径不属于该 Build，构建就会失败。其他 registry 的镜像使用推送用的 Secret，详见[推送到外部镜像仓库](../builds/external-registries.mdx)。
 
@@ -108,12 +106,6 @@ oras push --registry-config auth.json zot.zot.svc:5000/zeabur_admin/tools:v1 ./f
 
 控制器会处理删除事件，也会在启动时及每 10 分钟扫描 registry 的仓库目录，补上遗漏的清理。因此，控制器会在 Build 删除后的一个扫描周期内移除镜像。
 
-Build 没有 finalizer，删除 Namespace 不必等待控制器。
-
-新 Build 会先清除同名旧 Build 留下的镜像与源代码，再签发指定这些仓库的令牌。新所有者不会看到旧数据。
-
-如果尚未安装控制器，镜像会保留到控制器重新安装。控制器启动后的第一次扫描会删除这些镜像。
-
 控制器运行期间，管理员可以使用 `registry-token --delete` 获取令牌，再用 `DELETE /v2/<repository>/manifests/<digest>` 手动删除镜像。
 
 <Callout type="warn">
@@ -176,4 +168,3 @@ Helm chart 会在密钥所在的 Namespace 中添加 Role，只授予该 Secret 
 
 - **删除 Build 不会撤销令牌。** 令牌会持续有效，直到过期。run 令牌能在清理后再次推送镜像，控制器会在下一次扫描时删除这些镜像。
 - **令牌绑定仓库名称，不绑定 Namespace UID。** 删除 Namespace 后，如果有人创建同名 Namespace，旧 Namespace 的 run 令牌仍能推送到新 Namespace 的仓库，直到令牌过期。使用默认 Job 运行时限时，最长为 70 分钟（60 分钟加上 10 分钟）。将已删除的 Namespace 名称交给另一个团队前，先等待 70 分钟。
-- **集群内能连接到 registry 的任何人都能拉取所有镜像，节点也使用相同的拉取方式。** 不要把敏感信息放进镜像，改用 Secret 提供给工作负载。

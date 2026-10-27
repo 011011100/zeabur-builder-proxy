@@ -19,8 +19,6 @@ kubectl -n team-a create secret docker-registry ghcr-push \
 kubectl -n team-a label secret ghcr-push builder.zeabur.com/push-credentials=true
 ```
 
-Your account's permissions on the external registry determine where you can push images.
-
 </Step>
 
 <Step>
@@ -46,4 +44,4 @@ If the Secret contains an entry for `registry.host`, the token for that run repl
 
 | Symptom or result | Next step |
 | --- | --- |
-| The run waits in the `RegistryCredentialsMissing` state | Check that the specified Secret exists in the Build's Namespace and has the `builder.zeabur.com/push-credentials: "true"` label. The run keeps waiting if the Secret doesn't exist or lacks the label. |
+| The run waits in the `RegistryCredentialsMissing` state | Check that the specified Secret exists in the Build's Namespace and has the `builder.zeabur.com/push-credentials: "true"` label. |

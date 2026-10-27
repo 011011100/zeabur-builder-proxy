@@ -1,7 +1,7 @@
 ---
 title: 工作原理
 description: 了解 Zeabur Builder 如何从 Git commit 构建镜像，以及构建资源、缓存与隔离方式。
-source: "15b8542a967b"
+source: "0b042950f738"
 ---
 
 创建 `Build`，指定 Git 仓库与构建器。控制器会为新的 commit 构建镜像、推送到镜像仓库（registry），并将镜像信息写入 `BuildRun` 与 `Build`。
@@ -61,12 +61,6 @@ buildkitd 空闲 10 分钟后会缩容到零。
 ## 构建权限与隔离
 
 每次构建都有一个 Job。Job 执行 `buildctl`，不需要特权。
-
-`RUN` 步骤在 buildkitd 中执行，与 Pod、Service 和节点隔离。
-
-## 多个 commit 的结果顺序
-
-控制器以最后找到的 commit 为准。旧 commit 的构建即使更晚完成，也不会覆盖 `status.latestImage`。
 
 ## 自定义资源
 

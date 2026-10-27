@@ -24,8 +24,7 @@ spec:
 For every new commit on the ref, the controller builds an image, pushes it to
 `<registry.host>/<namespace>/<name>` and writes it to `status.latestImage` as
 `<repository>:<tag>@<digest>`. Leave out `ref` to follow the repository's default branch;
-`status.resolvedRef` says which branch that was. The commit found last wins: a build of an older
-commit that finishes later does not replace `status.latestImage`.
+`status.resolvedRef` says which branch that was.
 
 - **Two builders.** `dockerfile` builds your Dockerfile. `railpack` plans the build with
   [Railpack](https://railpack.com) for repositories without one; its images run as uid 1000, so

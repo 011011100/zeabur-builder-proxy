@@ -1,7 +1,7 @@
 ---
 title: 建立第一個 Build
 description: 建立指向 Git 儲存庫的 Build，檢視每個新 commit 建置出的映像檔與建置結果。
-source: "301367e347b8"
+source: "c957d9286f51"
 ---
 
 建立一個 `Build`，指定 Git 儲存庫。控制器就會為每個新 commit 建置映像檔，並將結果寫入 `status.latestImage`。
@@ -82,11 +82,5 @@ main-1761058800-3e1a9c2
 ```
 
 部署工具可以根據這個格式排序，較新的建置會排在後面。你可以用 `spec.output.tagTemplate` 與 `extraTags` 調整 tag。
-
-`status.latestImage` 以控制器最近找到的 commit 為準。即使較舊 commit 的建置較晚完成，也不會覆寫這個欄位。
-
-## Zeabur Builder 做什麼、不做什麼
-
-Zeabur Builder 只負責建置映像檔。測試交給你的 pipeline，部署交給部署工具，日誌儲存交給日誌收集工具。
 
 取得映像檔後，可以接著設定[部署建置好的映像檔](../builds/rollout.mdx)。

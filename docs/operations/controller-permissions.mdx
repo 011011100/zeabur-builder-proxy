@@ -3,7 +3,7 @@ title: Controller permissions
 description: Understand the controller's cluster permissions and the limits of ValidatingAdmissionPolicy, and use kubectl to view and edit policies.
 ---
 
-Treat the controller as a cluster admin. Understanding the controller's permissions and the limits of admission policies helps you assess what an attacker can do if they compromise the controller or its token.
+Treat the controller as a cluster admin.
 
 ## What the controller can do
 
@@ -35,11 +35,9 @@ The Helm chart provides two ValidatingAdmissionPolicies that restrict which reso
 - Images are limited to `buildkitdImage`.
 - Use of the host's namespaces, ports, or paths is prohibited.
 
-## What the policies can and cannot block
+## What the policies don't block
 
-These two policies can prevent someone with a stolen token from running privileged Pods, using other ServiceAccounts, or running builds in system Namespaces.
-
-The policies cannot prevent an attacker from reading Secrets in Namespaces that permit builds. A build Job can mount any Secret in its Namespace.
+The policies don't stop anyone from reading Secrets in Namespaces that permit builds. A build Job can mount any Secret in its Namespace.
 
 ## View and edit policies
 

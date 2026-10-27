@@ -1,7 +1,7 @@
 ---
 title: 部署建置好的映像檔
 description: 使用可排序的 tag 搭配部署工具，並設定 Build 在建置成功後通知 Keel。
-source: "f696fd068011"
+source: "3c9b39e2f3fb"
 ---
 
 使用可排序的 tag，讓 Flux image automation、Argo CD Image Updater 與 Keel 在輪詢 registry 時找到新映像檔。設定 `spec.notify` 後，`Build` 會在每次建置成功後通知 Keel，不必等待下一次輪詢。
@@ -15,8 +15,6 @@ main-1761058800-3e1a9c2
 ```
 
 這些 tag 可以排序，最新的 tag 會排在最後。你可以用 `spec.output.tagTemplate` 與 `extraTags` 調整 tag。
-
-Zeabur Builder 負責建置與推送映像檔，你的部署工具則負責部署。
 
 ## 通知 Keel
 

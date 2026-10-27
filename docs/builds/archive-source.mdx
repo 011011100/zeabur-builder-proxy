@@ -27,7 +27,7 @@ The `Build` determines the artifact's repository location, which always uses thi
 
 The `Build` only needs a digest. The Job downloads the archive from the repository for this `Build` in the Job's own Namespace.
 
-Even with the correct digest, a `Build` can't read archives from another Namespace or another `Build`. If the registry can't find the manifest in that repository, the build fails with `SourceFailed`.
+If the registry can't find the manifest in that repository, the build fails with `SourceFailed`.
 
 </Step>
 
@@ -86,10 +86,6 @@ Set exactly one of `git` or `archive` in `source`. Archive sources support `cont
 
 To build newly uploaded content, update `digest`.
 
-The Job reads the archive with a copy of the registry credentials for this build and trusts the registry CA specified by `registry.ca` or `registry.caFrom`. This build's token can only read archives for its own `Build`.
-
-The Job verifies the manifest and layer against their digests and rejects manifests with an incorrect type or multiple layers.
-
 </Step>
 
 </Steps>
@@ -100,7 +96,6 @@ The Job verifies the manifest and layer against their digests and rejects manife
 - If an archive entry's path is absolute or contains `..`, the Job stops extraction.
 - Symbolic links must use relative target paths and must not point above the folder's root directory.
 - Hard links must point to regular files that appear earlier in the archive.
-- Extraction doesn't follow symbolic links when writing content.
 - Extraction skips device files and FIFOs.
 - Files with any executable permission bit in the archive receive permissions of 0755 after extraction; all other files receive 0644. Extraction doesn't preserve ownership or timestamps.
 

@@ -1,7 +1,7 @@
 ---
 title: Registry 權杖與清理
 description: 了解 Registry 權杖的時效與權限，使用 kubectl 和 ORAS 上傳來源或映像檔，並管理清理與金鑰輪替。
-source: "9ad98b88f606"
+source: "0d29f5828f63"
 ---
 
 registry 只信任一把 Ed25519 金鑰，只有控制器能讀取這把金鑰。每次使用時，控制器都會簽發權杖，限定可存取的倉庫和有效期限。你可以用權杖上傳來源封存檔，管理員也能推送不屬於任何 Build 的映像檔。
@@ -12,8 +12,6 @@ registry 只信任一把 Ed25519 金鑰，只有控制器能讀取這把金鑰�
 | --- | --- | --- |
 | run | 推送與拉取 registry `<namespace>/<build>`，以及拉取來源封存檔倉庫 `<namespace>/<build>/source`。 | Job 的執行期限加上 10 分鐘。 |
 | upload | 推送到來源封存檔倉庫 `<namespace>/<build>/source`。 | 15 分鐘。 |
-
-控制器會在權杖中明確列出每個倉庫的名稱。
 
 如果 Build 的映像檔位於 `registry.host`，但倉庫路徑不屬於這個 Build，建置就會失敗。如果映像檔位於其他 registry，則使用推送時所需的 Secret。詳見[推送到外部 registry](../builds/external-registries.mdx)。
 
@@ -108,12 +106,6 @@ oras push --registry-config auth.json zot.zot.svc:5000/zeabur_admin/tools:v1 ./f
 
 控制器會處理刪除事件，也會在啟動時及每 10 分鐘掃描 registry 的倉庫目錄，清理先前遺漏的資料。因此，刪除 Build 後，控制器會在一個掃描週期內移除映像檔。
 
-Build 沒有 finalizer，刪除 Namespace 時不必等待控制器。
-
-建立新 Build 時，控制器會先清除同名舊 Build 留下的映像檔與來源，再簽發可存取這些倉庫的權杖。新擁有者不會看到舊資料。
-
-如果尚未安裝控制器，映像檔會一直保留，直到重新安裝控制器。控制器啟動後，會在第一次掃描時刪除這些映像檔。
-
 控制器運作期間，管理員可以使用 `registry-token --delete` 取得權杖，再用 `DELETE /v2/<repository>/manifests/<digest>` 手動刪除映像檔。
 
 <Callout type="warn">
@@ -176,4 +168,3 @@ Helm chart 會在金鑰所在的 Namespace 新增 Role，只授予該 Secret 的
 
 - **刪除 Build 不會撤銷權杖。** 權杖在到期前仍然有效。持有 run 權杖的人可以在清理後再次推送映像檔，控制器會在下一次掃描時刪除這些映像檔。
 - **權杖綁定倉庫名稱，不綁定 Namespace UID。** 刪除 Namespace 後，如果有人建立同名 Namespace，舊 run 權杖到期前，還是能推送到新 Namespace 的倉庫。使用預設 Job 執行期限時，權杖最長可有效 70 分鐘（60 分鐘加上 10 分鐘）。將已刪除的 Namespace 名稱交給另一個團隊前，請先等待 70 分鐘。
-- **叢集內只要能連到 registry，任何人都能拉取所有映像檔，節點也使用相同的拉取方式。** 不要把機密資訊放進映像檔，請改用 Secret 提供給工作負載。

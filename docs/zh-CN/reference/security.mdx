@@ -1,7 +1,7 @@
 ---
 title: 安全性与信任模型
 description: 了解 Zeabur Builder 的信任边界、运行不可信代码的配置，以及私下报告漏洞的方式。
-source: "7c01114a93ca"
+source: "dd215c11b4bd"
 ---
 
 用 Namespace 隔离各团队的构建来源、Secret、缓存与镜像推送权限。同一个 Namespace 内的构建彼此信任；运行不可信代码时，使用 `--buildkitd-runtime-class` 指定沙箱运行环境。
@@ -11,10 +11,6 @@ source: "7c01114a93ca"
 在 GitHub 仓库中使用 **Report a vulnerability**，通过 private vulnerability reporting 私下报告漏洞。不要为安全问题创建公开 issue。
 
 安全政策见 [SECURITY.md](https://github.com/zeabur-oss/builder/blob/main/SECURITY.md)。
-
-## 支持范围
-
-Zeabur Builder 尚未发布版本，目前的修复只会合并到 `main`。
 
 ## 信任模型
 
@@ -32,13 +28,11 @@ Zeabur Builder 尚未发布版本，目前的修复只会合并到 `main`。
 
 归档文件来源只会从 `<registry.host>/<namespace>/<build>/source` 读取，并使用该次运行的 registry 凭据。
 
-registry 决定还有谁能读取归档文件。Zeabur Catalog 的 Zot 与测试用 registry 只允许持有该仓库令牌的用户读取。Job 解压归档文件时，不会写入源文件夹以外的位置。
+registry 决定还有谁能读取归档文件。Zeabur Catalog 的 Zot 与测试用 registry 只允许持有该仓库令牌的用户读取。
 
 ### Registry 令牌密钥与有效期
 
 任何能读取 registry 令牌密钥的人，都能推送到任意仓库，也能删除任意仓库。只有控制器可以读取这把密钥。
-
-令牌无法撤销。删除 Namespace 后，如果另一个团队创建同名的 Namespace，旧 Namespace 的令牌在到期前仍能推送到新 Namespace 的仓库。使用默认 Job 期限时，这段时间最长为 70 分钟。
 
 ### 镜像的读取权限
 
@@ -64,8 +58,6 @@ Helm chart 的 ValidatingAdmissionPolicies 将控制器 ServiceAccount 创建的
 ### buildkitd 的主机隔离
 
 buildkitd 在 user namespace 内以特权模式运行，配置为 `hostUsers: false`。构建内的 root 会映射到节点上的非特权用户，阻止跨团队访问。
-
-这项隔离无法阻止攻击者利用内核漏洞逃离容器。
 
 ## 运行不可信代码
 

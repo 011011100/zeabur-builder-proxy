@@ -61,12 +61,6 @@ buildkitd scales to zero after 10 minutes of inactivity.
 
 Each build has one Job. The Job runs `buildctl` and doesn't need privileges.
 
-`RUN` steps execute in buildkitd, isolated from Pods, Services, and nodes.
-
-## Result ordering across commits
-
-The controller uses the most recently discovered commit. A build for an older commit won't overwrite `status.latestImage`, even if it finishes later.
-
 ## Custom resources
 
 Zeabur Builder uses three custom resources: `Build`, `BuildRun`, and `ClusterBuilder`. Their API version is `v1alpha1`.
