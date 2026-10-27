@@ -22,7 +22,7 @@ Zeabur Builder 还没有发行版，API 是 `v1alpha1`。
 | 公开仓库构建 | 轮询可触发 Dockerfile 和 Railpack 构建。 |
 | 来源错误 | 找不到 ref 或 Dockerfile 时，`SourceReady` 和 BuildRun 会显示失败。 |
 | buildkitd 生命周期 | 每个 Namespace 各有一个 buildkitd，按需启动，空闲时缩容至 0。 |
-| Namespace 隔离 | 系统拒绝来自其他 Namespace 的客户端证书、对镜像仓库（registry）路径和 Pod 的访问，也拒绝没有 token 的推送。 |
+| Namespace 隔离 | 系统拒绝来自其他 Namespace 的客户端证书、对镜像仓库（registry）路径和 Pod 的访问，也拒绝没有令牌的推送。 |
 | 构建期间的网络访问 | `RUN` 可连接互联网和 registry，无法连接 Service、Kubernetes API 或 169.254.169.254。 |
 | 归档文件来源 | 可按 digest 构建归档文件。其他 Namespace 或不同名称的 Build 使用相同 digest 时，会在来源阶段失败。 |
 | ValidatingAdmissionPolicy | 控制器的 ServiceAccount 可创建构建 Job 和 buildkitd。策略会拒绝特权 Job、位于 `kube-system` 的 Job，以及使用其他镜像、主机路径、主机网络或其他 ServiceAccount 的 Job，也会拒绝其他 StatefulSet。此项由 `scripts/example-admission.sh` 验证。 |

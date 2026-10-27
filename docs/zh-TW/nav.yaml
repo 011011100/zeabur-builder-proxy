@@ -14,7 +14,7 @@
 - group: operations
   label: 維運
   pages:
-    registry-tokens: Registry token 與清理
+    registry-tokens: Registry 權杖與清理
     controller-permissions: 控制器的權限
     releases: 發行檔與驗證
 - group: reference
