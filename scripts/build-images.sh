@@ -11,7 +11,7 @@ root="$(cd "$(dirname "$0")/.." && pwd)"
 arch="$(uname -m | sed -e 's/^arm64$/aarch64/')"
 target="$arch-unknown-linux-musl"
 out="$root/target/image"
-# Image binaries are always compiled, never taken from the kache compiler cache (flake.nix).
+# Image binaries are always compiled, never taken from a compiler cache (CONTRIBUTING.md).
 # cargo-auditable records the dependency tree in each binary for scanners.
 unset RUSTC_WRAPPER
 

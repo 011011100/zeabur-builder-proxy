@@ -61,15 +61,20 @@ Shared with [Zeabur Identity](https://github.com/zeabur-oss/identity):
 - `flake.lock` is the only place the compiler version is set: the newest nightly in the locked
   rust-overlay that has every component and target listed in `flake.nix`. Renovate's lock file
   maintenance (`renovate.json`) moves it every Monday.
-- `nix develop` sets `RUSTC_WRAPPER=kache`, a compiler cache (https://github.com/kunobi-ninja/kache)
-  shared by every checkout and worktree on the machine. `scripts/build-images.sh` turns it off, so
-  image binaries are always compiled. kache is pinned to a release tag in `flake.nix`.
 - Lints are set once in `Cargo.toml`. All are `warn`, and `cargo lint` turns them into errors.
   Suppress with `#[expect(lint, reason = "…")]`. Only the binary's `output` module writes to
   stdout or stderr.
 - `cargo deny check` enforces `deny.toml`: OSI-approved licences, crates.io only, aws-lc-rs as
   the only cryptographic backend, no advisories.
 - Cargo does not pick a release younger than seven days (`.cargo/config.toml`).
+
+## Compiler cache (optional)
+
+The repository sets up no compiler cache. To share compiled crates between checkouts and
+worktrees on your machine, install [kache](https://ninja.kunobi.com/docs/kache/getting-started/c-cpp)
+and set `RUSTC_WRAPPER=kache` in your shell profile; `nix develop` keeps it. The C code that build
+scripts compile (aws-lc-sys) goes through kache too, with no further setup.
+`scripts/build-images.sh` unsets `RUSTC_WRAPPER`, so image binaries are always compiled.
 
 ## Tests against a cluster
 
