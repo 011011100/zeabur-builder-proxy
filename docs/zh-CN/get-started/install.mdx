@@ -1,7 +1,7 @@
 ---
 title: 安装 Zeabur Builder
 description: 用 Helm chart 安装 Zeabur Builder，并配置镜像仓库和构建器所需的访问权限。
-source: "a1adf110eecd"
+source: "9681589b6947"
 ---
 
 用 Helm chart 一次装好控制器、CRD、`dockerfile` 和 `railpack` ClusterBuilder、buildkitd 配置和出站网络策略，以及限制控制器权限的 ValidatingAdmissionPolicy。
@@ -58,9 +58,9 @@ Zeabur Builder 还没有发布版本，命令中的 `<version>` 要等首个版�
 
 <Step>
 
-### 搭配 Zeabur Catalog 的 Zot
+### 用 Zeabur Catalog 连同 zot 一起安装
 
-[Zeabur Catalog](https://github.com/zeabur-oss/catalog) 的 Zot 只接受使用 `zot-token-signer` 签署的令牌推送镜像。搭配这个 Zot 时，使用以下配置：
+[Zeabur Catalog](https://github.com/zeabur-oss/catalog) 的 `builds/zeabur-builder` 组件会一起安装 Zeabur Builder 和 zot，并填好上一步的 registry 配置。zot 只接受使用 `zot-token-signer` 签署的令牌推送镜像。用 zeabur-installer 移除这个组件时，zot 也会一起移除。`zeaburctl components export builds/zeabur-builder` 会依次输出安装命令，其中 Builder 的配置如下：
 
 ```sh
 helm install builder oci://ghcr.io/zeabur-oss/charts/zeabur-builder --version <version> \

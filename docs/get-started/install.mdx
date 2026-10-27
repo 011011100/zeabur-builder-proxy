@@ -57,9 +57,9 @@ The controller also needs to connect to the registry to delete repositories. The
 
 <Step>
 
-### Use Zot from Zeabur Catalog
+### Install with zot from Zeabur Catalog
 
-Zot from [Zeabur Catalog](https://github.com/zeabur-oss/catalog) only accepts image pushes with tokens signed by `zot-token-signer`. Use the following settings with this Zot instance:
+The `builds/zeabur-builder` component of [Zeabur Catalog](https://github.com/zeabur-oss/catalog) installs Zeabur Builder and zot together, with the registry settings from the previous step filled in. zot only accepts image pushes with tokens signed by `zot-token-signer`. When zeabur-installer removes the component, zot goes with it. `zeaburctl components export builds/zeabur-builder` prints the install commands in order; Builder's settings among them are:
 
 ```sh
 helm install builder oci://ghcr.io/zeabur-oss/charts/zeabur-builder --version <version> \
