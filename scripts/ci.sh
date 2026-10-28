@@ -64,6 +64,12 @@ start_cluster() {
 cluster_failure_context() {
   kubectl get build,buildrun,job,pod -A -o wide || true
   kubectl -n builder-system logs deployment/zeabur-builder --tail=100 || true
+  local ns pod
+  kubectl get pod -A --no-headers 2>/dev/null | awk '$1 != "kube-system" { print $1, $2 }' |
+    while read -r ns pod; do
+      echo "--- $ns/$pod"
+      kubectl -n "$ns" logs "$pod" --all-containers --tail=80 || true
+    done
   kubectl get events -A --sort-by=.lastTimestamp | tail -n 50 || true
 }
 
