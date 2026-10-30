@@ -1,45 +1,205 @@
 #!/usr/bin/env python3
-"""Verify every packaged OCI tag and digest through a disposable K3s node's CRI."""
+"""Exercise K3s's real archive watcher, CRI pinning and retained-archive recovery.
+
+Only bundle references and staged archives change in the disposable CI node.
+There is no ctr import/pin fallback: evidence must describe the real watcher.
+"""
+import argparse
+from datetime import datetime, timezone
+import hashlib
 import json
 from pathlib import Path
+import re
 import subprocess
-import sys
 import time
 
-root = Path(sys.argv[1]).resolve()
-manifest = json.loads((root / "bundle.json").read_text())
-node = "k3d-zeabur-builder-server-0"
-directory = "/var/lib/rancher/k3s/agent/images"
-subprocess.run(["docker", "exec", node, "mkdir", "-p", directory], check=True)
-for archive in sorted({image["archive"] for image in manifest["images"]}):
-    source = root / archive
-    subprocess.run(["docker", "cp", str(source), node + ":" + directory + "/mingxing-proxy.oci.tar"], check=True)
-references = {ref for image in manifest["images"] for ref in (image["tag"], image["digest_reference"])}
+DIRECTORY = "/var/lib/rancher/k3s/agent/images"
+PIN = "io.cri-containerd.pinned"
+OWNER = "io.cattle.k3s.pinned"
 
 
-def wait_pinned():
-    pending = set(references)
-    deadline = time.monotonic() + 180
-    while pending and time.monotonic() < deadline:
-        for reference in list(pending):
-            result = subprocess.run(["docker", "exec", node, "k3s", "crictl", "inspecti", reference],
-                                    text=True, capture_output=True, check=False)
-            if result.returncode:
-                continue
-            status = json.loads(result.stdout)["status"]
-            if status.get("id") and status.get("pinned") is True:
-                pending.remove(reference)
-        if pending:
-            time.sleep(3)
-    if pending:
-        raise SystemExit("K3s did not import and pin every offline reference: " + ", ".join(sorted(pending)))
+def run(arguments, *, check=True, timeout=20):
+    return subprocess.run(arguments, capture_output=True, text=True, check=check, timeout=timeout)
 
 
-wait_pinned()
-# Only this bundle's aliases are removed; the running CI images have separate local names.
-# Touching the retained archive must recover aliases and pins without an internet pull.
-for reference in sorted(references):
-    subprocess.run(["docker", "exec", node, "k3s", "ctr", "-n", "k8s.io", "images", "rm", reference], check=True)
-subprocess.run(["docker", "exec", node, "touch", directory + "/mingxing-proxy.oci.tar"], check=True)
-wait_pinned()
-print("OCI_CRI_OK: K3s imported/pinned every offline reference and recovered them from the retained archive.")
+def archive_plan(root, manifest):
+    """Group arbitrary image roles, with unique complete-archive destinations."""
+    root = root.resolve()
+    grouped = {}
+    for image in manifest["images"]:
+        relative = image["archive"]
+        source = (root / relative).resolve()
+        if not source.is_relative_to(root) or not source.is_file():
+            raise ValueError("Bundle archive is missing or escapes its root")
+        references = (image["tag"], image["digest_reference"])
+        if any(not isinstance(ref, str) or not ref or ref.startswith("-") for ref in references):
+            raise ValueError("Invalid bundle image reference")
+        grouped.setdefault(relative, {"source": source, "references": set()})["references"].update(references)
+    if not grouped:
+        raise ValueError("Bundle contains no images")
+    result = []
+    for relative, entry in sorted(grouped.items()):
+        digest = hashlib.sha256()
+        with entry["source"].open("rb") as stream:
+            for block in iter(lambda: stream.read(1024 * 1024), b""):
+                digest.update(block)
+        path_digest = hashlib.sha256(relative.encode()).hexdigest()[:12]
+        name = f"mingxing-proxy-{path_digest}-{digest.hexdigest()[:16]}.oci.tar"
+        result.append(dict(entry, destination=DIRECTORY + "/" + name))
+    return result
+
+
+def cri_status(result):
+    """Retain identity and pinning only, never verbose image configuration or environment."""
+    if result.returncode:
+        return {"state": "missing", "inspect_exit": result.returncode}
+    try:
+        status = json.loads(result.stdout)["status"]
+        if not isinstance(status, dict):
+            raise ValueError("status is not an object")
+    except (ValueError, KeyError, TypeError):
+        return {"state": "invalid-cri-response"}
+    identity = status.get("id")
+    if not isinstance(identity, str) or not identity:
+        return {"state": "missing-image-id"}
+    pinned = status.get("pinned") is True
+    return {"state": "pinned" if pinned else "unpinned", "id": identity, "pinned": pinned}
+
+
+def image_metadata(output, references):
+    """ctr's last table column is LABELS; omit all unrelated references."""
+    found = {}
+    for line in output.splitlines():
+        fields = line.split()
+        if len(fields) >= 6 and fields[0] in references:
+            labels = dict(item.split("=", 1) for item in fields[-1].split(",") if "=" in item)
+            found[fields[0]] = {"digest": fields[2], "labels": labels}
+    return found
+
+
+class Verifier:
+    def __init__(self, root, manifest, node, *, timeout=180, runner=run):
+        self.node = node
+        self.timeout = timeout
+        self.run = runner
+        self.archives = archive_plan(root, manifest)
+        self.references = {ref for entry in self.archives for ref in entry["references"]}
+        self.artifacts = root.parent / "cluster/offline-import"
+        self.artifacts.mkdir(parents=True, exist_ok=True)
+        self.started = datetime.now(timezone.utc).isoformat()
+        self.last_records = {}
+
+    def execute(self, *arguments, check=True, timeout=20):
+        return self.run(["docker", "exec", self.node, *arguments], check=check, timeout=timeout)
+
+    def stage(self):
+        self.execute("mkdir", "-p", DIRECTORY)
+        for entry in self.archives:
+            destination = entry["destination"]
+            # Publish only after docker cp has finished. The rename happens inside the
+            # watched node, rather than exposing an incomplete archive at its final path.
+            self.run(["docker", "cp", str(entry["source"]), self.node + ":" + destination + ".partial"],
+                     timeout=60)
+            self.execute("mv", "--", destination + ".partial", destination)
+
+    def snapshot(self):
+        listed = self.execute("k3s", "ctr", "-n", "k8s.io", "images", "list", check=False)
+        metadata = image_metadata(listed.stdout, self.references) if not listed.returncode else {}
+        records = {}
+        for reference in sorted(self.references):
+            inspected = self.execute("k3s", "crictl", "inspecti", reference, check=False, timeout=10)
+            record = cri_status(inspected)
+            record["containerd"] = metadata.get(reference)
+            records[reference] = record
+            self.last_records = records
+        return records
+
+    @staticmethod
+    def ready(record):
+        labels = (record.get("containerd") or {}).get("labels", {})
+        return (record.get("state") == "pinned"
+                and labels.get(PIN) == "pinned" and labels.get(OWNER) == "pinned")
+
+    def evidence(self, phase, records):
+        result = {"phase": phase, "references": records}
+        report = self.artifacts / (phase + ".json")
+        report.write_text(json.dumps(result, indent=2) + "\n")
+        result["staged_archives"] = {}
+        for entry in self.archives:
+            stat = self.execute("stat", "-c", "%s %Y", entry["destination"], check=False)
+            result["staged_archives"][entry["destination"]] = {
+                "stat_exit": stat.returncode, "size_mtime": stat.stdout.strip()}
+        cache = self.execute("cat", DIRECTORY + "/.cache.json", check=False)
+        try:
+            parsed = json.loads(cache.stdout) if not cache.returncode else {}
+            own = {entry["destination"] for entry in self.archives}
+            result["cache"] = {key: value for key, value in parsed.items() if key in own}
+        except (ValueError, AttributeError):
+            result["cache"] = {"state": "unavailable-or-invalid"}
+        result["k3s_version"] = self.execute("k3s", "--version", check=False).stdout.strip()
+        logs = self.run(["docker", "logs", "--timestamps", "--tail", "2000", "--since", self.started, self.node], check=False)
+        selected = [line for line in (logs.stdout + logs.stderr).splitlines()
+                    if re.search(r"import|pinned|image event|fileinfo cache", line, re.IGNORECASE)]
+        (self.artifacts / (phase + ".node.log")).write_text("\n".join(selected[-1000:]) + "\n")
+        report.write_text(json.dumps(result, indent=2) + "\n")
+
+    def wait_pinned(self, phase):
+        deadline = time.monotonic() + self.timeout
+        while True:
+            records = self.snapshot()
+            pending = {ref: value for ref, value in records.items() if not self.ready(value)}
+            if not pending:
+                self.evidence(phase, records)
+                return
+            if time.monotonic() >= deadline:
+                self.evidence(phase, records)
+                summary = ", ".join(
+                    f"{ref}: {value['state']} (metadata={bool(value.get('containerd'))}, "
+                    f"labels={(value.get('containerd') or {}).get('labels', {})})"
+                    for ref, value in sorted(pending.items()))
+                raise RuntimeError("K3s watcher import/pin check failed: " + summary)
+            time.sleep(2)
+
+    def remove_own_aliases(self):
+        for reference in sorted(self.references):
+            self.execute("k3s", "ctr", "-n", "k8s.io", "images", "rm", reference)
+        listed = self.execute("k3s", "ctr", "-n", "k8s.io", "images", "list", "--quiet")
+        if self.references.intersection(listed.stdout.splitlines()):
+            raise RuntimeError("Bundle aliases remain before recovery test")
+
+    def refresh_retained_archives(self):
+        for entry in self.archives:
+            destination = entry["destination"]
+            previous = int(self.execute("stat", "-c", "%Y", destination).stdout.strip())
+            # Strictly newer even if copied source mtime was in the future. BusyBox supports
+            # POSIX touch -t; TZ applies to this command only, not the node configuration.
+            stamp = datetime.fromtimestamp(max(int(time.time()), previous + 2), timezone.utc)
+            self.run(["docker", "exec", "-e", "TZ=UTC", self.node, "touch", "-m", "-t",
+                      stamp.strftime("%Y%m%d%H%M.%S"), destination])
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("bundle", type=Path)
+    parser.add_argument("--node", default="k3d-zeabur-builder-server-0")
+    args = parser.parse_args()
+    root = args.bundle.resolve()
+    manifest = json.loads((root / "bundle.json").read_text())
+    verifier = Verifier(root, manifest, args.node)
+    try:
+        verifier.stage()
+        verifier.wait_pinned("imported")
+        verifier.remove_own_aliases()
+        verifier.refresh_retained_archives()
+        verifier.wait_pinned("recovered")
+    except (OSError, RuntimeError, subprocess.SubprocessError):
+        try:
+            verifier.evidence("failure", verifier.last_records)
+        except (OSError, subprocess.SubprocessError) as error:
+            print("Additional import diagnostics unavailable:", type(error).__name__)
+        raise
+    print("OCI_CRI_OK: K3s watcher imported/pinned all roles and recovered every retained-archive alias.")
+
+
+if __name__ == "__main__":
+    main()
