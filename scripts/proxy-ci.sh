@@ -3,6 +3,9 @@
 set -euo pipefail
 root="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$root"
+# Keep generated bundle directories out of a restored Cargo target cache.
+# These paths are owned by this script; compilation caches remain in place.
+rm -rf target/proxy-artifacts target/proxy-oci target/proxy-merged-oci
 mkdir -p target/proxy-artifacts
 
 # Retain an actionable formatting patch when a contributor has no local Rust toolchain.
@@ -49,7 +52,7 @@ cp -R target/ci/proxy-smoke target/proxy-artifacts/cluster/proxy-smoke
 
 prefix="ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/zeabur-builder-proxy"
 mkdir -p target/proxy-oci products
-for image in builder builder-job; do
+for image in builder builder-job builder-railpack; do
   ref="$prefix/$image:$tag"
   docker tag "zeabur-builder/$image:$tag" "$ref"
   skopeo copy "docker-daemon:$ref" "oci:target/proxy-oci/$image:$tag"
@@ -60,6 +63,7 @@ python3 scripts/package-proxy.py \
   --images target/proxy-oci \
   --controller-ref "$prefix/builder:$tag" \
   --job-ref "$prefix/builder-job:$tag" \
+  --planner-ref "$prefix/builder-railpack:$tag" \
   --chart "products/zeabur-builder-$version.tgz" \
   --defaults products/default-values.json \
   --version "$version" --commit "$source_commit" \
