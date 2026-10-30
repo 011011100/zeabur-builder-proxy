@@ -50,6 +50,8 @@ pub(crate) struct Settings {
     pub(crate) host_users: bool,
     /// Container resources.
     pub(crate) resources: Resources,
+    /// Validated standard HTTP proxy variables inherited by the daemon's tooling.
+    pub(crate) proxy_env: Vec<(String, String)>,
     /// How long a namespace goes without builds before its daemon scales to zero.
     pub(crate) idle_after: Duration,
 }
@@ -79,6 +81,7 @@ fn inputs<'a>(settings: &'a Settings, namespace: &'a str) -> DaemonInputs<'a> {
         runtime_class: settings.runtime_class.as_deref(),
         host_users: settings.host_users,
         resources: &settings.resources,
+        proxy_env: &settings.proxy_env,
     }
 }
 

@@ -120,6 +120,8 @@ pub(crate) struct Settings {
     pub(crate) job_deadline_seconds: i64,
     /// `ttlSecondsAfterFinished`.
     pub(crate) job_ttl_seconds: i32,
+    /// Selected, validated standard proxy variables inherited by build Jobs.
+    pub(crate) proxy_env: Vec<(String, String)>,
     /// The GitHub App's Secret, in the controller's namespace.
     pub(crate) github_app_secret: String,
     /// The `ConfigMap` of namespaces allowed to use each installation, in the controller's
@@ -1226,6 +1228,7 @@ async fn start(ctx: &Context, run: &BuildRun, status: BuildRunStatus) -> Result<
         tags: &tags,
         buildkitd_addr: &woken.address,
         job_image: &settings.job_image,
+        proxy_env: &settings.proxy_env,
         git_auth,
         buildkit_tls_secret: CLIENT_TLS_COPY,
         registry_auth_secret: &registry_secret,

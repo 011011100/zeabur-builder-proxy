@@ -25,6 +25,7 @@
 //! build's `DIR/non-root/Dockerfile`.
 
 mod progress;
+mod proxy;
 mod registry;
 mod unpack;
 
@@ -174,12 +175,13 @@ fn tags(command: &[String]) -> Vec<String> {
 }
 
 /// Rewrites the Railpack plan in `dir` and writes the second build's Dockerfile.
-fn prepare_non_root(dir: &str) -> Result<(), String> {
+fn prepare_non_root(dir: &str, proxy_env: &[(String, String)]) -> Result<(), String> {
     let path = format!("{dir}/railpack-plan.json");
     let text = std::fs::read_to_string(&path).map_err(|e| format!("cannot read {path}: {e}"))?;
     let mut plan: serde_json::Value =
         serde_json::from_str(&text).map_err(|e| format!("cannot parse {path}: {e}"))?;
     railpack::own_deploy_layers(&mut plan);
+    proxy::railpack_secrets(&mut plan, proxy_env)?;
     let text = serde_json::to_string(&plan).map_err(|e| format!("cannot write {path}: {e}"))?;
     std::fs::write(&path, text).map_err(|e| format!("cannot write {path}: {e}"))?;
     let non_root = format!("{dir}/non-root");
@@ -238,6 +240,7 @@ fn build(
 
 fn run(args: &Args) -> BuildResult {
     let mut commands = args.commands.clone();
+    let proxy_env = proxy::from_env();
     if !args.secrets_hash_env.is_empty()
         && let Some(first) = commands.first_mut()
     {
@@ -258,12 +261,13 @@ fn run(args: &Args) -> BuildResult {
         result.plan_source = Some(PlanSource::Generated);
     }
     if let Some(dir) = &args.non_root
-        && let Err(message) = prepare_non_root(dir)
+        && let Err(message) = prepare_non_root(dir, &proxy_env)
     {
         result.reason = Some(FailureReason::BuildFailed);
         result.message = message;
         return result;
     }
+    proxy::configure_commands(&mut commands, &proxy_env, args.non_root.is_some());
 
     let start = Instant::now();
     let mut renderer = progress::Renderer::default();
@@ -514,7 +518,7 @@ mod tests {
             "deploy": {"inputs": [{"step": "build", "include": ["."]}]}
         });
         std::fs::write(dir.join("railpack-plan.json"), plan.to_string()).unwrap();
-        prepare_non_root(dir.to_str().unwrap()).unwrap();
+        prepare_non_root(dir.to_str().unwrap(), &[]).unwrap();
         let written: serde_json::Value =
             serde_json::from_str(&std::fs::read_to_string(dir.join("railpack-plan.json")).unwrap())
                 .unwrap();
@@ -527,7 +531,7 @@ mod tests {
             railpack::dockerfile()
         );
         std::fs::remove_dir_all(&dir).unwrap();
-        assert!(prepare_non_root(dir.to_str().unwrap()).is_err());
+        assert!(prepare_non_root(dir.to_str().unwrap(), &[]).is_err());
     }
 
     #[test]

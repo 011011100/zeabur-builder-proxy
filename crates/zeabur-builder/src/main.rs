@@ -201,7 +201,8 @@ struct ControllerArgs {
 }
 
 impl ControllerArgs {
-    fn settings(self) -> controller::Settings {
+    fn settings(self) -> Result<controller::Settings, String> {
+        let proxy_env = remote::proxy_env()?;
         let daemon = daemon::Settings {
             namespace: self
                 .buildkitd_namespace
@@ -218,8 +219,9 @@ impl ControllerArgs {
                 memory_limit: self.buildkitd_memory_limit,
             },
             idle_after: Duration::from_secs(self.buildkitd_idle),
+            proxy_env: proxy_env.clone(),
         };
-        controller::Settings {
+        Ok(controller::Settings {
             namespace: self.namespace,
             daemon: Arc::new(daemon),
             max_concurrent: self.max_concurrent_builds,
@@ -230,6 +232,7 @@ impl ControllerArgs {
             job_image: self.job_image,
             job_deadline_seconds: self.job_deadline,
             job_ttl_seconds: self.job_ttl,
+            proxy_env,
             github_app_secret: self.github_app_secret,
             github_app_grants: self.github_app_grants,
             webhook: self.webhook_addr.map(|addr| webhook::Settings {
@@ -239,7 +242,7 @@ impl ControllerArgs {
                 rate: self.webhook_rate,
                 burst: self.webhook_burst,
             }),
-        }
+        })
     }
 }
 
@@ -248,10 +251,11 @@ async fn run_controller(args: ControllerArgs) -> Result<(), String> {
         .install_default()
         .map_err(|_provider| "a TLS provider is already installed".to_owned())?;
     tracing_subscriber::fmt().json().with_target(false).init();
+    let settings = args.settings()?;
     let client = kube::Client::try_default()
         .await
         .map_err(|e| format!("cannot reach Kubernetes: {e}"))?;
-    controller::run(client, args.settings()).await
+    controller::run(client, settings).await
 }
 
 fn main() -> ExitCode {

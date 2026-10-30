@@ -91,6 +91,15 @@ buildkitd:
 # (Kubernetes older than 1.33).
 extraArgs: []
 
+# Optional outbound HTTP CONNECT proxy, shared by the controller, fetch/planner Jobs and
+# buildkitd. This maintained variant accepts an explicit, unauthenticated IPv4 endpoint only,
+# so the egress exception below can name one address and port rather than a private network.
+# Empty keeps the upstream direct-access behaviour. No TLS verification is disabled.
+proxy:
+  url: ""
+  # Keep the registry, Kubernetes API, Pods, Services and nodes on their internal routes.
+  noProxy: "localhost,127.0.0.1,::1,.svc,.svc.cluster.local,10.43.0.1,10.42.0.0/16,10.43.0.0/16,172.16.0.0/12"
+
 resources:
   requests: {cpu: 10m, memory: 32Mi}
   limits: {memory: 256Mi}

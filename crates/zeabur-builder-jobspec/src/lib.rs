@@ -110,6 +110,8 @@ pub struct JobInputs<'a> {
     pub buildkitd_addr: &'a str,
     /// The job image.
     pub job_image: &'a str,
+    /// The controller's validated HTTP proxy variables, copied only to build tooling.
+    pub proxy_env: &'a [(String, String)],
     /// How `fetch` authenticates.
     pub git_auth: GitAuth<'a>,
     /// The client certificate Secret: `ca.pem`, `cert.pem`, `key.pem` (`buildctl --tlsdir`).
@@ -279,6 +281,14 @@ fn fetch_container(inputs: &JobInputs<'_>, url: &str) -> Container {
     if !matches!(inputs.git_auth, GitAuth::Anonymous) {
         mounts.push(mount("git-credentials", GIT_CREDENTIALS));
     }
+    let mut env_vars = vec![
+        env("HOME", "/tmp"),
+        env("GIT_TERMINAL_PROMPT", "0"),
+        env("GIT_CONFIG_NOSYSTEM", "1"),
+        // `ext::` and `file://` URLs would run commands or read the Pod's files.
+        env("GIT_ALLOW_PROTOCOL", "https:http:ssh:git"),
+    ];
+    env_vars.extend(proxy_env(inputs.proxy_env));
     Container {
         name: "fetch".to_owned(),
         image: Some(inputs.job_image.to_owned()),
@@ -289,13 +299,7 @@ fn fetch_container(inputs: &JobInputs<'_>, url: &str) -> Container {
             "fetch".to_owned(),
         ]),
         args: Some(vec![literal(url), inputs.build_run.spec.revision.clone()]),
-        env: Some(vec![
-            env("HOME", "/tmp"),
-            env("GIT_TERMINAL_PROMPT", "0"),
-            env("GIT_CONFIG_NOSYSTEM", "1"),
-            // `ext::` and `file://` URLs would run commands or read the Pod's files.
-            env("GIT_ALLOW_PROTOCOL", "https:http:ssh:git"),
-        ]),
+        env: Some(env_vars),
         volume_mounts: Some(mounts),
         // Git's error is on stderr; the controller shows its last lines as the run's message.
         termination_message_policy: Some("FallbackToLogsOnError".to_owned()),
@@ -356,6 +360,7 @@ fn plan_container(inputs: &JobInputs<'_>) -> Result<Option<Container>, JobError>
     let context = context_path(inputs);
     let mounts = workspace_mounts();
     let mut env_vars = vec![env("HOME", "/tmp")];
+    env_vars.extend(proxy_env(inputs.proxy_env));
     let mut args = vec![
         "railpack".to_owned(),
         "prepare".to_owned(),
@@ -422,6 +427,7 @@ fn build_container(inputs: &JobInputs<'_>, repo: Option<&RepoKey>) -> Result<Con
     }
 
     let mut env_vars = vec![env("HOME", "/tmp"), env("DOCKER_CONFIG", REGISTRY_AUTH)];
+    env_vars.extend(proxy_env(inputs.proxy_env));
     env_vars.extend(inputs.build.spec.env.iter().map(secret_env));
     let mut mounts = workspace_mounts();
     mounts.push(mount("buildkit-client-tls", BUILDKIT_TLS));
@@ -678,6 +684,19 @@ fn env(name: &str, value: &str) -> EnvVar {
         value: Some(value.to_owned()),
         value_from: None,
     }
+}
+
+/// Proxy configuration is infrastructure input, not `Build.spec.env`: those values remain
+/// secrets and must not replace the tooling's own environment. Only standard proxy names cross
+/// this boundary, even if a caller accidentally supplies other controller variables.
+fn proxy_env(values: &[(String, String)]) -> impl Iterator<Item = EnvVar> + '_ {
+    values
+        .iter()
+        .filter(|(name, _)| matches!(
+            name.as_str(),
+            "http_proxy" | "https_proxy" | "no_proxy" | "HTTP_PROXY" | "HTTPS_PROXY" | "NO_PROXY"
+        ))
+        .map(|(name, value)| env(name, &literal(value)))
 }
 
 fn secret_env(var: &BuildEnvVar) -> EnvVar {

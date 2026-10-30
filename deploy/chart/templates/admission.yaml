@@ -29,7 +29,15 @@ spec:
       expression: >-
         has(variables.pod.initContainers) ? variables.pod.containers + variables.pod.initContainers
         : variables.pod.containers
+    - name: proxyValues
+      expression: {{ include "builder.proxyValues" . | quote }}
   validations:
+    - expression: >-
+        variables.containers.all(c, !has(c.env) || c.env.all(e,
+        !(e.name in ['HTTP_PROXY', 'http_proxy', 'HTTPS_PROXY', 'https_proxy', 'NO_PROXY', 'no_proxy']) ||
+        (e.name in variables.proxyValues && has(e.value) && !has(e.valueFrom) &&
+        e.value == variables.proxyValues[e.name])))
+      message: build Job proxy variables must match the chart's configured proxy
     - expression: >-
         !request.namespace.startsWith('kube-') &&
         !(request.namespace in {{ include "builder.celList" $denied }})
@@ -98,7 +106,15 @@ spec:
       expression: >-
         has(variables.pod.initContainers) ? variables.pod.containers + variables.pod.initContainers
         : variables.pod.containers
+    - name: proxyValues
+      expression: {{ include "builder.proxyValues" . | quote }}
   validations:
+    - expression: >-
+        variables.containers.all(c, !has(c.env) || c.env.all(e,
+        !(e.name in ['HTTP_PROXY', 'http_proxy', 'HTTPS_PROXY', 'https_proxy', 'NO_PROXY', 'no_proxy']) ||
+        (e.name in variables.proxyValues && has(e.value) && !has(e.valueFrom) &&
+        e.value == variables.proxyValues[e.name])))
+      message: buildkitd proxy variables must match the chart's configured proxy
     - expression: request.namespace == '{{ .Release.Namespace }}'
       message: the controller creates StatefulSets only in its own namespace
     - expression: variables.containers.all(c, c.image == '{{ .Values.buildkitdImage }}')

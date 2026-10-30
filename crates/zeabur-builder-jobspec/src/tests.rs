@@ -133,6 +133,7 @@ fn inputs<'a>(
         tags,
         buildkitd_addr: "tcp://buildkitd-team-a-0.buildkitd-team-a.builder-system.svc:1234",
         job_image: "ghcr.io/zeabur-oss/builder-job:v0.0.1",
+        proxy_env: &[],
         git_auth,
         buildkit_tls_secret: "zeabur-builder-buildkit-client",
         registry_auth_secret: "api-x7k2p-registry",
@@ -212,6 +213,39 @@ fn railpack_with_secrets() {
     };
     let job = job(&inputs(&run, &build, "railpack", &builder, &tags, auth)).unwrap();
     golden("railpack", include_str!("../golden/railpack.json"), &job);
+}
+
+#[test]
+fn infrastructure_proxy_reaches_fetch_plan_and_build_without_becoming_a_build_secret() {
+    let run = build_run();
+    let build = build("https://github.com/acme/web", None, Vec::new());
+    let builder = railpack();
+    let tags = tags();
+    let proxy = vec![
+        ("HTTPS_PROXY".to_owned(), "http://100.66.31.168:3128".to_owned()),
+        ("NO_PROXY".to_owned(), ".svc,.svc.cluster.local,10.43.0.0/16".to_owned()),
+        ("UNRELATED_CONTROLLER_SECRET".to_owned(), "must-not-be-copied".to_owned()),
+    ];
+    let mut inputs = inputs(&run, &build, "railpack", &builder, &tags, GitAuth::Anonymous);
+    inputs.proxy_env = &proxy;
+    let job = job(&inputs).unwrap();
+    let pod = job.spec.unwrap().template.spec.unwrap();
+    for container in pod
+        .init_containers
+        .as_ref()
+        .unwrap()
+        .iter()
+        .chain(&pod.containers)
+    {
+        let env = container.env.as_ref().unwrap();
+        assert!(env.iter().any(|var| var.name == "HTTPS_PROXY"
+            && var.value.as_deref() == Some("http://100.66.31.168:3128")));
+        assert!(env.iter().any(|var| var.name == "NO_PROXY"
+            && var.value.as_deref() == Some(".svc,.svc.cluster.local,10.43.0.0/16")));
+        assert!(!env.iter().any(|var| var.name == "UNRELATED_CONTROLLER_SECRET"));
+        assert!(!env.iter().any(|var| var.name.starts_with(SECRET_ENV_PREFIX)));
+        assert!(!container.command.as_ref().unwrap().iter().any(|arg| arg.contains("100.66.31.168")));
+    }
 }
 
 #[test]

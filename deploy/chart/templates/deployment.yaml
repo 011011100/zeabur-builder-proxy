@@ -54,6 +54,9 @@ spec:
             {{- if .Values.registry.http }}
             - {name: ZEABUR_BUILDER_REGISTRY_HTTP, value: "true"}
             {{- end }}
+            {{- with include "builder.proxyEnv" . }}
+            {{- . | nindent 12 }}
+            {{- end }}
             {{- if .Values.webhooks.enabled }}
           ports:
             - {name: webhooks, containerPort: {{ .Values.webhooks.port }}}

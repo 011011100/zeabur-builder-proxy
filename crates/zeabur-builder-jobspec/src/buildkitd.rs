@@ -104,6 +104,8 @@ pub struct DaemonInputs<'a> {
     pub host_users: bool,
     /// Requests and limits, as quantities such as `100m` and `512Mi`.
     pub resources: &'a Resources,
+    /// The controller's validated HTTP proxy variables for image pulls and build tooling.
+    pub proxy_env: &'a [(String, String)],
 }
 
 /// The daemon's container resources.
@@ -282,6 +284,8 @@ fn pod(inputs: &DaemonInputs<'_>) -> PodSpec {
         containers: vec![Container {
             name: "buildkitd".to_owned(),
             image: Some(inputs.image.to_owned()),
+            env: (!inputs.proxy_env.is_empty())
+                .then(|| super::proxy_env(inputs.proxy_env).collect()),
             command: Some(
                 ["/bin/sh", "-c", START, "buildkitd"]
                     .map(str::to_owned)
@@ -380,6 +384,7 @@ mod tests {
             runtime_class: None,
             host_users: false,
             resources,
+            proxy_env: &[],
         }
     }
 
@@ -426,6 +431,25 @@ mod tests {
             Some(tls_secret("team-a").as_str())
         );
         assert_eq!(pod.containers[0].resources.as_ref().unwrap().requests, None);
+    }
+
+    #[test]
+    fn daemon_inherits_only_proxy_configuration_for_registry_pulls() {
+        let resources = Resources::default();
+        let mut inputs = inputs(&resources);
+        let proxy = vec![
+            ("HTTPS_PROXY".to_owned(), "http://100.66.31.168:3128".to_owned()),
+            ("NO_PROXY".to_owned(), ".svc,10.43.0.0/16".to_owned()),
+            ("UNRELATED_SECRET".to_owned(), "must-not-be-copied".to_owned()),
+        ];
+        inputs.proxy_env = &proxy;
+        let pod = daemon(&inputs).stateful_set.spec.unwrap().template.spec.unwrap();
+        let env = pod.containers[0].env.as_ref().unwrap();
+        assert_eq!(env.len(), 2);
+        assert_eq!(env[0].name, "HTTPS_PROXY");
+        assert_eq!(env[0].value.as_deref(), Some("http://100.66.31.168:3128"));
+        assert_eq!(env[1].name, "NO_PROXY");
+        assert_eq!(env[1].value.as_deref(), Some(".svc,10.43.0.0/16"));
     }
 
     #[test]

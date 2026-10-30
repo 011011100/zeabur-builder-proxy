@@ -1,0 +1,44 @@
+name: MingXing proxy build
+
+on:
+  push:
+    branches: [mingxing-proxy]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: mingxing-proxy-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  verify-and-package:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    env:
+      CARGO_BUILD_JOBS: 2
+      RUSTFLAGS: -Zthreads=2
+      NEXTEST_TEST_THREADS: 2
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: DeterminateSystems/determinate-nix-action@f296148a827001a9a82d3685b53210c06e5d3b67 # v3.24.0
+      - name: Locate the pinned compiler
+        run: dirname "$(nix develop --command bash -c 'command -v rustc')" >> "$GITHUB_PATH"
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          shared-key: mingxing-proxy-v1
+      - name: Check, test, build and package
+        run: nix develop --command bash scripts/proxy-ci.sh
+      - name: Keep the verified installation bundle and diagnostics
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: zeabur-builder-proxy-linux-amd64
+          path: |
+            target/proxy-artifacts/*.tar.gz
+            target/proxy-artifacts/*.sha256
+            target/proxy-artifacts/format.patch
+            target/proxy-artifacts/cluster/
+          if-no-files-found: warn
+          retention-days: 14

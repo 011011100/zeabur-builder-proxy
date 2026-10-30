@@ -13,7 +13,6 @@ use http::{Method, Request, StatusCode, header};
 use http_body_util::{BodyExt as _, Full, Limited};
 use hyper_rustls::{HttpsConnector, HttpsConnectorBuilder};
 use hyper_util::client::legacy::Client;
-use hyper_util::client::legacy::connect::HttpConnector;
 use hyper_util::rt::TokioExecutor;
 use rustls::ClientConfig;
 use rustls::pki_types::CertificateDer;
@@ -24,6 +23,10 @@ use zeabur_builder_core::ssh::SshRemote;
 
 use crate::credentials::GitCredentials;
 use crate::ssh;
+
+mod transport;
+
+use transport::ProxyConnector;
 
 const TIMEOUT: Duration = Duration::from_secs(30);
 const USER_AGENT: &str = concat!("git/zeabur-builder-", env!("CARGO_PKG_VERSION"));
@@ -78,7 +81,12 @@ impl ResolveError {
 }
 
 /// An HTTP/1.1 client for `http://` and `https://` URLs.
-pub(crate) type HttpClient = Client<HttpsConnector<HttpConnector>, Full<Bytes>>;
+pub(crate) type HttpClient = Client<HttpsConnector<ProxyConnector>, Full<Bytes>>;
+
+/// Validated proxy variables for generated Pods, from the same startup configuration as HTTP.
+pub(crate) fn proxy_env() -> Result<Vec<(String, String)>, String> {
+    transport::proxy_env()
+}
 
 /// A client that trusts the system's CA bundle (`SSL_CERT_FILE` or `/etc/ssl/certs`).
 pub(crate) fn http_client() -> Result<HttpClient, String> {
@@ -87,6 +95,7 @@ pub(crate) fn http_client() -> Result<HttpClient, String> {
 
 /// A client that trusts the system's CA bundle and `ca`, a PEM bundle.
 pub(crate) fn http_client_with(ca: Option<&str>) -> Result<HttpClient, String> {
+    let proxy = ProxyConnector::from_env()?;
     let mut roots = rustls::RootCertStore::empty();
     let found = rustls_native_certs::load_native_certs();
     for cert in found.certs {
@@ -114,7 +123,7 @@ pub(crate) fn http_client_with(ca: Option<&str>) -> Result<HttpClient, String> {
         .with_tls_config(config)
         .https_or_http()
         .enable_http1()
-        .build();
+        .wrap_connector(proxy);
     Ok(Client::builder(TokioExecutor::new()).build(https))
 }
 

@@ -3,6 +3,7 @@
 # in this namespace the first time the namespace builds.
 {{- $registry := .Values.registry }}
 {{- $ca := include "builder.registryCA" . }}
+{{- $proxy := include "builder.proxy" . | fromJson }}
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -81,6 +82,13 @@ spec:
           {{- end }}
       ports: [{port: {{ .port }}, protocol: TCP}]
     {{- end }}
+    {{- end }}
+    {{- if $proxy.url }}
+    # Only this configured CONNECT proxy may be reached inside the blocked private ranges.
+    - to:
+        - ipBlock:
+            cidr: {{ $proxy.ip }}/32
+      ports: [{port: {{ $proxy.port }}, protocol: TCP}]
     {{- end }}
     - to:
         - ipBlock:

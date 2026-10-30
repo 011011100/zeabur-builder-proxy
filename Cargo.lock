@@ -3767,7 +3767,7 @@ dependencies = [
 
 [[package]]
 name = "zeabur-builder"
-version = "0.1.1"
+version = "0.1.1-mingxing.1"
 dependencies = [
  "aws-lc-rs",
  "base64 0.23.1",
@@ -3791,6 +3791,7 @@ dependencies = [
  "serde_json",
  "thiserror",
  "tokio",
+ "tower-service",
  "tracing",
  "tracing-subscriber",
  "zeabur-builder-api",
@@ -3800,7 +3801,7 @@ dependencies = [
 
 [[package]]
 name = "zeabur-builder-api"
-version = "0.1.1"
+version = "0.1.1-mingxing.1"
 dependencies = [
  "k8s-openapi",
  "kube",
@@ -3811,7 +3812,7 @@ dependencies = [
 
 [[package]]
 name = "zeabur-builder-core"
-version = "0.1.1"
+version = "0.1.1-mingxing.1"
 dependencies = [
  "serde",
  "serde_json",
@@ -3821,7 +3822,7 @@ dependencies = [
 
 [[package]]
 name = "zeabur-builder-job"
-version = "0.1.1"
+version = "0.1.1-mingxing.1"
 dependencies = [
  "base64 0.23.1",
  "bytes",
@@ -3843,7 +3844,7 @@ dependencies = [
 
 [[package]]
 name = "zeabur-builder-jobspec"
-version = "0.1.1"
+version = "0.1.1-mingxing.1"
 dependencies = [
  "k8s-openapi",
  "pretty_assertions",

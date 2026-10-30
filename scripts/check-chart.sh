@@ -52,6 +52,39 @@ if grep -qE '^\s+\[registry\.|ZEABUR_BUILDER_REGISTRY_(CA|HTTP)' <<<"$plain"; th
   echo "default install: the chart sets registry http or a CA that nobody asked for" >&2
   exit 1
 fi
+if grep -qE 'name: (HTTP_PROXY|http_proxy|HTTPS_PROXY|https_proxy|NO_PROXY|no_proxy)$|cidr: 100\.66\.31\.168/32' <<<"$plain"; then
+  echo "default install: the chart enables an outbound proxy without configuration" >&2
+  exit 1
+fi
+
+proxied=$(helm template builder "$chart" "${base[@]}" --set proxy.url=http://100.66.31.168:3128)
+require "$proxied" "outbound proxy" 'cidr: 100\.66\.31\.168/32$' \
+  'ports: \[\{port: 3128, protocol: TCP\}\]' '- 100\.64\.0\.0/10$' \
+  '- 169\.254\.0\.0/16$' 'name: HTTP_PROXY$' 'name: http_proxy$' \
+  'name: HTTPS_PROXY$' 'name: https_proxy$' 'name: NO_PROXY$' 'name: no_proxy$' \
+  'value: "http://100\.66\.31\.168:3128"$' \
+  "build Job proxy variables must match the chart's configured proxy" \
+  "buildkitd proxy variables must match the chart's configured proxy" \
+  'e\.name in variables\.proxyValues && has\(e\.value\) && !has\(e\.valueFrom\)'
+for invalid in https://100.66.31.168:3128 http://user:do-not-print@100.66.31.168:3128 \
+  http://256.66.31.168:3128 http://100.066.31.168:3128 http://100.66.31.168:0 \
+  http://100.66.31.168:65536 http://proxy.example:3128 http://100.66.31.168:3128/path; do
+  if err=$(helm template builder "$chart" "${base[@]}" --set-string proxy.url="$invalid" 2>&1); then
+    echo "proxy validation: the chart accepted an unsupported proxy endpoint" >&2
+    exit 1
+  fi
+  if ! grep -qF proxy.url <<<"$err" || grep -qF do-not-print <<<"$err"; then
+    echo "proxy validation: the error must identify proxy.url without exposing credentials" >&2
+    exit 1
+  fi
+done
+for invalid in '' 'localhost 127.0.0.1'; do
+  if helm template builder "$chart" "${base[@]}" --set proxy.url=http://100.66.31.168:3128 \
+    --set-string proxy.noProxy="$invalid" >/dev/null 2>&1; then
+    echo "proxy validation: the chart accepted an empty or whitespace-bearing bypass list" >&2
+    exit 1
+  fi
+done
 
 digest=sha256:$(printf '0%.0s' {1..64})
 pinned=$(helm template builder "$chart" "${base[@]}" --set image.digest="$digest" \
