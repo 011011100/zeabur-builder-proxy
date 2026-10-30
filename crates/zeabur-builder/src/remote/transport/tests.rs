@@ -41,9 +41,8 @@ fn configuration_rejects_unsupported_or_authenticated_proxies_without_disclosing
 
 #[test]
 fn no_proxy_domains_ports_and_networks() -> TestResult {
-    let bypass = NoProxy::parse(
-        ".example.test,registry.test:5000,192.0.2.0/24,2001:db8::/32,[::1]:8443",
-    )?;
+    let bypass =
+        NoProxy::parse(".example.test,registry.test:5000,192.0.2.0/24,2001:db8::/32,[::1]:8443")?;
     for value in [
         "https://example.test/",
         "https://sub.EXAMPLE.TEST./",
@@ -52,7 +51,10 @@ fn no_proxy_domains_ports_and_networks() -> TestResult {
         "https://[2001:db8:42::1]/",
         "https://[::1]:8443/",
     ] {
-        assert!(bypass.matches(&value.parse()?), "expected bypass for {value}");
+        assert!(
+            bypass.matches(&value.parse()?),
+            "expected bypass for {value}"
+        );
     }
     for value in [
         "https://notexample.test/",
@@ -62,9 +64,18 @@ fn no_proxy_domains_ports_and_networks() -> TestResult {
         "https://[2001:db9::1]/",
         "https://[::1]:443/",
     ] {
-        assert!(!bypass.matches(&value.parse()?), "unexpected bypass for {value}");
+        assert!(
+            !bypass.matches(&value.parse()?),
+            "unexpected bypass for {value}"
+        );
     }
-    for invalid in ["10.0.0.0/33", "::/129", "example.test:bad", "host:0", "host/path"] {
+    for invalid in [
+        "10.0.0.0/33",
+        "::/129",
+        "example.test:bad",
+        "host:0",
+        "host/path",
+    ] {
         assert!(NoProxy::parse(invalid).is_err());
     }
     assert!(NoProxy::parse("*")?.matches(&"https://any.test/".parse()?));
@@ -88,20 +99,47 @@ fn generated_environment_keeps_internal_traffic_direct() -> TestResult {
     }
     assert!(config.endpoint(&"https://github.com/".parse()?).is_some());
     let env = config.environment();
-    assert!(env.iter().any(|(key, value)| key == "http_proxy" && value.is_empty()));
-    assert!(env.iter().any(|(key, value)| key == "HTTPS_PROXY" && value == "http://100.66.31.168:3128"));
-    let no_proxy = env.iter().find(|(key, _)| key == "no_proxy").map(|(_, value)| value);
+    assert!(
+        env.iter()
+            .any(|(key, value)| key == "http_proxy" && value.is_empty())
+    );
+    assert!(
+        env.iter()
+            .any(|(key, value)| key == "HTTPS_PROXY" && value == "http://100.66.31.168:3128")
+    );
+    let no_proxy = env
+        .iter()
+        .find(|(key, _)| key == "no_proxy")
+        .map(|(_, value)| value);
     assert!(no_proxy.is_some_and(|value| value.contains(".svc")));
-    assert!(ProxyConfig::parse(None, None, None)?.environment().is_empty());
+    assert!(
+        ProxyConfig::parse(None, None, None)?
+            .environment()
+            .is_empty()
+    );
     let supplied = format!("example.test,{INTERNAL_HOSTS}");
     let configured = ProxyConfig::parse(None, Some("http://100.66.31.168:3128"), Some(&supplied))?;
-    assert!(configured.environment().iter().filter(|(key, _)| key.eq_ignore_ascii_case("no_proxy"))
-        .all(|(_, value)| value == &supplied));
-    let incomplete = ProxyConfig::parse(None, Some("http://100.66.31.168:3128"), Some("example.test,example.test"))?;
+    assert!(
+        configured
+            .environment()
+            .iter()
+            .filter(|(key, _)| key.eq_ignore_ascii_case("no_proxy"))
+            .all(|(_, value)| value == &supplied)
+    );
+    let incomplete = ProxyConfig::parse(
+        None,
+        Some("http://100.66.31.168:3128"),
+        Some("example.test,example.test"),
+    )?;
     let normalized = format!("example.test,{INTERNAL_HOSTS}");
     assert_eq!(incomplete.no_proxy.environment, normalized);
     let exported = NoProxy::parse(&incomplete.no_proxy.environment)?;
-    for value in ["https://example.test/", "https://zot.zot.svc:5000/", "https://172.16.1.144/", "https://github.com/"] {
+    for value in [
+        "https://example.test/",
+        "https://zot.zot.svc:5000/",
+        "https://172.16.1.144/",
+        "https://github.com/",
+    ] {
         let uri = value.parse()?;
         assert_eq!(incomplete.no_proxy.matches(&uri), exported.matches(&uri));
     }
@@ -149,7 +187,10 @@ fn accept(listener: &TcpListener) -> io::Result<StdStream> {
             }
             Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
                 if Instant::now() >= deadline {
-                    return Err(io::Error::new(io::ErrorKind::TimedOut, "test server was not contacted"));
+                    return Err(io::Error::new(
+                        io::ErrorKind::TimedOut,
+                        "test server was not contacted",
+                    ));
                 }
                 thread::sleep(Duration::from_millis(5));
             }
@@ -175,24 +216,33 @@ fn plain_server() -> io::Result<Server> {
     let listener = TcpListener::bind(("127.0.0.1", 0))?;
     listener.set_nonblocking(true)?;
     let address = listener.local_addr()?;
-    Ok((address, thread::spawn(move || {
-        let mut stream = accept(&listener)?;
-        let request = headers(&mut stream)?;
-        stream.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok")?;
-        Ok(request)
-    })))
+    Ok((
+        address,
+        thread::spawn(move || {
+            let mut stream = accept(&listener)?;
+            let request = headers(&mut stream)?;
+            stream.write_all(
+                b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok",
+            )?;
+            Ok(request)
+        }),
+    ))
 }
 
 fn tls_server() -> TestResult<(Server, CertificateDer<'static>)> {
     let key = KeyPair::generate()?;
-    let certificate = CertificateParams::new(vec!["origin.example.test".to_owned()])?.self_signed(&key)?;
+    let certificate =
+        CertificateParams::new(vec!["origin.example.test".to_owned()])?.self_signed(&key)?;
     let der = certificate.der().clone();
     let config = ServerConfig::builder_with_provider(Arc::new(
         rustls::crypto::aws_lc_rs::default_provider(),
     ))
     .with_safe_default_protocol_versions()?
     .with_no_client_auth()
-    .with_single_cert(vec![der.clone()], PrivatePkcs8KeyDer::from(key.serialize_der()).into())?;
+    .with_single_cert(
+        vec![der.clone()],
+        PrivatePkcs8KeyDer::from(key.serialize_der()).into(),
+    )?;
     let listener = TcpListener::bind(("127.0.0.1", 0))?;
     listener.set_nonblocking(true)?;
     let address = listener.local_addr()?;
@@ -228,7 +278,9 @@ fn proxy_server(origin: SocketAddr) -> io::Result<Server> {
         });
         let _copied = io::copy(&mut from_origin, &mut to_client);
         let _closed = to_client.shutdown(Shutdown::Write);
-        forward.join().map_err(|_panic| io::Error::other("proxy forwarding thread panicked"))?;
+        forward
+            .join()
+            .map_err(|_panic| io::Error::other("proxy forwarding thread panicked"))?;
         Ok(request)
     });
     Ok((address, server))
@@ -236,8 +288,11 @@ fn proxy_server(origin: SocketAddr) -> io::Result<Server> {
 
 async fn finish(server: JoinHandle<io::Result<String>>) -> TestResult<String> {
     let result = tokio::task::spawn_blocking(move || {
-        server.join().map_err(|_panic| io::Error::other("test server panicked"))
-    }).await??;
+        server
+            .join()
+            .map_err(|_panic| io::Error::other("test server panicked"))
+    })
+    .await??;
     Ok(result?)
 }
 
@@ -245,7 +300,8 @@ async fn fetch(client: &super::super::HttpClient, url: &str) -> TestResult {
     let response = tokio::time::timeout(
         Duration::from_secs(5),
         client.request(Request::get(url).body(Full::new(Bytes::new()))?),
-    ).await??;
+    )
+    .await??;
     assert_eq!(response.status(), StatusCode::OK);
     assert_eq!(response.into_body().collect().await?.to_bytes(), "ok");
     Ok(())
@@ -284,8 +340,11 @@ async fn rejected_tls(host: &str, trust: bool) -> TestResult {
     assert!(finish(proxy_task).await?.starts_with("CONNECT "));
     // Rejection is expected to arrive at the origin as a TLS alert, before any HTTP request.
     let rejected = tokio::task::spawn_blocking(move || {
-        origin_task.join().map_err(|_panic| io::Error::other("TLS test server panicked"))
-    }).await??;
+        origin_task
+            .join()
+            .map_err(|_panic| io::Error::other("TLS test server panicked"))
+    })
+    .await??;
     assert!(rejected.is_err());
     Ok(())
 }
@@ -310,7 +369,9 @@ async fn rejected_connect_never_falls_back_to_a_direct_connection() -> TestResul
     let proxy_task = thread::spawn(move || {
         let mut socket = accept(&listener)?;
         let request = headers(&mut socket)?;
-        socket.write_all(b"HTTP/1.1 407 Proxy Authentication Required\r\nContent-Length: 0\r\n\r\n")?;
+        socket.write_all(
+            b"HTTP/1.1 407 Proxy Authentication Required\r\nContent-Length: 0\r\n\r\n",
+        )?;
         Ok(request)
     });
     let config = ProxyConfig {
@@ -336,14 +397,21 @@ async fn http_proxy_uses_absolute_form() -> TestResult {
     let client = client(config, RootCertStore::empty())?;
     fetch(&client, "http://public.example.test/path?q=1").await?;
     drop(client);
-    assert!(finish(task).await?.starts_with("GET http://public.example.test/path?q=1 HTTP/1.1\r\n"));
+    assert!(
+        finish(task)
+            .await?
+            .starts_with("GET http://public.example.test/path?q=1 HTTP/1.1\r\n")
+    );
     Ok(())
 }
 
 #[tokio::test]
 async fn absent_proxy_keeps_direct_connections() -> TestResult {
     let (address, task) = plain_server()?;
-    let client = client(ProxyConfig::parse(None, None, None)?, RootCertStore::empty())?;
+    let client = client(
+        ProxyConfig::parse(None, None, None)?,
+        RootCertStore::empty(),
+    )?;
     fetch(&client, &format!("http://{address}/direct")).await?;
     drop(client);
     assert!(finish(task).await?.starts_with("GET /direct HTTP/1.1\r\n"));

@@ -5,9 +5,9 @@
 //! it ([Docker's proxy arguments](https://docs.docker.com/build/building/variables/#proxy-arguments)).
 //! Railpack v0.43.0 ignores those arguments: its frontend reads only `cache-key`, `secrets-hash`
 //! and `github-token`. Its [build graph](https://github.com/railwayapp/railpack/blob/v0.43.0/buildkit/build_llb/build_graph.go#L263-L270)
-//! mounts every name in `BuildPlan.Secrets` as an environment secret on each command. We therefore add only the proxy
-//! names to the plan and send their values through BuildKit's secret session, without changing
-//! the plan's deploy variables or the resulting image's environment.
+//! mounts every name in `BuildPlan.Secrets` as an environment secret on each command. We therefore
+//! add only the proxy names to the plan and send their values through BuildKit's secret session,
+//! without changing the plan's deploy variables or the resulting image's environment.
 
 use serde_json::Value;
 
@@ -24,26 +24,32 @@ const NAMES: [&str; 6] = [
 pub(crate) fn from_env() -> Vec<(String, String)> {
     NAMES
         .into_iter()
-        .filter_map(|name| std::env::var(name).ok().map(|value| (name.to_owned(), value)))
+        .filter_map(|name| {
+            std::env::var(name)
+                .ok()
+                .map(|value| (name.to_owned(), value))
+        })
         .collect()
 }
 
 /// Adds names, never values, to Railpack's run-time secret environment.
-pub(crate) fn railpack_secrets(
-    plan: &mut Value,
-    vars: &[(String, String)],
-) -> Result<(), String> {
+pub(crate) fn railpack_secrets(plan: &mut Value, vars: &[(String, String)]) -> Result<(), String> {
     if vars.is_empty() {
         return Ok(());
     }
-    let object = plan.as_object_mut().ok_or("Railpack plan must be an object")?;
+    let object = plan
+        .as_object_mut()
+        .ok_or("Railpack plan must be an object")?;
     let secrets = object
         .entry("secrets")
         .or_insert_with(|| Value::Array(Vec::new()))
         .as_array_mut()
         .ok_or("Railpack plan secrets must be an array")?;
     for (name, _) in vars {
-        if !secrets.iter().any(|value| value.as_str() == Some(name.as_str())) {
+        if !secrets
+            .iter()
+            .any(|value| value.as_str() == Some(name.as_str()))
+        {
             secrets.push(Value::String(name.clone()));
         }
     }
@@ -66,9 +72,7 @@ pub(crate) fn configure_commands(
             }
         }
     }
-    if railpack
-        && let Some(first) = commands.first_mut()
-    {
+    if railpack && let Some(first) = commands.first_mut() {
         for (name, _) in vars {
             let prefix = format!("id={name},");
             let id = format!("id={name}");
@@ -80,8 +84,7 @@ pub(crate) fn configure_commands(
                 .position(|pair| {
                     matches!(pair, [flag, value] if flag == "--secret" && (value == &id || value.starts_with(&prefix)))
                 });
-            if let Some(existing) = existing.and_then(|index| first.get_mut(index + 1))
-            {
+            if let Some(existing) = existing.and_then(|index| first.get_mut(index + 1)) {
                 *existing = source;
             } else {
                 first.extend(["--secret".to_owned(), source]);
@@ -96,8 +99,14 @@ mod tests {
 
     fn vars() -> Vec<(String, String)> {
         vec![
-            ("HTTPS_PROXY".to_owned(), "http://100.66.31.168:3128".to_owned()),
-            ("NO_PROXY".to_owned(), ".svc,.svc.cluster.local,10.43.0.0/16".to_owned()),
+            (
+                "HTTPS_PROXY".to_owned(),
+                "http://100.66.31.168:3128".to_owned(),
+            ),
+            (
+                "NO_PROXY".to_owned(),
+                ".svc,.svc.cluster.local,10.43.0.0/16".to_owned(),
+            ),
         ]
     }
 
@@ -116,7 +125,10 @@ mod tests {
         let original_steps = plan.get("steps").cloned();
         railpack_secrets(&mut plan, &vars())?;
         railpack_secrets(&mut plan, &vars())?;
-        assert_eq!(plan.get("secrets"), Some(&serde_json::json!(["NPM_TOKEN", "HTTPS_PROXY", "NO_PROXY"])));
+        assert_eq!(
+            plan.get("secrets"),
+            Some(&serde_json::json!(["NPM_TOKEN", "HTTPS_PROXY", "NO_PROXY"]))
+        );
         assert_eq!(plan.get("deploy"), original_deploy.as_ref());
         assert_eq!(plan.get("steps"), original_steps.as_ref());
         assert!(!plan.to_string().contains("100.66.31.168"));
@@ -125,12 +137,20 @@ mod tests {
     }
 
     #[test]
-    fn dockerfile_receives_predefined_proxy_arguments_without_environment_instructions() -> Result<(), String> {
-        let mut commands = vec![strings(&["buildctl", "build", "--frontend", "dockerfile.v0"])];
+    fn dockerfile_receives_predefined_proxy_arguments_without_environment_instructions()
+    -> Result<(), String> {
+        let mut commands = vec![strings(&[
+            "buildctl",
+            "build",
+            "--frontend",
+            "dockerfile.v0",
+        ])];
         configure_commands(&mut commands, &vars(), false);
         let command = commands.first().ok_or("missing build command")?;
         assert!(command.contains(&"build-arg:HTTPS_PROXY=http://100.66.31.168:3128".to_owned()));
-        assert!(command.contains(&"build-arg:NO_PROXY=.svc,.svc.cluster.local,10.43.0.0/16".to_owned()));
+        assert!(
+            command.contains(&"build-arg:NO_PROXY=.svc,.svc.cluster.local,10.43.0.0/16".to_owned())
+        );
         assert!(!command.contains(&"--secret".to_owned()));
         Ok(())
     }
@@ -138,12 +158,22 @@ mod tests {
     #[test]
     fn railpack_receives_only_secret_names_and_replaces_colliding_sources() -> Result<(), String> {
         let mut commands = vec![strings(&[
-            "buildctl", "build", "--frontend", "gateway.v0", "--secret",
+            "buildctl",
+            "build",
+            "--frontend",
+            "gateway.v0",
+            "--secret",
             "id=HTTPS_PROXY,env=ZB_SECRET_HTTPS_PROXY",
         ])];
         configure_commands(&mut commands, &vars(), true);
         let command = commands.first().ok_or("missing build command")?;
-        assert_eq!(command.iter().filter(|arg| arg.starts_with("id=HTTPS_PROXY,")).count(), 1);
+        assert_eq!(
+            command
+                .iter()
+                .filter(|arg| arg.starts_with("id=HTTPS_PROXY,"))
+                .count(),
+            1
+        );
         assert!(command.contains(&"id=HTTPS_PROXY,env=HTTPS_PROXY".to_owned()));
         assert!(command.contains(&"id=NO_PROXY,env=NO_PROXY".to_owned()));
         assert!(!command.iter().any(|arg| arg.contains("100.66.31.168")));
@@ -152,7 +182,12 @@ mod tests {
 
     #[test]
     fn disabled_proxy_preserves_commands_and_plan() -> Result<(), String> {
-        let mut command = vec![strings(&["buildctl", "build", "--frontend", "dockerfile.v0"])];
+        let mut command = vec![strings(&[
+            "buildctl",
+            "build",
+            "--frontend",
+            "dockerfile.v0",
+        ])];
         let original_command = command.clone();
         configure_commands(&mut command, &[], false);
         assert_eq!(command, original_command);

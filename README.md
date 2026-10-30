@@ -5,6 +5,19 @@
 
 # Zeabur Builder
 
+This repository's `mingxing-proxy` branch is a maintained **MingXing proxy variant**, based on
+upstream v0.1.1 (`8fd8b6e9b6480cb2ea3fb28d250b4b71da663b8a`), not an official Zeabur release.
+It adds unauthenticated HTTP proxy support to Git ref resolution, GitHub API requests, fetch
+Jobs, Railpack planning and BuildKit builds. TLS certificate verification remains enabled.
+The chart's `proxy.url` accepts `http://IPv4:port`; `proxy.noProxy` retains the internal cluster
+addresses. Egress exceptions are limited to that proxy's `/32` and TCP port.
+
+The `MingXing proxy build` workflow runs unit/security tests and disposable K3s proxy builds,
+then exports digest-checked offline controller/job images and an installation bundle. The
+bundle's `install.py --check` is read-only; `--apply` is restricted to the intended new server
+and creates a private rollback backup. Existing GitHub App credentials and business workloads
+are preserved. Official Builder upgrades do not incorporate this variant automatically.
+
 **Push a commit, get an image digest.** A Kubernetes operator that builds container images from
 Git with BuildKit and hands the result to your rollout tool.
 

@@ -692,10 +692,17 @@ fn env(name: &str, value: &str) -> EnvVar {
 fn proxy_env(values: &[(String, String)]) -> impl Iterator<Item = EnvVar> + '_ {
     values
         .iter()
-        .filter(|(name, _)| matches!(
-            name.as_str(),
-            "http_proxy" | "https_proxy" | "no_proxy" | "HTTP_PROXY" | "HTTPS_PROXY" | "NO_PROXY"
-        ))
+        .filter(|(name, _)| {
+            matches!(
+                name.as_str(),
+                "http_proxy"
+                    | "https_proxy"
+                    | "no_proxy"
+                    | "HTTP_PROXY"
+                    | "HTTPS_PROXY"
+                    | "NO_PROXY"
+            )
+        })
         .map(|(name, value)| env(name, &literal(value)))
 }
 

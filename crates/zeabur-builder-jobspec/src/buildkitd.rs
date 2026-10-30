@@ -438,12 +438,24 @@ mod tests {
         let resources = Resources::default();
         let mut inputs = inputs(&resources);
         let proxy = vec![
-            ("HTTPS_PROXY".to_owned(), "http://100.66.31.168:3128".to_owned()),
+            (
+                "HTTPS_PROXY".to_owned(),
+                "http://100.66.31.168:3128".to_owned(),
+            ),
             ("NO_PROXY".to_owned(), ".svc,10.43.0.0/16".to_owned()),
-            ("UNRELATED_SECRET".to_owned(), "must-not-be-copied".to_owned()),
+            (
+                "UNRELATED_SECRET".to_owned(),
+                "must-not-be-copied".to_owned(),
+            ),
         ];
         inputs.proxy_env = &proxy;
-        let pod = daemon(&inputs).stateful_set.spec.unwrap().template.spec.unwrap();
+        let pod = daemon(&inputs)
+            .stateful_set
+            .spec
+            .unwrap()
+            .template
+            .spec
+            .unwrap();
         let env = pod.containers[0].env.as_ref().unwrap();
         assert_eq!(env.len(), 2);
         assert_eq!(env[0].name, "HTTPS_PROXY");

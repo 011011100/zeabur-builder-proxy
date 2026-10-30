@@ -222,11 +222,27 @@ fn infrastructure_proxy_reaches_fetch_plan_and_build_without_becoming_a_build_se
     let builder = railpack();
     let tags = tags();
     let proxy = vec![
-        ("HTTPS_PROXY".to_owned(), "http://100.66.31.168:3128".to_owned()),
-        ("NO_PROXY".to_owned(), ".svc,.svc.cluster.local,10.43.0.0/16".to_owned()),
-        ("UNRELATED_CONTROLLER_SECRET".to_owned(), "must-not-be-copied".to_owned()),
+        (
+            "HTTPS_PROXY".to_owned(),
+            "http://100.66.31.168:3128".to_owned(),
+        ),
+        (
+            "NO_PROXY".to_owned(),
+            ".svc,.svc.cluster.local,10.43.0.0/16".to_owned(),
+        ),
+        (
+            "UNRELATED_CONTROLLER_SECRET".to_owned(),
+            "must-not-be-copied".to_owned(),
+        ),
     ];
-    let mut inputs = inputs(&run, &build, "railpack", &builder, &tags, GitAuth::Anonymous);
+    let mut inputs = inputs(
+        &run,
+        &build,
+        "railpack",
+        &builder,
+        &tags,
+        GitAuth::Anonymous,
+    );
     inputs.proxy_env = &proxy;
     let job = job(&inputs).unwrap();
     let pod = job.spec.unwrap().template.spec.unwrap();
@@ -242,9 +258,22 @@ fn infrastructure_proxy_reaches_fetch_plan_and_build_without_becoming_a_build_se
             && var.value.as_deref() == Some("http://100.66.31.168:3128")));
         assert!(env.iter().any(|var| var.name == "NO_PROXY"
             && var.value.as_deref() == Some(".svc,.svc.cluster.local,10.43.0.0/16")));
-        assert!(!env.iter().any(|var| var.name == "UNRELATED_CONTROLLER_SECRET"));
-        assert!(!env.iter().any(|var| var.name.starts_with(SECRET_ENV_PREFIX)));
-        assert!(!container.command.as_ref().unwrap().iter().any(|arg| arg.contains("100.66.31.168")));
+        assert!(
+            !env.iter()
+                .any(|var| var.name == "UNRELATED_CONTROLLER_SECRET")
+        );
+        assert!(
+            !env.iter()
+                .any(|var| var.name.starts_with(SECRET_ENV_PREFIX))
+        );
+        assert!(
+            !container
+                .command
+                .as_ref()
+                .unwrap()
+                .iter()
+                .any(|arg| arg.contains("100.66.31.168"))
+        );
     }
 }
 

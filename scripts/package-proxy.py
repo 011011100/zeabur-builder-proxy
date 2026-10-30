@@ -133,7 +133,14 @@ def main():
     (bundle / "products").mkdir()
     chart = bundle / "products/zeabur-builder-proxy.tgz"
     shutil.copyfile(args.chart, chart)
-    shutil.copyfile(args.defaults, bundle / "products/default-values.json")
+    defaults = json.loads(args.defaults.read_text())
+    # The source chart intentionally has empty release digests. Keep the already installed
+    # official planner content-pinned while replacing only the controller and Job binary.
+    defaults["railpackImage"] = {
+        "repository": "ghcr.io/zeabur-oss/builder-railpack", "tag": "",
+        "digest": "sha256:db71c5e8c5f6cb17578e75ba7d0ff03abc7da0b1069253b8e7aa8058404dd77c",
+    }
+    write_json(bundle / "products/default-values.json", defaults)
     shutil.copyfile(root / "deploy/proxy/install.py", bundle / "install.py")
     write_json(bundle / "bundle.json", {
         "version": args.version, "source_commit": args.commit,

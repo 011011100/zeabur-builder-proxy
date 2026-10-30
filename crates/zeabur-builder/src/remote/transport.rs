@@ -101,7 +101,11 @@ impl ProxyConfig {
         )
     }
 
-    fn parse(http: Option<&str>, https: Option<&str>, bypass: Option<&str>) -> Result<Self, String> {
+    fn parse(
+        http: Option<&str>,
+        https: Option<&str>,
+        bypass: Option<&str>,
+    ) -> Result<Self, String> {
         let normalized = normalize_bypass(bypass.unwrap_or_default());
         let mut no_proxy = NoProxy::parse(&normalized)?;
         // The chart uses the same normalization for controller env and admission. All
@@ -129,8 +133,14 @@ impl ProxyConfig {
         if self.http.is_none() && self.https.is_none() {
             return Vec::new();
         }
-        let http = self.http.as_ref().map_or_else(String::new, Endpoint::environment);
-        let https = self.https.as_ref().map_or_else(String::new, Endpoint::environment);
+        let http = self
+            .http
+            .as_ref()
+            .map_or_else(String::new, Endpoint::environment);
+        let https = self
+            .https
+            .as_ref()
+            .map_or_else(String::new, Endpoint::environment);
         [
             ("http_proxy", http.clone()),
             ("HTTP_PROXY", http),
@@ -161,7 +171,11 @@ fn normalize_bypass(provided: &str) -> String {
             changed = true;
         }
     }
-    if changed { values.join(",") } else { provided.to_owned() }
+    if changed {
+        values.join(",")
+    } else {
+        provided.to_owned()
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -180,7 +194,11 @@ enum Bypass {
 
 impl NoProxy {
     fn parse(value: &str) -> Result<Self, String> {
-        let values: Vec<_> = value.split(',').map(str::trim).filter(|v| !v.is_empty()).collect();
+        let values: Vec<_> = value
+            .split(',')
+            .map(str::trim)
+            .filter(|v| !v.is_empty())
+            .collect();
         let rules = values
             .iter()
             .map(|value| Bypass::parse(value))
@@ -193,8 +211,15 @@ impl NoProxy {
 
     fn matches(&self, uri: &Uri) -> bool {
         let Some(host) = uri.host() else { return false };
-        let host = host.trim_matches(['[', ']']).trim_end_matches('.').to_ascii_lowercase();
-        let port = uri.port_u16().unwrap_or(if uri.scheme_str() == Some("https") { 443 } else { 80 });
+        let host = host
+            .trim_matches(['[', ']'])
+            .trim_end_matches('.')
+            .to_ascii_lowercase();
+        let port = uri.port_u16().unwrap_or(if uri.scheme_str() == Some("https") {
+            443
+        } else {
+            80
+        });
         self.rules.iter().any(|rule| rule.matches(&host, port))
     }
 }
@@ -218,9 +243,14 @@ impl Bypass {
         if let Ok(ip) = host.parse::<IpAddr>() {
             return Ok(Self::Ip(ip, port));
         }
-        let host = host.trim_start_matches('.').trim_end_matches('.').to_ascii_lowercase();
+        let host = host
+            .trim_start_matches('.')
+            .trim_end_matches('.')
+            .to_ascii_lowercase();
         if host.is_empty()
-            || !host.bytes().all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'.'))
+            || !host
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'.'))
             || host.split('.').any(str::is_empty)
         {
             return Err(invalid());
@@ -240,11 +270,19 @@ impl Bypass {
             }
             Self::Network(network, prefix) => match (*network, host.parse::<IpAddr>()) {
                 (IpAddr::V4(network), Ok(IpAddr::V4(ip))) => {
-                    let mask = if *prefix == 0 { 0 } else { u32::MAX << (32 - u32::from(*prefix)) };
+                    let mask = if *prefix == 0 {
+                        0
+                    } else {
+                        u32::MAX << (32 - u32::from(*prefix))
+                    };
                     u32::from(network) & mask == u32::from(ip) & mask
                 }
                 (IpAddr::V6(network), Ok(IpAddr::V6(ip))) => {
-                    let mask = if *prefix == 0 { 0 } else { u128::MAX << (128 - u32::from(*prefix)) };
+                    let mask = if *prefix == 0 {
+                        0
+                    } else {
+                        u128::MAX << (128 - u32::from(*prefix))
+                    };
                     u128::from(network) & mask == u128::from(ip) & mask
                 }
                 _ => false,
@@ -262,7 +300,14 @@ fn host_port(value: &str) -> Result<(&str, Option<u16>), ()> {
         if host.parse::<std::net::Ipv6Addr>().is_err() {
             return Err(());
         }
-        (host, if after.is_empty() { None } else { Some(after.strip_prefix(':').ok_or(())?) })
+        (
+            host,
+            if after.is_empty() {
+                None
+            } else {
+                Some(after.strip_prefix(':').ok_or(())?)
+            },
+        )
     } else if let Some((host, port)) = value.rsplit_once(':') {
         (host, Some(port))
     } else {
@@ -271,7 +316,9 @@ fn host_port(value: &str) -> Result<(&str, Option<u16>), ()> {
     if host.is_empty() {
         return Err(());
     }
-    let port = port.map(|p| p.parse::<u16>().ok().filter(|p| *p != 0).ok_or(())).transpose()?;
+    let port = port
+        .map(|p| p.parse::<u16>().ok().filter(|p| *p != 0).ok_or(()))
+        .transpose()?;
     Ok((host, port))
 }
 
@@ -312,32 +359,59 @@ impl Service<Uri> for ProxyConnector {
         let proxy = self.config.endpoint(&target).cloned();
         let mut inner = self.inner.clone();
         Box::pin(async move {
-            let destination = proxy.as_ref().map_or_else(|| target.clone(), |p| p.uri.clone());
+            let destination = proxy
+                .as_ref()
+                .map_or_else(|| target.clone(), |p| p.uri.clone());
             let stream = inner.call(destination).await.map_err(io::Error::other)?;
             let forward = proxy.is_some() && target.scheme_str() == Some("http");
             if proxy.is_some() && !forward {
                 tokio::time::timeout(CONNECT_TIMEOUT, tunnel(stream.inner(), &target))
                     .await
-                    .map_err(|_error| io::Error::new(io::ErrorKind::TimedOut, "HTTP proxy CONNECT timed out"))??;
+                    .map_err(|_error| {
+                        io::Error::new(io::ErrorKind::TimedOut, "HTTP proxy CONNECT timed out")
+                    })??;
             }
-            Ok(ProxyStream { io: stream, forward })
+            Ok(ProxyStream {
+                io: stream,
+                forward,
+            })
         })
     }
 }
 
 async fn tunnel(stream: &TcpStream, target: &Uri) -> io::Result<()> {
-    let host = target.host().ok_or_else(|| io::Error::other("CONNECT target has no host"))?;
-    let host = if host.contains(':') && !host.starts_with('[') { format!("[{host}]") } else { host.to_owned() };
-    let (_, port) = host_port(target.authority().ok_or_else(|| io::Error::other("CONNECT target has no authority"))?.as_str())
-        .map_err(|()| io::Error::other("CONNECT target has an invalid port"))?;
+    let host = target
+        .host()
+        .ok_or_else(|| io::Error::other("CONNECT target has no host"))?;
+    let host = if host.contains(':') && !host.starts_with('[') {
+        format!("[{host}]")
+    } else {
+        host.to_owned()
+    };
+    let (_, port) = host_port(
+        target
+            .authority()
+            .ok_or_else(|| io::Error::other("CONNECT target has no authority"))?
+            .as_str(),
+    )
+    .map_err(|()| io::Error::other("CONNECT target has an invalid port"))?;
     let authority = format!("{host}:{}", port.unwrap_or(443));
     let request = format!("CONNECT {authority} HTTP/1.1\r\nHost: {authority}\r\n\r\n");
     let mut remaining = request.as_bytes();
     while !remaining.is_empty() {
         stream.writable().await?;
         match stream.try_write(remaining) {
-            Ok(0) => return Err(io::Error::new(io::ErrorKind::WriteZero, "HTTP proxy closed CONNECT")),
-            Ok(written) => remaining = remaining.get(written..).ok_or_else(|| io::Error::other("invalid CONNECT write"))?,
+            Ok(0) => {
+                return Err(io::Error::new(
+                    io::ErrorKind::WriteZero,
+                    "HTTP proxy closed CONNECT",
+                ));
+            }
+            Ok(written) => {
+                remaining = remaining
+                    .get(written..)
+                    .ok_or_else(|| io::Error::other("invalid CONNECT write"))?
+            }
             Err(error) if error.kind() == io::ErrorKind::WouldBlock => {}
             Err(error) => return Err(error),
         }
@@ -351,7 +425,12 @@ async fn tunnel(stream: &TcpStream, target: &Uri) -> io::Result<()> {
         stream.readable().await?;
         let mut byte = [0];
         match stream.try_read(&mut byte) {
-            Ok(0) => return Err(io::Error::new(io::ErrorKind::UnexpectedEof, "HTTP proxy closed CONNECT")),
+            Ok(0) => {
+                return Err(io::Error::new(
+                    io::ErrorKind::UnexpectedEof,
+                    "HTTP proxy closed CONNECT",
+                ));
+            }
             Ok(_) => headers.extend_from_slice(&byte),
             Err(error) if error.kind() == io::ErrorKind::WouldBlock => {}
             Err(error) => return Err(error),
@@ -362,17 +441,22 @@ async fn tunnel(stream: &TcpStream, target: &Uri) -> io::Result<()> {
 
 fn connect_status(headers: &[u8]) -> io::Result<()> {
     let first = headers.split(|b| *b == b'\n').next().unwrap_or_default();
-    let first = std::str::from_utf8(first).map_err(|_error| io::Error::other("invalid HTTP proxy CONNECT response"))?;
+    let first = std::str::from_utf8(first)
+        .map_err(|_error| io::Error::other("invalid HTTP proxy CONNECT response"))?;
     let mut fields = first.split_ascii_whitespace();
     let version = fields.next();
-    let status = fields.next().filter(|s| s.len() == 3 && s.bytes().all(|b| b.is_ascii_digit()))
+    let status = fields
+        .next()
+        .filter(|s| s.len() == 3 && s.bytes().all(|b| b.is_ascii_digit()))
         .and_then(|s| s.parse::<u16>().ok());
     if !matches!(version, Some("HTTP/1.0" | "HTTP/1.1")) {
         return Err(io::Error::other("invalid HTTP proxy CONNECT response"));
     }
     match status {
         Some(200..=299) => Ok(()),
-        Some(status) => Err(io::Error::other(format!("HTTP proxy rejected CONNECT: status {status}"))),
+        Some(status) => Err(io::Error::other(format!(
+            "HTTP proxy rejected CONNECT: status {status}"
+        ))),
         None => Err(io::Error::other("invalid HTTP proxy CONNECT response")),
     }
 }
@@ -391,13 +475,21 @@ impl Connection for ProxyStream {
 }
 
 impl Read for ProxyStream {
-    fn poll_read(mut self: Pin<&mut Self>, cx: &mut Context<'_>, buf: ReadBufCursor<'_>) -> Poll<io::Result<()>> {
+    fn poll_read(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: ReadBufCursor<'_>,
+    ) -> Poll<io::Result<()>> {
         Pin::new(&mut self.io).poll_read(cx, buf)
     }
 }
 
 impl Write for ProxyStream {
-    fn poll_write(mut self: Pin<&mut Self>, cx: &mut Context<'_>, buf: &[u8]) -> Poll<io::Result<usize>> {
+    fn poll_write(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &[u8],
+    ) -> Poll<io::Result<usize>> {
         Pin::new(&mut self.io).poll_write(cx, buf)
     }
 
@@ -413,7 +505,11 @@ impl Write for ProxyStream {
         self.io.is_write_vectored()
     }
 
-    fn poll_write_vectored(mut self: Pin<&mut Self>, cx: &mut Context<'_>, bufs: &[io::IoSlice<'_>]) -> Poll<io::Result<usize>> {
+    fn poll_write_vectored(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        bufs: &[io::IoSlice<'_>],
+    ) -> Poll<io::Result<usize>> {
         Pin::new(&mut self.io).poll_write_vectored(cx, bufs)
     }
 }
