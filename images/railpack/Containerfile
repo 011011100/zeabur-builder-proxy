@@ -1,17 +1,35 @@
-# The Railpack planner: `railpack prepare` writes the plan the frontend builds. The version must
-# match the frontend's (ghcr.io/railwayapp/railpack-frontend) in the `railpack` ClusterBuilder.
-# Railpack is MIT-licensed: https://github.com/railwayapp/railpack
-FROM docker.io/library/alpine:3.22@sha256:2e0b81d60597f449baa56dc25d355367869d2dca4cd57e866f1e2b52af3eb55f
-ARG RAILPACK_VERSION=v0.43.0
+# Maintained Railpack v0.43.0 planner. Its only behavioral patch preserves six standard proxy
+# variables in sandboxed Mise subprocesses; the v0.43.0 gateway frontend remains compatible.
+# Source provenance and the MIT license are recorded in upstream.json.
+FROM --platform=$BUILDPLATFORM docker.io/library/golang:1.26.8-alpine@sha256:8ac98ca534ac3f51e1f420a1dd2c15e74c75cfa0f23f3ad27eb5d7236c349a0c AS railpack-build
+WORKDIR /src
 ARG TARGETARCH
-RUN set -eu; \
-    case "$TARGETARCH" in arm64) arch=arm64 ;; amd64) arch=x86_64 ;; *) exit 1 ;; esac; \
-    file="railpack-${RAILPACK_VERSION}-${arch}-unknown-linux-musl.tar.gz"; \
-    base="https://github.com/railwayapp/railpack/releases/download/${RAILPACK_VERSION}"; \
-    cd /tmp; \
-    wget -q "$base/$file" "$base/checksums.txt"; \
-    grep " $file\$" checksums.txt | sha256sum -c -; \
-    tar -xzf "$file" -C /usr/local/bin railpack; \
-    rm -f "$file" checksums.txt; \
-    railpack --version
+RUN apk add --no-cache patch \
+ && wget -q -O /tmp/railpack.tar.gz https://codeload.github.com/railwayapp/railpack/tar.gz/c71ae09408996068bcc9cf685146f55d428ef816 \
+ && echo '846865a4a1fa28e91e952d88a6f67ccef576876883c69c6e590dfbfa0aec75eb  /tmp/railpack.tar.gz' | sha256sum -c - \
+ && tar -xzf /tmp/railpack.tar.gz --strip-components=1 -C /src \
+ && rm /tmp/railpack.tar.gz
+COPY mise-proxy.patch /tmp/mise-proxy.patch
+COPY mise_proxy_env_test.go /src/core/mise/mingxing_proxy_env_test.go
+RUN patch -p1 < /tmp/mise-proxy.patch \
+ && test -z "$(gofmt -l core/mise/mise.go core/mise/mingxing_proxy_env_test.go)"
+RUN --mount=type=cache,target=/go/pkg/mod --mount=type=cache,target=/root/.cache/go-build \
+    set -eu; \
+    export CGO_ENABLED=0 GOTOOLCHAIN=local GOMAXPROCS=2; \
+    go test -p 2 ./core/mise -run '^TestMingxingProxyEnvironmentReachesMiseSubprocess$' -count=1; \
+    case "$TARGETARCH" in arm64|amd64) ;; *) exit 1 ;; esac; \
+    GOOS=linux GOARCH="$TARGETARCH" go build -p 2 -trimpath -buildvcs=false \
+      -ldflags='-s -w -X main.version=0.43.0 -X main.commit=c71ae09408996068bcc9cf685146f55d428ef816' \
+      -o /railpack ./cmd/cli
+
+# Keep the verified upstream runtime base; the compiled binary is static, as in .goreleaser.yml.
+FROM docker.io/library/alpine:3.22@sha256:2e0b81d60597f449baa56dc25d355367869d2dca4cd57e866f1e2b52af3eb55f
+COPY --from=railpack-build --chmod=0555 /railpack /usr/local/bin/railpack
+COPY --from=railpack-build /src/LICENSE /usr/share/licenses/railpack/LICENSE
+COPY upstream.json /usr/share/railpack/upstream.json
+LABEL org.opencontainers.image.source="https://github.com/011011100/zeabur-builder-proxy" \
+      org.opencontainers.image.version="0.43.0+mingxing.proxy.1" \
+      org.opencontainers.image.licenses="MIT" \
+      mingxingwenhua.cn.railpack-upstream="c71ae09408996068bcc9cf685146f55d428ef816"
+RUN railpack --version
 USER 1000:1000

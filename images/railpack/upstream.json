@@ -1,0 +1,11 @@
+{
+  "repository": "https://github.com/railwayapp/railpack",
+  "tag": "v0.43.0",
+  "commit": "c71ae09408996068bcc9cf685146f55d428ef816",
+  "source_url": "https://codeload.github.com/railwayapp/railpack/tar.gz/c71ae09408996068bcc9cf685146f55d428ef816",
+  "source_sha256": "846865a4a1fa28e91e952d88a6f67ccef576876883c69c6e590dfbfa0aec75eb",
+  "license": "MIT",
+  "go_image": "docker.io/library/golang:1.26.8-alpine@sha256:8ac98ca534ac3f51e1f420a1dd2c15e74c75cfa0f23f3ad27eb5d7236c349a0c",
+  "patch": "mise-proxy.patch",
+  "scope": "Copy only six standard HTTP proxy variables into sandboxed Mise subprocesses. Keep Railpack v0.43.0 plan/frontend behavior."
+}

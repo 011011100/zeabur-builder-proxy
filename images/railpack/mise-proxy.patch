@@ -1,0 +1,17 @@
+--- a/core/mise/mise.go
++++ b/core/mise/mise.go
+@@ -243,6 +243,14 @@
+ 		fmt.Sprintf("PATH=%s", os.Getenv("PATH")),
+ 	)
+ 
++	// Preserve only proxy settings needed for version discovery. Keep the sandboxed
++	// environment rather than inheriting arbitrary parent configuration or credentials.
++	for _, key := range []string{"http_proxy", "HTTP_PROXY", "https_proxy", "HTTPS_PROXY", "no_proxy", "NO_PROXY"} {
++		if value, exists := os.LookupEnv(key); exists {
++			cmd.Env = append(cmd.Env, key+"="+value)
++		}
++	}
++
+ 	if m.githubToken != "" {
+ 		cmd.Env = append(cmd.Env, fmt.Sprintf("GITHUB_TOKEN=%s", m.githubToken))
+ 	}
