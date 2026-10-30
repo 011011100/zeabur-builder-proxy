@@ -74,6 +74,7 @@ class ImportTests(unittest.TestCase):
             self.assertEqual(copy[-1].split(":", 1)[1], move[-2])
             self.assertTrue(move[-1].endswith(".oci.tar"))
         self.assertFalse(any("import" in args or "label" in args for args in self.commands))
+        self.assertIn(["docker", "exec", "node", "touch", CHECK.DIRECTORY + "/.cache.json"], self.commands)
 
     def test_archive_cannot_escape_bundle(self):
         self.manifest["images"][0]["archive"] = "../external.tar"
@@ -149,6 +150,7 @@ class ImportTests(unittest.TestCase):
         record = {"state": "unpinned", "id": "x", "pinned": False,
                   "containerd": {"labels": {CHECK.PIN: "pinned", CHECK.OWNER: "pinned"}}}
         with mock.patch.object(verifier, "snapshot", return_value={"own:tag": record}), \
+                mock.patch.object(verifier, "archive_cache", return_value={"ready": True, "problems": {}}), \
                 mock.patch.object(verifier, "evidence") as evidence:
             with self.assertRaisesRegex(RuntimeError, "own:tag: unpinned"):
                 verifier.wait_pinned("first")
@@ -161,10 +163,47 @@ class ImportTests(unittest.TestCase):
         snapshots = [{"own:tag": {"state": "missing"}},
                      {"own:tag": dict(ready, containerd=None)}, {"own:tag": ready}]
         with mock.patch.object(verifier, "snapshot", side_effect=snapshots) as snapshot, \
+                mock.patch.object(verifier, "archive_cache", return_value={"ready": True, "problems": {}}), \
                 mock.patch.object(verifier, "evidence") as evidence, mock.patch.object(CHECK.time, "sleep"):
             verifier.wait_pinned("recovered")
         self.assertEqual(snapshot.call_count, 3)
         evidence.assert_called_once_with("recovered", {"own:tag": ready})
+
+    def test_full_cache_paths_tags_size_and_current_mtime_are_required(self):
+        verifier = self.verifier()
+        epoch = 1_700_000_000
+        cache = {entry["destination"]: {"size": entry["size"], "modTime": "2023-11-14T22:13:20Z",
+                                         "images": sorted(entry["tags"])}
+                 for entry in verifier.archives}
+        def execute(*args, **_kwargs):
+            if args[0] == "cat":
+                return completed(json.dumps(cache))
+            entry = next(entry for entry in verifier.archives if entry["destination"] == args[-1])
+            return completed(f"{entry['size']} {epoch}")
+        with mock.patch.object(verifier, "execute", side_effect=execute):
+            self.assertTrue(verifier.archive_cache()["ready"])
+            first = verifier.archives[0]["destination"]
+            info = cache.pop(first)
+            cache[Path(first).name] = info
+            self.assertEqual(verifier.archive_cache()["problems"][first], "entry-missing")
+            cache[first] = cache.pop(Path(first).name)
+            cache[first]["images"] = []
+            self.assertEqual(verifier.archive_cache()["problems"][first], "expected-tag-missing")
+            cache[first]["images"] = sorted(verifier.archives[0]["tags"])
+            cache[first]["modTime"] = "2023-11-14T22:13:18Z"
+            self.assertEqual(verifier.archive_cache()["problems"][first], "cache-stale-for-current-archive")
+
+    def test_pins_without_a_complete_archive_cache_do_not_pass(self):
+        verifier = self.verifier(timeout=0)
+        pinned = {"state": "pinned", "id": "x", "pinned": True,
+                  "containerd": {"labels": {CHECK.PIN: "pinned", CHECK.OWNER: "pinned"}}}
+        cache = {"ready": False, "problems": {"/archive.tar": "entry-missing"}}
+        with mock.patch.object(verifier, "snapshot", return_value={"own:tag": pinned}), \
+                mock.patch.object(verifier, "archive_cache", return_value=cache), \
+                mock.patch.object(verifier, "evidence") as evidence:
+            with self.assertRaisesRegex(RuntimeError, "archive cache=.*entry-missing"):
+                verifier.wait_pinned("first")
+            evidence.assert_called_once_with("first", {"own:tag": pinned})
 
     def test_recovery_removes_only_manifest_aliases(self):
         verifier = self.verifier()

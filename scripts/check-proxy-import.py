@@ -35,7 +35,9 @@ def archive_plan(root, manifest):
         references = (image["tag"], image["digest_reference"])
         if any(not isinstance(ref, str) or not ref or ref.startswith("-") for ref in references):
             raise ValueError("Invalid bundle image reference")
-        grouped.setdefault(relative, {"source": source, "references": set()})["references"].update(references)
+        entry = grouped.setdefault(relative, {"source": source, "references": set(), "tags": set()})
+        entry["references"].update(references)
+        entry["tags"].add(image["tag"])
     if not grouped:
         raise ValueError("Bundle contains no images")
     result = []
@@ -46,7 +48,7 @@ def archive_plan(root, manifest):
                 digest.update(block)
         path_digest = hashlib.sha256(relative.encode()).hexdigest()[:12]
         name = f"mingxing-proxy-{path_digest}-{digest.hexdigest()[:16]}.oci.tar"
-        result.append(dict(entry, destination=DIRECTORY + "/" + name))
+        result.append(dict(entry, destination=DIRECTORY + "/" + name, size=entry["source"].stat().st_size))
     return result
 
 
@@ -104,6 +106,7 @@ class Verifier:
         self.artifacts.mkdir(parents=True, exist_ok=True)
         self.started = datetime.now(timezone.utc).isoformat()
         self.last_records = {}
+        self.last_cache = {}
         self.socket = socket
         self.ctr_cli = None
         self.cri_cli = None
@@ -148,6 +151,8 @@ class Verifier:
 
     def stage(self):
         self.execute("mkdir", "-p", DIRECTORY)
+        # K3s persists this cache only when it already exists; touch never truncates one.
+        self.execute("touch", DIRECTORY + "/.cache.json")
         for entry in self.archives:
             destination = entry["destination"]
             # Publish only after docker cp has finished. The rename happens inside the
@@ -181,6 +186,51 @@ class Verifier:
         return (record.get("state") == "pinned"
                 and labels.get(PIN) == "pinned" and labels.get(OWNER) == "pinned")
 
+    def archive_cache(self):
+        """A cache entry is written only after preloadFile, including retagging, succeeds."""
+        result = {"ready": False, "entries": {}, "problems": {}}
+        self.last_cache = result
+        loaded = self.execute("cat", DIRECTORY + "/.cache.json", check=False)
+        if loaded.returncode:
+            result["problems"]["cache"] = "not-readable"
+            return result
+        try:
+            cache = json.loads(loaded.stdout)
+            if not isinstance(cache, dict):
+                raise ValueError("cache is not an object")
+        except (ValueError, TypeError):
+            result["problems"]["cache"] = "invalid-or-incomplete-json"
+            return result
+        for entry in self.archives:
+            path = entry["destination"]
+            info = cache.get(path)  # K3s uses the full absolute watched path, not basename.
+            if not isinstance(info, dict):
+                result["problems"][path] = "entry-missing"
+                continue
+            result["entries"][path] = info
+            tags = info.get("images")
+            if not isinstance(tags, list) or not all(isinstance(tag, str) for tag in tags):
+                result["problems"][path] = "invalid-image-list"
+                continue
+            if not entry["tags"].issubset(tags):
+                result["problems"][path] = "expected-tag-missing"
+                continue
+            if type(info.get("size")) is not int or info["size"] != entry["size"]:
+                result["problems"][path] = "cached-size-mismatch"
+                continue
+            observed = self.execute("stat", "-c", "%s %Y", path, check=False)
+            try:
+                size, modified = map(int, observed.stdout.split())
+                timestamp = datetime.fromisoformat(info["modTime"].replace("Z", "+00:00"))
+                if observed.returncode or timestamp.tzinfo is None:
+                    raise ValueError("archive stat or cache timestamp is invalid")
+                if size != entry["size"] or int(timestamp.timestamp()) != modified:
+                    result["problems"][path] = "cache-stale-for-current-archive"
+            except (ValueError, KeyError, TypeError, AttributeError):
+                result["problems"][path] = "invalid-stat-or-cache-timestamp"
+        result["ready"] = not result["problems"]
+        return result
+
     def evidence(self, phase, records):
         result = {"phase": phase, "references": records, "cli": self.cli_info}
         report = self.artifacts / (phase + ".json")
@@ -190,13 +240,7 @@ class Verifier:
             stat = self.execute("stat", "-c", "%s %Y", entry["destination"], check=False)
             result["staged_archives"][entry["destination"]] = {
                 "stat_exit": stat.returncode, "size_mtime": stat.stdout.strip()}
-        cache = self.execute("cat", DIRECTORY + "/.cache.json", check=False)
-        try:
-            parsed = json.loads(cache.stdout) if not cache.returncode else {}
-            own = {entry["destination"] for entry in self.archives}
-            result["cache"] = {key: value for key, value in parsed.items() if key in own}
-        except (ValueError, AttributeError):
-            result["cache"] = {"state": "unavailable-or-invalid"}
+        result["cache"] = self.archive_cache()
         result["k3s_version"] = self.execute("k3s", "--version", check=False).stdout.strip()
         logs = self.run(["docker", "logs", "--timestamps", "--tail", "2000", "--since", self.started, self.node], check=False)
         selected = [line for line in (logs.stdout + logs.stderr).splitlines()
@@ -208,8 +252,9 @@ class Verifier:
         deadline = time.monotonic() + self.timeout
         while True:
             records = self.snapshot()
+            cache = self.archive_cache()
             pending = {ref: value for ref, value in records.items() if not self.ready(value)}
-            if not pending:
+            if not pending and cache["ready"]:
                 self.evidence(phase, records)
                 return
             if time.monotonic() >= deadline:
@@ -218,7 +263,8 @@ class Verifier:
                     f"{ref}: {value['state']} (metadata={bool(value.get('containerd'))}, "
                     f"labels={(value.get('containerd') or {}).get('labels', {})})"
                     for ref, value in sorted(pending.items()))
-                raise RuntimeError("K3s watcher import/pin check failed: " + summary)
+                raise RuntimeError("K3s watcher import completion failed: " + summary
+                                   + "; archive cache=" + json.dumps(cache["problems"], sort_keys=True))
             time.sleep(2)
 
     def remove_own_aliases(self):
