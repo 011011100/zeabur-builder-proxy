@@ -140,7 +140,7 @@ class PackageTests(unittest.TestCase):
 
     def test_release_tar_has_the_complete_reference_and_checksum_closure(self):
         images = self.root / "images"
-        for name in ("builder", "builder-job"):
+        for name in ("builder", "builder-job", "builder-railpack"):
             image(images / name)
         chart = self.root / "chart.tgz"
         with tarfile.open(chart, "w:gz") as archive:
@@ -155,6 +155,7 @@ class PackageTests(unittest.TestCase):
             sys.executable, str(ROOT / "scripts/package-proxy.py"),
             "--images", str(images), "--controller-ref", REF,
             "--job-ref", REF.replace("/builder:", "/builder-job:"),
+            "--planner-ref", REF.replace("/builder:", "/builder-railpack:"),
             "--chart", str(chart), "--defaults", str(defaults),
             "--version", "0.1.1-mingxing.1", "--commit", "a" * 40,
             "--output", str(output),
@@ -175,9 +176,11 @@ class PackageTests(unittest.TestCase):
             self.assertEqual(digest, hashlib.sha256(contents[name]).hexdigest())
         manifest = json.loads(contents["bundle.json"])
         self.assertEqual(manifest["source_commit"], "a" * 40)
-        self.assertEqual({record["role"] for record in manifest["images"]}, {"controller", "job"})
+        self.assertEqual({record["role"] for record in manifest["images"]}, {"controller", "job", "planner"})
+        self.assertEqual(len(manifest["images"]), 3)
         with tarfile.open(fileobj=io.BytesIO(contents["images/components-amd64.oci.tar"]), mode="r:") as archive:
             index = json.load(archive.extractfile("index.json"))
+            self.assertEqual(len(index["manifests"]), 6)
             refs = {entry["annotations"]["org.opencontainers.image.ref.name"]: entry["digest"]
                     for entry in index["manifests"]}
             for record in manifest["images"]:
