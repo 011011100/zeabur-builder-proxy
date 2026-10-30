@@ -25,7 +25,8 @@ python3 -m unittest discover -s deploy/proxy -p 'test_*.py'
 python3 -m unittest discover -s tests/proxy -p 'test_*.py'
 
 version=$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[] | select(.name == "zeabur-builder") | .version')
-tag="$version-${GITHUB_SHA:0:12}"
+source_commit=$(git rev-parse HEAD)
+tag="$version-${source_commit:0:12}"
 ./scripts/build-images.sh zeabur-builder "$tag"
 # Existing upstream end-to-end checks run in a disposable k3d cluster and cover unchanged
 # Dockerfile/Railpack builds, admission restrictions, cross-namespace isolation and archives.
@@ -50,6 +51,6 @@ python3 scripts/package-proxy.py \
   --job-ref "$prefix/builder-job:$tag" \
   --chart "products/zeabur-builder-$version.tgz" \
   --defaults products/default-values.json \
-  --version "$version" --commit "$GITHUB_SHA" \
+  --version "$version" --commit "$source_commit" \
   --output target/proxy-artifacts
 python3 scripts/check-proxy-import.py "target/proxy-artifacts/zeabur-builder-proxy-$version-linux-amd64"

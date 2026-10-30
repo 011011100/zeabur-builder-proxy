@@ -13,7 +13,34 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  format:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    permissions:
+      contents: write
+    outputs:
+      commit: ${{ steps.source.outputs.commit }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: DeterminateSystems/determinate-nix-action@f296148a827001a9a82d3685b53210c06e5d3b67 # v3.24.0
+      - name: Commit formatting from the pinned toolchain
+        id: source
+        run: |
+          nix develop --command cargo fmt --all
+          if ! git diff --quiet; then
+            if git diff --name-only | grep -vE '\.rs$'; then
+              echo 'Formatting changed a non-Rust file; refusing to commit it.' >&2
+              exit 1
+            fi
+            git config user.name 'github-actions[bot]'
+            git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+            git add --update -- '*.rs'
+            git commit -s -m 'style: apply the pinned Rust formatter'
+            git push origin "HEAD:${GITHUB_REF_NAME}"
+          fi
+          echo "commit=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
   verify-and-package:
+    needs: format
     runs-on: ubuntu-24.04
     timeout-minutes: 90
     env:
@@ -22,12 +49,15 @@ jobs:
       NEXTEST_TEST_THREADS: 2
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.format.outputs.commit }}
       - uses: DeterminateSystems/determinate-nix-action@f296148a827001a9a82d3685b53210c06e5d3b67 # v3.24.0
       - name: Locate the pinned compiler
         run: dirname "$(nix develop --command bash -c 'command -v rustc')" >> "$GITHUB_PATH"
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           shared-key: mingxing-proxy-v1
+          cache-on-failure: true
       - name: Check, test, build and package
         run: nix develop --command bash scripts/proxy-ci.sh
       - name: Keep the verified installation bundle and diagnostics

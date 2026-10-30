@@ -109,6 +109,48 @@ where
     .map(drop)
 }
 
+/// A ready Pod may still be the previous StatefulSet revision after server-side apply. Wait
+/// until its buildkitd container has the requested proxy configuration before giving it a Job.
+/// Compare only the six infrastructure variables; other environment settings do not affect this
+/// rollout check. Kubernetes may omit a literal empty `value`, which still means an empty string.
+fn proxy_configuration_matches(pod: &Pod, expected: &[(String, String)]) -> bool {
+    let proxy_name = |name: &str| {
+        matches!(
+            name,
+            "http_proxy" | "https_proxy" | "no_proxy" | "HTTP_PROXY" | "HTTPS_PROXY" | "NO_PROXY"
+        )
+    };
+    let Some(container) = pod
+        .spec
+        .as_ref()
+        .and_then(|spec| spec.containers.iter().find(|container| container.name == "buildkitd"))
+    else {
+        return false;
+    };
+    let desired: BTreeMap<_, _> = expected
+        .iter()
+        .filter(|(name, _)| proxy_name(name))
+        .map(|(name, value)| (name.as_str(), value.as_str()))
+        .collect();
+    let mut observed = BTreeMap::new();
+    for variable in container
+        .env
+        .as_deref()
+        .unwrap_or_default()
+        .iter()
+        .filter(|variable| proxy_name(&variable.name))
+    {
+        if variable.value_from.is_some()
+            || observed
+                .insert(variable.name.as_str(), variable.value.as_deref().unwrap_or_default())
+                .is_some()
+        {
+            return false;
+        }
+    }
+    observed == desired
+}
+
 /// Makes the namespace's certificates and applies its daemon with one replica.
 pub(crate) async fn wake(
     client: &Client,
@@ -134,6 +176,7 @@ pub(crate) async fn wake(
         .await?;
     let ready = pod.is_some_and(|p| {
         p.metadata.deletion_timestamp.is_none()
+            && proxy_configuration_matches(&p, &settings.proxy_env)
             && p.status
                 .and_then(|s| s.conditions)
                 .is_some_and(|c| c.iter().any(|c| c.type_ == "Ready" && c.status == "True"))
@@ -275,5 +318,121 @@ pub(crate) async fn sweep_forever(
         if let Err(e) = sweep(&client, &settings, &runs).await {
             tracing::warn!(error = %e, "buildkitd sweep");
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use k8s_openapi::api::core::v1::{Container, EnvVar, EnvVarSource, PodSpec};
+
+    use super::*;
+
+    fn configuration(proxy: &str) -> Vec<(String, String)> {
+        [
+            ("http_proxy", proxy),
+            ("HTTP_PROXY", proxy),
+            ("https_proxy", proxy),
+            ("HTTPS_PROXY", proxy),
+            ("no_proxy", ".svc,.svc.cluster.local,10.43.0.0/16"),
+            ("NO_PROXY", ".svc,.svc.cluster.local,10.43.0.0/16"),
+        ]
+        .map(|(name, value)| (name.to_owned(), value.to_owned()))
+        .to_vec()
+    }
+
+    fn pod(configuration: &[(String, String)]) -> Pod {
+        Pod {
+            spec: Some(PodSpec {
+                containers: vec![Container {
+                    name: "buildkitd".to_owned(),
+                    env: Some(
+                        configuration
+                            .iter()
+                            .map(|(name, value)| EnvVar {
+                                name: name.clone(),
+                                value: Some(value.clone()),
+                                value_from: None,
+                            })
+                            .collect(),
+                    ),
+                    ..Container::default()
+                }],
+                ..PodSpec::default()
+            }),
+            ..Pod::default()
+        }
+    }
+
+    #[test]
+    fn enabling_proxy_waits_for_a_pod_with_the_new_configuration() {
+        let expected = configuration("http://100.66.31.168:3128");
+        assert!(!proxy_configuration_matches(&pod(&[]), &expected));
+        assert!(!proxy_configuration_matches(
+            &pod(&configuration("http://100.66.31.169:3128")),
+            &expected
+        ));
+        assert!(proxy_configuration_matches(&pod(&expected), &expected));
+        assert!(!proxy_configuration_matches(&Pod::default(), &expected));
+    }
+
+    #[test]
+    fn disabling_proxy_waits_until_the_old_variables_are_removed() {
+        assert!(!proxy_configuration_matches(
+            &pod(&configuration("http://100.66.31.168:3128")),
+            &[]
+        ));
+        assert!(proxy_configuration_matches(&pod(&[]), &[]));
+    }
+
+    #[test]
+    fn proxy_comparison_ignores_order_and_unrelated_environment() {
+        let expected = configuration("http://100.66.31.168:3128");
+        let mut reordered = expected.clone();
+        reordered.reverse();
+        reordered.push(("HOME".to_owned(), "/tmp".to_owned()));
+        assert!(proxy_configuration_matches(&pod(&reordered), &expected));
+    }
+
+    #[test]
+    fn proxy_values_must_be_literal_and_unambiguous() {
+        let expected = configuration("http://100.66.31.168:3128");
+        let mut indirect = pod(&expected);
+        if let Some(variable) = indirect
+            .spec
+            .as_mut()
+            .and_then(|spec| spec.containers.first_mut())
+            .and_then(|container| container.env.as_mut())
+            .and_then(|variables| variables.first_mut())
+        {
+            variable.value_from = Some(EnvVarSource::default());
+        }
+        assert!(!proxy_configuration_matches(&indirect, &expected));
+        let mut duplicated = expected.clone();
+        duplicated.extend(expected.clone());
+        assert!(!proxy_configuration_matches(&pod(&duplicated), &expected));
+    }
+
+    #[test]
+    fn api_omission_of_an_empty_literal_value_is_preserved() {
+        let mut expected = configuration("http://100.66.31.168:3128");
+        for (name, value) in &mut expected {
+            if name.eq_ignore_ascii_case("http_proxy") {
+                value.clear();
+            }
+        }
+        let mut empty = pod(&expected);
+        if let Some(variables) = empty
+            .spec
+            .as_mut()
+            .and_then(|spec| spec.containers.first_mut())
+            .and_then(|container| container.env.as_mut())
+        {
+            for variable in variables {
+                if variable.value.as_deref() == Some("") {
+                    variable.value = None;
+                }
+            }
+        }
+        assert!(proxy_configuration_matches(&empty, &expected));
     }
 }
