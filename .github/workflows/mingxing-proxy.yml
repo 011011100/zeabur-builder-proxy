@@ -5,6 +5,14 @@ on:
     branches: [mingxing-proxy]
   workflow_dispatch:
     inputs:
+      import_only:
+        description: 'Diagnose the K3s watcher using an existing bundle without recompiling'
+        type: boolean
+        default: false
+      artifact_run:
+        description: 'Existing run that produced the bundle to diagnose'
+        type: string
+        default: '41011147150'
       proxy_only:
         description: 'Rerun proxy fixtures only when production code matches the verified baseline'
         type: boolean
@@ -14,11 +22,12 @@ permissions:
   contents: read
 
 concurrency:
-  group: mingxing-proxy-${{ github.ref }}
+  group: mingxing-proxy-${{ github.ref }}-${{ inputs.import_only && 'import' || 'build' }}
   cancel-in-progress: true
 
 jobs:
   format:
+    if: ${{ !inputs.import_only }}
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     permissions:
@@ -78,3 +87,33 @@ jobs:
             target/proxy-artifacts/cluster/
           if-no-files-found: warn
           retention-days: 14
+  import-diagnostic:
+    if: ${{ inputs.import_only }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      actions: read
+    env:
+      GH_TOKEN: ${{ github.token }}
+      ARTIFACT_RUN: ${{ inputs.artifact_run }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: DeterminateSystems/determinate-nix-action@f296148a827001a9a82d3685b53210c06e5d3b67 # v3.24.0
+      - name: Reuse the existing checksummed bundle
+        run: |
+          [[ "$ARTIFACT_RUN" =~ ^[0-9]+$ ]]
+          gh run download "$ARTIFACT_RUN" --repo "$GITHUB_REPOSITORY" \
+            --name zeabur-builder-proxy-linux-amd64 --dir target/proxy-artifacts
+          cd target/proxy-artifacts
+          sha256sum -c ./*.tar.gz.sha256
+          tar -xzf ./*.tar.gz
+      - name: Diagnose the real K3s watcher
+        run: nix develop --command bash scripts/diagnose-proxy-import.sh
+      - name: Keep import evidence
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: proxy-import-diagnostics
+          path: target/proxy-artifacts/cluster/offline-import/
+          if-no-files-found: warn
