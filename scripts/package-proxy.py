@@ -95,17 +95,18 @@ def merge_image(source, destination, ref):
                       "archive": "images/components-amd64.oci.tar"}
 
 
-def main():
+def main(arguments=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--images", type=Path, required=True)
     parser.add_argument("--controller-ref", required=True)
     parser.add_argument("--job-ref", required=True)
+    parser.add_argument("--planner-ref", required=True)
     parser.add_argument("--chart", type=Path, required=True)
     parser.add_argument("--defaults", type=Path, required=True)
     parser.add_argument("--version", required=True)
     parser.add_argument("--commit", required=True)
     parser.add_argument("--output", type=Path, required=True)
-    args = parser.parse_args()
+    args = parser.parse_args(arguments)
     if len(args.commit) != 40 or any(c not in "0123456789abcdef" for c in args.commit):
         parser.error("A full source commit is required")
     root = Path(__file__).resolve().parent.parent
@@ -117,9 +118,11 @@ def main():
     layout = args.output.parent / "proxy-merged-oci"
     layout.mkdir(parents=True, exist_ok=False)
     manifests, images = [], []
-    for image, ref in (("builder", args.controller_ref), ("builder-job", args.job_ref)):
+    for role, image, ref in (("controller", "builder", args.controller_ref),
+                             ("job", "builder-job", args.job_ref),
+                             ("planner", "builder-railpack", args.planner_ref)):
         entries, record = merge_image(args.images / image, layout, ref)
-        record["role"] = "controller" if image == "builder" else "job"
+        record["role"] = role
         manifests.extend(entries)
         images.append(record)
     write_json(layout / "index.json", {"schemaVersion": 2, "manifests": manifests})
@@ -134,12 +137,8 @@ def main():
     chart = bundle / "products/zeabur-builder-proxy.tgz"
     shutil.copyfile(args.chart, chart)
     defaults = json.loads(args.defaults.read_text())
-    # The source chart intentionally has empty release digests. Keep the already installed
-    # official planner content-pinned while replacing only the controller and Job binary.
-    defaults["railpackImage"] = {
-        "repository": "ghcr.io/zeabur-oss/builder-railpack", "tag": "",
-        "digest": "sha256:db71c5e8c5f6cb17578e75ba7d0ff03abc7da0b1069253b8e7aa8058404dd77c",
-    }
+    # The installer replaces all three image settings from the verified role/digest records.
+    # In particular the maintained planner propagates its proxy to the Mise subprocess.
     write_json(bundle / "products/default-values.json", defaults)
     shutil.copyfile(root / "deploy/proxy/install.py", bundle / "install.py")
     shutil.copyfile(root / "LICENSE", bundle / "LICENSE")
@@ -157,6 +156,7 @@ def main():
         "python3 install.py --proxy http://PROXY_IP:3128 --apply\n"
         "python3 install.py --rollback BACKUP_DIRECTORY\n"
         "安装只更新 Builder，保留 GitHub App、项目、现有运行服务和数据。\n"
+        "维护版包含 controller、Job 和 Railpack planner 三个镜像；planner 的 Mise 子进程也会使用代理。\n"
         "检查 Build/BuildRun 的新状态以验证代理、仓库权限和构建依赖；入口就绪不等于构建已通过。\n"
     )
     lines = [sha256(path) + "  " + str(path.relative_to(bundle))

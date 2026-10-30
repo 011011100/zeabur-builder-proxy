@@ -13,7 +13,9 @@ The chart's `proxy.url` accepts `http://IPv4:port`; `proxy.noProxy` retains the 
 addresses. Egress exceptions are limited to that proxy's `/32` and TCP port.
 
 The `MingXing proxy build` workflow runs unit/security tests and disposable K3s proxy builds,
-then exports digest-checked offline controller/job images and an installation bundle. The
+then exports digest-checked offline controller/job/planner images and an installation bundle.
+The maintained Railpack planner forwards the selected proxy variables to its Mise subprocess;
+the original planner image is not used by this bundle. The
 bundle's `install.py --check` is read-only; `--apply` is restricted to the intended new server
 and creates a private rollback backup. Existing GitHub App credentials and business workloads
 are preserved. Official Builder upgrades do not incorporate this variant automatically.

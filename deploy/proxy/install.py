@@ -36,6 +36,7 @@ ORIGINAL_IMAGE = "ghcr.io/zeabur-oss/builder@sha256:f964d8b5ca515bc84466971ab02a
 SOURCE_ANNOTATION = "mingxingwenhua.cn/builder-proxy-source"
 VERSION_ANNOTATION = "mingxingwenhua.cn/builder-proxy-version"
 PROXY_NAMES = {"HTTP_PROXY", "http_proxy", "HTTPS_PROXY", "https_proxy", "NO_PROXY", "no_proxy"}
+IMAGE_SETTINGS = {"controller": "image", "job": "jobImage", "planner": "railpackImage"}
 NO_PROXY = "localhost,127.0.0.1,::1,.svc,.svc.cluster.local,10.43.0.1,10.42.0.0/16,10.43.0.0/16,172.16.0.0/12"
 BACKUP_ROOT = Path("/root/zeabur-builder-proxy-backups")
 IMAGES_ROOT = Path("/var/lib/rancher/k3s/agent/images")
@@ -107,8 +108,8 @@ def verify_bundle(root):
     require(expected[manifest["chart"]] == manifest.get("chart_sha256"),
             "Chart SHA256 does not match bundle.json.")
     images = manifest.get("images", [])
-    require(len(images) == 2 and {image.get("role") for image in images} == {"controller", "job"},
-            "Bundle images must name exactly one controller and one job role.")
+    require(len(images) == len(IMAGE_SETTINGS) and {image.get("role") for image in images} == set(IMAGE_SETTINGS),
+            "Bundle images must name exactly one controller, job and planner role.")
     for image in images:
         require(re.fullmatch(r"[a-z0-9][a-z0-9./_:-]*@sha256:[0-9a-f]{64}",
                              image.get("digest_reference", "")), "Image must be pinned by digest.")
@@ -266,7 +267,7 @@ def desired_defaults(root, manifest, proxy, no_proxy):
     defaults = json.loads(bundle_path(root, manifest["defaults"]).read_text())
     for image in manifest["images"]:
         repository, digest = image["digest_reference"].rsplit("@", 1)
-        key = "image" if image["role"] == "controller" else "jobImage"
+        key = IMAGE_SETTINGS[image["role"]]
         defaults[key].update(repository=repository, digest=digest, tag="")
     defaults["proxy"] = {"url": proxy, "noProxy": no_proxy}
     return defaults
@@ -287,13 +288,13 @@ def check_overrides(kube, state, defaults):
         require(not spec.get("valuesSecrets"),
                 key + " uses valuesSecrets; image/proxy overrides cannot be verified without reading Secrets.")
         values = kube.yaml_values(spec.get("valuesContent", ""))
-        for section in ("image", "jobImage", "proxy"):
+        for section in (*IMAGE_SETTINGS.values(), "proxy"):
             if section in values:
                 require(matching_subset(values[section], defaults[section]),
                         key + " valuesContent overrides " + section + " differently; stopped without replacing it.")
         for path, value in spec.get("set", {}).items():
             parts = path.split(".")
-            if parts[0] not in ("image", "jobImage", "proxy"):
+            if parts[0] not in (*IMAGE_SETTINGS.values(), "proxy"):
                 continue
             wanted = defaults
             for part in parts:
@@ -396,7 +397,11 @@ def stage_images(root, manifest):
             if not all(image_is_pinned(reference) for reference in references):
                 # K3s owns pinning for archives in agent/images. Refresh only this bundle's
                 # verified archive so its watcher reimports missing/unpinned references.
-                os.utime(destination, None)
+                previous = destination.stat()
+                # K3s persists its import timestamp at whole-second precision. Ensure even a
+                # rapid retry (or a future archive timestamp) is strictly newer than its cache.
+                touched = max(time.time_ns(), previous.st_mtime_ns + 1_000_000_000)
+                os.utime(destination, ns=(previous.st_atime_ns, touched), follow_symlinks=False)
             continue
         descriptor, temporary = tempfile.mkstemp(prefix=".mingxing-builder-proxy-", dir=directory)
         try:

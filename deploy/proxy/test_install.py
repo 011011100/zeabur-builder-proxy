@@ -35,6 +35,7 @@ def chart_bytes(extra_name=None):
 def defaults():
     return {"image": {"repository": "ghcr.io/zeabur-oss/builder", "digest": "", "tag": "", "pullPolicy": "IfNotPresent"},
             "jobImage": {"repository": "ghcr.io/zeabur-oss/builder-job", "digest": "", "tag": ""},
+            "railpackImage": {"repository": "ghcr.io/zeabur-oss/builder-railpack", "digest": "", "tag": ""},
             "proxy": {"url": "", "noProxy": install.NO_PROXY},
             "registry": {"host": "", "ca": ""}}
 
@@ -49,7 +50,7 @@ def make_bundle(root):
     manifest = {"version": "0.1.1-mingxing.1", "source_commit": "a" * 40,
                 "chart": "products/chart.tgz", "chart_sha256": install.sha256(chart),
                 "defaults": "products/defaults.json", "images": []}
-    for role, digit in (("controller", "b"), ("job", "c")):
+    for role, digit in (("controller", "b"), ("job", "c"), ("planner", "d")):
         manifest["images"].append({"role": role, "tag": "ghcr.io/example/{}:version".format(role),
                                    "digest_reference": "ghcr.io/example/{}@sha256:{}".format(role, digit * 64),
                                    "archive": "images/components.oci.tar"})
@@ -134,6 +135,8 @@ class BundleTests(unittest.TestCase):
         wanted = install.desired_defaults(self.root, self.manifest, "http://100.66.31.168:3128", install.NO_PROXY)
         self.assertEqual(wanted["image"]["repository"], "ghcr.io/example/controller")
         self.assertEqual(wanted["jobImage"]["digest"], "sha256:" + "c" * 64)
+        self.assertEqual(wanted["railpackImage"]["repository"], "ghcr.io/example/planner")
+        self.assertEqual(wanted["railpackImage"]["digest"], "sha256:" + "d" * 64)
         self.assertEqual(wanted["proxy"]["url"], "http://100.66.31.168:3128")
 
     def test_changed_file_and_unlisted_file_are_rejected(self):
@@ -143,6 +146,13 @@ class BundleTests(unittest.TestCase):
         checksum_bundle(self.root)
         (self.root / "unlisted").write_text("unexpected")
         with self.assertRaisesRegex(install.InstallError, "absent"):
+            install.verify_bundle(self.root)
+
+    def test_bundle_without_maintained_planner_is_rejected(self):
+        self.manifest["images"] = [image for image in self.manifest["images"] if image["role"] != "planner"]
+        (self.root / "bundle.json").write_text(json.dumps(self.manifest))
+        checksum_bundle(self.root)
+        with self.assertRaisesRegex(install.InstallError, "planner"):
             install.verify_bundle(self.root)
 
     def test_archive_paths_and_checksum_traversal_are_rejected(self):
@@ -209,7 +219,7 @@ class ClusterAndOverrideTests(unittest.TestCase):
         state = {"helmchart": copy.deepcopy(self.kube.chart), "helmchartconfig": None}
         install.check_overrides(self.kube, state, wanted)
         for content in ('{"image":{"repository":"other"}}', '{"proxy":{"url":"http://other:3128"}}',
-                        '{"jobImage":null}'):
+                        '{"jobImage":null}', '{"railpackImage":{"repository":"other/planner"}}'):
             state["helmchart"]["spec"]["valuesContent"] = content
             with self.subTest(content=content), self.assertRaises(install.InstallError):
                 install.check_overrides(self.kube, state, wanted)
@@ -219,6 +229,9 @@ class ClusterAndOverrideTests(unittest.TestCase):
             install.check_overrides(self.kube, state, wanted)
         state["helmchart"]["spec"]["set"] = {"image.repository": wanted["image"]["repository"]}
         install.check_overrides(self.kube, state, wanted)
+        state["helmchart"]["spec"]["set"] = {"railpackImage.digest": "sha256:wrong"}
+        with self.assertRaisesRegex(install.InstallError, "spec.set"):
+            install.check_overrides(self.kube, state, wanted)
 
     def test_secret_backed_values_are_not_read_or_silently_ignored(self):
         state = {"helmchart": copy.deepcopy(self.kube.chart), "helmchartconfig": None}
@@ -307,9 +320,10 @@ class ImagePinTests(unittest.TestCase):
                               for reference in (image["tag"], image["digest_reference"])}
             with mock.patch.object(install, "IMAGES_ROOT", images_root), \
                     mock.patch.object(install, "image_is_pinned", return_value=False) as inspect, \
+                    mock.patch.object(install.time, "time_ns", return_value=0), \
                     mock.patch.object(install, "wait_images") as wait:
                 install.stage_images(root, manifest)
-            self.assertGreater(destination.stat().st_mtime, 1)
+            self.assertGreaterEqual(destination.stat().st_mtime_ns, 2_000_000_000)
             self.assertEqual(destination.read_bytes(), original)
             self.assertEqual(other.stat().st_mtime, 1)
             self.assertTrue(all(call.args[0] in own_references for call in inspect.call_args_list))
