@@ -19,6 +19,7 @@ from pathlib import Path, PurePosixPath
 import platform
 import re
 import shutil
+import stat
 import subprocess
 import sys
 import tarfile
@@ -40,6 +41,7 @@ IMAGE_SETTINGS = {"controller": "image", "job": "jobImage", "planner": "railpack
 NO_PROXY = "localhost,127.0.0.1,::1,.svc,.svc.cluster.local,10.43.0.1,10.42.0.0/16,10.43.0.0/16,172.16.0.0/12"
 BACKUP_ROOT = Path("/root/zeabur-builder-proxy-backups")
 IMAGES_ROOT = Path("/var/lib/rancher/k3s/agent/images")
+CONTAINERD_SOCKET = "/run/k3s/containerd/containerd.sock"
 
 
 class InstallError(Exception):
@@ -354,47 +356,129 @@ def backup_state(state, manifest):
     return backup
 
 
-def image_is_pinned(reference):
-    result = run(["k3s", "crictl", "inspecti", reference], optional=True, timeout=15)
+def cri_error(result):
+    message = ((result.stderr or "") + "\n" + (result.stdout or "")).lower()
+    if (result.returncode in (126, 127)
+            or any(word in message for word in ("no help topic", "unknown command", "unknown flag",
+                                                "flag provided but not defined", "executable file not found"))):
+        return "unavailable CLI"
+    if any(word in message for word in ("dial unix", "connection refused", "transport is closing",
+                                       "failed to connect", "context deadline exceeded", "unavailable")):
+        return "unavailable containerd runtime"
+    if "no such image" in message or re.search(r"\bimage\b[^\n]*(?:not found|notfound)", message):
+        return "missing image"
+    return "unexpected CRI error"
+
+
+def discover_cri():
+    # K3s's container image does not necessarily expose `k3s crictl`. Discover the real
+    # binary, and make a runtime RPC before any import polling or cluster mutation.
+    socket = Path(CONTAINERD_SOCKET)
+    require(socket.exists() and stat.S_ISSOCK(socket.stat().st_mode),
+            "The local K3s containerd socket is unavailable; no import was attempted.")
+    candidates = [shutil.which("crictl"), "/bin/crictl", "/usr/bin/crictl", "/usr/local/bin/crictl",
+                  "/bin/aux/crictl", "/var/lib/rancher/k3s/data/current/bin/crictl"]
+    for path in dict.fromkeys(candidate for candidate in candidates if candidate):
+        if not Path(path).is_file() or not os.access(path, os.X_OK):
+            continue
+        endpoint = "unix://" + CONTAINERD_SOCKET
+        prefix = [path, "--runtime-endpoint", endpoint, "--image-endpoint", endpoint]
+        version = run([*prefix, "version"], optional=True, timeout=15)
+        if version.returncode == 0 and "containerd" in version.stdout.lower():
+            return prefix
+    raise InstallError("No usable crictl binary can query the local K3s containerd runtime; no import was attempted.")
+
+
+def image_is_pinned(reference, cri):
+    result = run([*cri, "inspecti", "--quiet", reference], optional=True, timeout=15)
     if result.returncode:
-        return False
+        reason = cri_error(result)
+        if reason == "missing image":
+            return False
+        raise InstallError("CRI inspection failed ({}); not an image-download timeout.".format(reason))
     try:
         status = json.loads(result.stdout).get("status", {})
     except (ValueError, TypeError, AttributeError):
-        return False
-    if not isinstance(status, dict):
-        return False
+        raise InstallError("CRI returned invalid image metadata; stopped without changing the chart.") from None
+    require(isinstance(status, dict), "CRI returned invalid image metadata.")
     image_id = status.get("id")
-    return (isinstance(image_id, str) and bool(image_id)
-            and status.get("pinned") is True)
+    require(isinstance(image_id, str) and image_id and type(status.get("pinned")) is bool,
+            "CRI image metadata has no valid identity or boolean pinned status.")
+    return status["pinned"]
 
 
-def wait_images(images, timeout=240):
+def archive_cache_ready(archives):
+    if not archives:
+        return False
+    cache_file = IMAGES_ROOT / ".cache.json"
+    if not cache_file.is_file() or cache_file.is_symlink():
+        return False
+    try:
+        cache = json.loads(cache_file.read_text())
+        if not isinstance(cache, dict):
+            return False
+        for archive in archives:
+            path = archive["path"]
+            entry = cache.get(str(path))
+            if not isinstance(entry, dict) or type(entry.get("size")) is not int:
+                return False
+            tags = entry.get("images")
+            if not isinstance(tags, list) or not all(isinstance(tag, str) for tag in tags):
+                return False
+            if not archive["tags"].issubset(tags):
+                return False
+            timestamp = datetime.datetime.fromisoformat(entry["modTime"].replace("Z", "+00:00"))
+            current = path.stat()
+            if (timestamp.tzinfo is None or entry["size"] != archive["size"]
+                    or current.st_size != archive["size"]
+                    or int(timestamp.timestamp()) != int(current.st_mtime)):
+                return False
+    except (OSError, ValueError, KeyError, TypeError, AttributeError):
+        return False
+    return True
+
+
+def wait_images(images, cri, archives, timeout=240):
     pending = {reference for image in images for reference in (image["tag"], image["digest_reference"])}
     deadline = time.monotonic() + timeout
-    while pending and time.monotonic() < deadline:
+    cache_ready = False
+    while time.monotonic() < deadline:
         for reference in list(pending):
-            if image_is_pinned(reference):
+            if image_is_pinned(reference, cri):
                 pending.remove(reference)
-        if pending:
-            print("Waiting for K3s to import and pin {} image reference(s)...".format(len(pending)), flush=True)
-            time.sleep(5)
-    require(not pending, "K3s did not import and pin all image references before the timeout; chart was not changed.")
+        cache_ready = archive_cache_ready(archives)
+        if not pending and cache_ready:
+            return
+        print("Waiting for K3s import completion: {} image reference(s), archive cache {}...".format(
+            len(pending), "complete" if cache_ready else "pending"), flush=True)
+        time.sleep(5)
+    require(not pending and cache_ready,
+            "K3s did not complete archive retagging/cache and pinned CRI references; chart was not changed.")
 
 
-def stage_images(root, manifest):
+def stage_images(root, manifest, cri):
     directory = IMAGES_ROOT
     require(directory.is_dir() and not directory.is_symlink(), "K3s image import directory is unavailable.")
+    cache = directory / ".cache.json"
+    require(not cache.exists() or (cache.is_file() and not cache.is_symlink()),
+            "K3s image cache is not a regular file; stopped without staging images.")
+    # K3s writes successful preloadFile results only if this optional cache file exists.
+    # touch preserves existing contents. A complete entry proves archive retagging finished.
+    cache.touch(mode=0o600, exist_ok=True)
+    archives = []
     for index, archive in enumerate(sorted({image["archive"] for image in manifest["images"]})):
         source = bundle_path(root, archive)
         destination = directory / ("mingxing-builder-proxy-{}-{}.oci.tar".format(manifest["source_commit"][:12], index))
+        tags = {image["tag"] for image in manifest["images"] if image["archive"] == archive}
+        record = {"path": destination, "tags": tags, "size": source.stat().st_size}
+        archives.append(record)
         if destination.exists():
             require(destination.is_file() and not destination.is_symlink()
                     and file_hash(destination) == file_hash(source),
                     "An existing staged image archive differs; stopped without overwriting it.")
             references = {reference for image in manifest["images"] if image["archive"] == archive
                           for reference in (image["tag"], image["digest_reference"])}
-            if not all(image_is_pinned(reference) for reference in references):
+            if not all(image_is_pinned(reference, cri) for reference in references) or not archive_cache_ready([record]):
                 # K3s owns pinning for archives in agent/images. Refresh only this bundle's
                 # verified archive so its watcher reimports missing/unpinned references.
                 previous = destination.stat()
@@ -414,7 +498,7 @@ def stage_images(root, manifest):
         finally:
             if os.path.exists(temporary):
                 os.unlink(temporary)
-    wait_images(manifest["images"])
+    wait_images(manifest["images"], cri, archives)
 
 
 def wait_controller(kube, expected, timeout=360):
@@ -530,6 +614,8 @@ def main(arguments=None):
         archive = rewritten_chart(bundle_path(root, manifest["chart"]), defaults)
         chart = desired_chart(state, manifest, archive)
         kube.apply(chart, dry_run=True)
+        cri = discover_cri()
+        print("CRI READY: the actual crictl binary can query the local containerd runtime.")
         expected = next(image["digest_reference"] for image in manifest["images"] if image["role"] == "controller")
         print("Plan: {} -> {} on {} ({}).".format(ORIGINAL_IMAGE, expected, state["node"], EXPECTED_NODE_IP))
         print("Proxy: {}; internal cluster addresses bypass it.".format(proxy))
@@ -540,7 +626,7 @@ def main(arguments=None):
         backup = backup_state(state, manifest)
         print("BACKUP: " + str(backup), flush=True)
         print("ROLLBACK COMMAND: python3 {} --rollback {}".format(Path(__file__).resolve(), backup), flush=True)
-        stage_images(root, manifest)
+        stage_images(root, manifest, cri)
         kube.apply(chart)
         wait_controller(kube, expected)
         print("BUILDER PROXY READY: expected maintained image is running. Retry the failed build in Zeabur.")

@@ -15,6 +15,8 @@ from unittest import mock
 SPEC = importlib.util.spec_from_file_location("builder_proxy_install", Path(__file__).with_name("install.py"))
 install = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(install)
+CRI = ["/actual/crictl", "--runtime-endpoint", "unix://" + install.CONTAINERD_SOCKET,
+       "--image-endpoint", "unix://" + install.CONTAINERD_SOCKET]
 
 
 def chart_bytes(extra_name=None):
@@ -278,14 +280,50 @@ class ClusterAndOverrideTests(unittest.TestCase):
 
 class ImagePinTests(unittest.TestCase):
     def test_successful_inspect_requires_an_image_id_and_pinned_status(self):
-        for status in ({"id": "sha256:config", "pinned": False}, {"id": "sha256:config"},
+        for status in ({"id": "sha256:config"},
                        {"pinned": True}, {"id": "", "pinned": True}, {"id": "x", "pinned": "true"}):
             with self.subTest(status=status), mock.patch.object(install, "run", return_value=mock.Mock(
                     returncode=0, stdout=json.dumps({"status": status}))):
-                self.assertFalse(install.image_is_pinned("own:tag"))
+                with self.assertRaises(install.InstallError):
+                    install.image_is_pinned("own:tag", CRI)
+        with mock.patch.object(install, "run", return_value=mock.Mock(
+                returncode=0, stdout='{"status":{"id":"sha256:config","pinned":false}}')):
+            self.assertFalse(install.image_is_pinned("own:tag", CRI))
         with mock.patch.object(install, "run", return_value=mock.Mock(
                 returncode=0, stdout='{"status":{"id":"sha256:config","pinned":true}}')):
-            self.assertTrue(install.image_is_pinned("own:tag"))
+            self.assertTrue(install.image_is_pinned("own:tag", CRI))
+
+    def test_only_explicit_missing_image_errors_are_polled(self):
+        with mock.patch.object(install, "run", return_value=mock.Mock(
+                returncode=1, stdout="", stderr='no such image "own:tag" present')):
+            self.assertFalse(install.image_is_pinned("own:tag", CRI))
+        for error in ("No help topic for crictl", "dial unix socket: no such file or directory",
+                      "rpc error: code = Unavailable desc = connection refused", "unexpected error"):
+            with self.subTest(error=error), mock.patch.object(install, "run", return_value=mock.Mock(
+                    returncode=1, stdout="", stderr=error)):
+                with self.assertRaisesRegex(install.InstallError, "not an image-download timeout"):
+                    install.image_is_pinned("own:tag", CRI)
+
+    def test_real_cri_binary_and_runtime_are_preflighted(self):
+        with mock.patch.object(install.Path, "exists", return_value=True), \
+                mock.patch.object(install.Path, "stat", return_value=mock.Mock(st_mode=install.stat.S_IFSOCK)), \
+                mock.patch.object(install.Path, "is_file", return_value=True), \
+                mock.patch.object(install.os, "access", return_value=True), \
+                mock.patch.object(install.shutil, "which", return_value="/actual/crictl"), \
+                mock.patch.object(install, "run", return_value=mock.Mock(
+                    returncode=0, stdout="RuntimeName: containerd\n", stderr="")) as run:
+            self.assertEqual(install.discover_cri(), CRI)
+            self.assertEqual(run.call_args.args[0], [*CRI, "version"])
+        with mock.patch.object(install.Path, "exists", return_value=True), \
+                mock.patch.object(install.Path, "stat", return_value=mock.Mock(st_mode=install.stat.S_IFSOCK)), \
+                mock.patch.object(install.Path, "is_file", return_value=True), \
+                mock.patch.object(install.os, "access", return_value=True), \
+                mock.patch.object(install.shutil, "which", return_value="/actual/crictl"), \
+                mock.patch.object(install, "run", return_value=mock.Mock(
+                    returncode=1, stdout="", stderr="No help topic for crictl")) as run:
+            with self.assertRaisesRegex(install.InstallError, "No usable crictl"):
+                install.discover_cri()
+            self.assertTrue(all(call.args[0][-1] == "version" for call in run.call_args_list))
 
     def test_wait_images_does_not_accept_unpinned_successful_inspects(self):
         images = [{"tag": "own:tag", "digest_reference": "own@sha256:digest"}]
@@ -298,8 +336,9 @@ class ImagePinTests(unittest.TestCase):
                 "id": "sha256:config", "pinned": attempts[reference] >= 2}}))
 
         with mock.patch.object(install, "run", side_effect=inspect), \
+                mock.patch.object(install, "archive_cache_ready", return_value=True), \
                 mock.patch.object(install.time, "sleep") as sleep, mock.patch("builtins.print"):
-            install.wait_images(images, timeout=10)
+            install.wait_images(images, CRI, [], timeout=10)
         self.assertEqual(attempts, {"own:tag": 2, "own@sha256:digest": 2})
         sleep.assert_called_once_with(5)
 
@@ -322,12 +361,15 @@ class ImagePinTests(unittest.TestCase):
                     mock.patch.object(install, "image_is_pinned", return_value=False) as inspect, \
                     mock.patch.object(install.time, "time_ns", return_value=0), \
                     mock.patch.object(install, "wait_images") as wait:
-                install.stage_images(root, manifest)
+                install.stage_images(root, manifest, CRI)
             self.assertGreaterEqual(destination.stat().st_mtime_ns, 2_000_000_000)
             self.assertEqual(destination.read_bytes(), original)
             self.assertEqual(other.stat().st_mtime, 1)
             self.assertTrue(all(call.args[0] in own_references for call in inspect.call_args_list))
-            wait.assert_called_once_with(manifest["images"])
+            wait.assert_called_once()
+            self.assertEqual(wait.call_args.args[:2], (manifest["images"], CRI))
+            self.assertEqual(wait.call_args.args[2][0]["path"], destination)
+            self.assertTrue((images_root / ".cache.json").is_file())
 
     def test_existing_pinned_archive_is_not_touched(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -338,11 +380,62 @@ class ImagePinTests(unittest.TestCase):
             destination = images_root / ("mingxing-builder-proxy-{}-0.oci.tar".format(manifest["source_commit"][:12]))
             destination.write_bytes((root / "images/components.oci.tar").read_bytes())
             install.os.utime(destination, (1, 1))
+            tags = {image["tag"] for image in manifest["images"]}
+            cache = {str(destination): {"size": destination.stat().st_size,
+                                        "modTime": "1970-01-01T00:00:01Z", "images": sorted(tags)}}
+            (images_root / ".cache.json").write_text(json.dumps(cache))
             with mock.patch.object(install, "IMAGES_ROOT", images_root), \
                     mock.patch.object(install, "image_is_pinned", return_value=True), \
                     mock.patch.object(install, "wait_images"):
-                install.stage_images(root, manifest)
+                install.stage_images(root, manifest, CRI)
             self.assertEqual(destination.stat().st_mtime, 1)
+            self.assertEqual(json.loads((images_root / ".cache.json").read_text()), cache)
+
+    def test_archive_cache_requires_current_full_path_tags_size_and_mtime(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            directory = Path(temporary).resolve()
+            archive = directory / "own.oci.tar"
+            archive.write_bytes(b"own archive")
+            install.os.utime(archive, (1, 1))
+            records = [{"path": archive, "size": archive.stat().st_size, "tags": {"own:tag"}}]
+            entry = {"size": archive.stat().st_size, "images": ["own:tag"], "modTime": "1970-01-01T00:00:01Z"}
+            cache = directory / ".cache.json"
+            with mock.patch.object(install, "IMAGES_ROOT", directory):
+                self.assertFalse(install.archive_cache_ready(records))
+                cache.write_text(json.dumps({str(archive): entry}))
+                self.assertTrue(install.archive_cache_ready(records))
+                cache.write_text(json.dumps({archive.name: entry}))
+                self.assertFalse(install.archive_cache_ready(records))
+                for changed in ({"images": []}, {"size": 0}, {"modTime": "1970-01-01T00:00:00Z"}):
+                    cache.write_text(json.dumps({str(archive): {**entry, **changed}}))
+                    self.assertFalse(install.archive_cache_ready(records))
+
+    def test_pinned_images_without_complete_archive_cache_cannot_pass(self):
+        images = [{"tag": "own:tag", "digest_reference": "own@sha256:digest"}]
+        with mock.patch.object(install, "image_is_pinned", return_value=True) as inspect, \
+                mock.patch.object(install, "archive_cache_ready", return_value=False), \
+                mock.patch.object(install.time, "monotonic", side_effect=[0, 0, 2]), \
+                mock.patch.object(install.time, "sleep"), mock.patch("builtins.print"):
+            with self.assertRaisesRegex(install.InstallError, "archive retagging/cache"):
+                install.wait_images(images, CRI, [], timeout=1)
+        self.assertEqual(inspect.call_count, 2)
+
+    def test_pinned_archive_with_missing_cache_is_refreshed_for_complete_reimport(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary).resolve()
+            manifest = make_bundle(root)
+            images_root = root / "k3s-images"
+            images_root.mkdir()
+            destination = images_root / ("mingxing-builder-proxy-{}-0.oci.tar".format(manifest["source_commit"][:12]))
+            destination.write_bytes((root / "images/components.oci.tar").read_bytes())
+            install.os.utime(destination, (1, 1))
+            with mock.patch.object(install, "IMAGES_ROOT", images_root), \
+                    mock.patch.object(install, "image_is_pinned", return_value=True), \
+                    mock.patch.object(install.time, "time_ns", return_value=0), \
+                    mock.patch.object(install, "wait_images"):
+                install.stage_images(root, manifest, CRI)
+            self.assertGreaterEqual(destination.stat().st_mtime_ns, 2_000_000_000)
+            self.assertTrue((images_root / ".cache.json").is_file())
 
 
 if __name__ == "__main__":
