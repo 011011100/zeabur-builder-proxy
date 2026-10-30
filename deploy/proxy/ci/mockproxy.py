@@ -21,6 +21,14 @@ def direct_opener():
     return urllib.request.build_opener(urllib.request.ProxyHandler({}))
 
 
+def git_http_backend():
+    directory = subprocess.check_output(["git", "--exec-path"], text=True).strip()
+    backend = Path(directory) / "git-http-backend"
+    if not backend.is_file() or not os.access(backend, os.X_OK):
+        raise SystemExit("CI fixture requires an executable git-http-backend; install Alpine git-daemon")
+    return str(backend)
+
+
 def inspect_image(reference):
     authority, repository = reference.split("/", 1)
     repository, digest = repository.rsplit("@", 1)
@@ -196,8 +204,9 @@ def main():
             raise SystemExit("synthetic target unexpectedly resolves without the proxy")
         print("DIRECT_TARGETS_UNRESOLVABLE", flush=True)
         return
+    # Validate dependencies before listening: /health must not report ready for a broken fixture.
+    Proxy.git_backend = git_http_backend()
     Proxy.git_root = repositories()
-    Proxy.git_backend = subprocess.check_output(["git", "--exec-path"], text=True).strip() + "/git-http-backend"
     http.server.ThreadingHTTPServer(("0.0.0.0", 3128), Proxy).serve_forever()
 
 

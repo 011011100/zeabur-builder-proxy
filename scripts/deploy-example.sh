@@ -69,6 +69,11 @@ k -n builder-system rollout restart deployment/zeabur-builder
 k -n builder-system rollout status deployment/zeabur-builder --timeout 120s
 k -n builder-registry rollout status deployment/registry --timeout 120s
 
+if [[ "${SKIP_SAMPLE_BUILDS:-}" == 1 ]]; then
+  echo "Test registry and Builder are ready; sample Builds were not applied."
+  exit 0
+fi
+
 start=$(date +%s)
 deadline=$((start + timeout))
 k apply -f "$manifests/builds.yaml" >/dev/null

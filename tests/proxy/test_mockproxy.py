@@ -123,5 +123,30 @@ class RegistryInspectionTests(unittest.TestCase):
             MOCK.inspect_image("registry.test:5000/team/app@" + RegistryOpener.digest)
 
 
+class BackendStartupTests(unittest.TestCase):
+    def test_backend_must_exist_and_be_executable(self):
+        with tempfile.TemporaryDirectory() as directory:
+            backend = Path(directory) / "git-http-backend"
+            with mock.patch.object(MOCK.subprocess, "check_output", return_value=directory + "\n"):
+                with self.assertRaisesRegex(SystemExit, "executable git-http-backend"):
+                    MOCK.git_http_backend()
+                backend.write_text("#!/bin/sh\nexit 0\n")
+                backend.chmod(0o600)
+                with self.assertRaisesRegex(SystemExit, "executable git-http-backend"):
+                    MOCK.git_http_backend()
+                backend.chmod(0o700)
+                self.assertEqual(MOCK.git_http_backend(), str(backend))
+
+    def test_missing_backend_stops_before_readiness_listener_is_created(self):
+        with mock.patch.object(MOCK.sys, "argv", ["mockproxy.py"]), \
+                mock.patch.object(MOCK, "git_http_backend", side_effect=SystemExit("missing backend")), \
+                mock.patch.object(MOCK, "repositories") as repositories, \
+                mock.patch.object(MOCK.http.server, "ThreadingHTTPServer") as server:
+            with self.assertRaisesRegex(SystemExit, "missing backend"):
+                MOCK.main()
+            repositories.assert_not_called()
+            server.assert_not_called()
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -175,7 +175,13 @@ case "$job" in
     [[ -n "${ZEABUR_CI_IMAGE_TAG:-}" ]] || ./scripts/build-images.sh zeabur-builder ci
     start_collecting
     if ! {
-      TAG="$tag" K3D_CLUSTER=zeabur-builder ./scripts/deploy-example.sh k3d-zeabur-builder \
+      if [[ "${ZEABUR_PROXY_SMOKE_ONLY:-false}" == true ]]; then
+        TAG="$tag" K3D_CLUSTER=zeabur-builder SKIP_SAMPLE_BUILDS=1 \
+          ./scripts/deploy-example.sh k3d-zeabur-builder &&
+          python3 ./scripts/check-proxy-yaml.py &&
+          TAG="$tag" bash ./scripts/example-proxy.sh k3d-zeabur-builder
+      else
+        TAG="$tag" K3D_CLUSTER=zeabur-builder ./scripts/deploy-example.sh k3d-zeabur-builder \
         team-a/whoami team-a/hello-python team-b/whoami &&
         kubectl -n team-a wait build/no-such-ref --timeout 120s \
           --for 'jsonpath={.status.conditions[?(@.type=="SourceReady")].reason}=RefNotFound' &&
@@ -188,6 +194,7 @@ case "$job" in
             python3 ./scripts/check-proxy-yaml.py &&
             TAG="$tag" bash ./scripts/example-proxy.sh k3d-zeabur-builder
           fi; }
+      fi
     }; then
       cluster_failure_context
       exit 1

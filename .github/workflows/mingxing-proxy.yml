@@ -4,6 +4,11 @@ on:
   push:
     branches: [mingxing-proxy]
   workflow_dispatch:
+    inputs:
+      proxy_only:
+        description: 'Rerun proxy fixtures only when production code matches the verified baseline'
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -47,6 +52,7 @@ jobs:
       CARGO_BUILD_JOBS: 2
       RUSTFLAGS: -Zthreads=2
       NEXTEST_TEST_THREADS: 2
+      ZEABUR_PROXY_SMOKE_ONLY: ${{ inputs.proxy_only && 'true' || 'false' }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
