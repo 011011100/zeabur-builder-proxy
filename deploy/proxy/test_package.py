@@ -80,13 +80,17 @@ class ThreeImagePackageTests(unittest.TestCase):
         manifest = install.verify_bundle(self.bundle())
         self.assertEqual({image["role"] for image in manifest["images"]}, {"controller", "job", "planner"})
         self.assertEqual(len(manifest["images"]), 3)
-        references = {reference for image in manifest["images"]
-                      for reference in (image["tag"], image["digest_reference"])}
+        tags = {image["tag"] for image in manifest["images"]}
         with tarfile.open(self.bundle() / "images/components-amd64.oci.tar") as archive:
             index = json.load(archive.extractfile("index.json"))
             self.assertEqual({item["annotations"]["org.opencontainers.image.ref.name"]
-                              for item in index["manifests"]}, references)
-            self.assertEqual(len(index["manifests"]), 6)
+                              for item in index["manifests"]}, tags)
+            self.assertEqual(len(index["manifests"]), 3)
+            descriptors = {item["annotations"]["org.opencontainers.image.ref.name"]: item
+                           for item in index["manifests"]}
+            for image in manifest["images"]:
+                self.assertEqual(image["digest_reference"], image["tag"].rsplit(":", 1)[0]
+                                 + "@" + descriptors[image["tag"]]["digest"])
         defaults = install.desired_defaults(self.bundle(), manifest, "http://100.66.31.168:3128", install.NO_PROXY)
         for role, key in install.IMAGE_SETTINGS.items():
             record = next(image for image in manifest["images"] if image["role"] == role)

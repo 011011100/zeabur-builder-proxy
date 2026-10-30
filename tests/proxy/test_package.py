@@ -78,14 +78,14 @@ class PackageTests(unittest.TestCase):
     def merge(self):
         return PACKAGE.merge_image(self.source, self.merged, REF)
 
-    def test_tags_and_digest_refs_name_the_same_checked_manifest(self):
+    def test_tag_import_and_desired_digest_name_the_same_checked_manifest(self):
         entries, record = self.merge()
         expected_digest = self.descriptor["digest"]
         self.assertEqual(record["tag"], REF)
         self.assertEqual(record["digest_reference"], REF.rsplit(":", 1)[0] + "@" + expected_digest)
-        self.assertEqual([entry["digest"] for entry in entries], [expected_digest, expected_digest])
+        self.assertEqual([entry["digest"] for entry in entries], [expected_digest])
         self.assertEqual([entry["annotations"]["org.opencontainers.image.ref.name"] for entry in entries],
-                         [record["tag"], record["digest_reference"]])
+                         [record["tag"]])
         for path in (self.merged / "blobs/sha256").iterdir():
             self.assertEqual(hashlib.sha256(path.read_bytes()).hexdigest(), path.name)
 
@@ -180,15 +180,15 @@ class PackageTests(unittest.TestCase):
         self.assertEqual(len(manifest["images"]), 3)
         with tarfile.open(fileobj=io.BytesIO(contents["images/components-amd64.oci.tar"]), mode="r:") as archive:
             index = json.load(archive.extractfile("index.json"))
-            self.assertEqual(len(index["manifests"]), 6)
+            self.assertEqual(len(index["manifests"]), 3)
             refs = {entry["annotations"]["org.opencontainers.image.ref.name"]: entry["digest"]
                     for entry in index["manifests"]}
             for record in manifest["images"]:
                 self.assertIn(record["tag"], refs)
-                self.assertIn(record["digest_reference"], refs)
-                self.assertEqual(refs[record["tag"]], refs[record["digest_reference"]])
-                for ref in (record["tag"], record["digest_reference"]):
-                    self.assertIn("blobs/" + refs[ref].replace(":", "/"), archive.getnames())
+                self.assertNotIn(record["digest_reference"], refs)
+                self.assertEqual(record["digest_reference"], record["tag"].rsplit(":", 1)[0]
+                                 + "@" + refs[record["tag"]])
+                self.assertIn("blobs/" + refs[record["tag"]].replace(":", "/"), archive.getnames())
 
 
 if __name__ == "__main__":

@@ -86,12 +86,12 @@ def merge_image(source, destination, ref):
             shutil.copyfile(blob, target)
     repository = ref.rsplit(":", 1)[0]
     digest_reference = repository + "@" + digest
-    imported = []
-    for name in (ref, digest_reference):
-        entry = dict(descriptor)
-        entry["annotations"] = {"org.opencontainers.image.ref.name": name}
-        imported.append(entry)
-    return imported, {"tag": ref, "digest_reference": digest_reference,
+    # K3s's archive retagging requires NamedTagged references. A canonical repo@sha256
+    # annotation is not a tag and makes the whole watcher import fail. Import one fully
+    # qualified tag; keep the workload digest in bundle.json and require its CRI verification.
+    entry = dict(descriptor)
+    entry["annotations"] = {"org.opencontainers.image.ref.name": ref}
+    return [entry], {"tag": ref, "digest_reference": digest_reference,
                       "archive": "images/components-amd64.oci.tar"}
 
 
