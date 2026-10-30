@@ -16,6 +16,7 @@ import time
 DIRECTORY = "/var/lib/rancher/k3s/agent/images"
 PIN = "io.cri-containerd.pinned"
 OWNER = "io.cattle.k3s.pinned"
+SOCKET = "/run/k3s/containerd/containerd.sock"
 
 
 def run(arguments, *, check=True, timeout=20):
@@ -49,10 +50,25 @@ def archive_plan(root, manifest):
     return result
 
 
+def command_error(result):
+    """An unavailable CLI or runtime is never evidence that an image is missing."""
+    message = ((result.stderr or "") + "\n" + (result.stdout or "")).lower()
+    if (result.returncode in (126, 127)
+            or any(value in message for value in ("no help topic", "unknown command", "unknown flag",
+                                                   "flag provided but not defined", "executable file not found"))):
+        return "cli-error"
+    if any(value in message for value in ("dial unix", "connection refused", "transport is closing",
+                                          "failed to connect", "context deadline exceeded", "unavailable")):
+        return "runtime-error"
+    if "no such image" in message or re.search(r"\bimage\b[^\n]*(?:not found|notfound)", message):
+        return "missing"
+    return "inspect-error"
+
+
 def cri_status(result):
     """Retain identity and pinning only, never verbose image configuration or environment."""
     if result.returncode:
-        return {"state": "missing", "inspect_exit": result.returncode}
+        return {"state": command_error(result), "inspect_exit": result.returncode}
     try:
         status = json.loads(result.stdout)["status"]
         if not isinstance(status, dict):
@@ -78,7 +94,7 @@ def image_metadata(output, references):
 
 
 class Verifier:
-    def __init__(self, root, manifest, node, *, timeout=180, runner=run):
+    def __init__(self, root, manifest, node, *, timeout=180, runner=run, socket=SOCKET):
         self.node = node
         self.timeout = timeout
         self.run = runner
@@ -88,9 +104,47 @@ class Verifier:
         self.artifacts.mkdir(parents=True, exist_ok=True)
         self.started = datetime.now(timezone.utc).isoformat()
         self.last_records = {}
+        self.socket = socket
+        self.ctr_cli = None
+        self.cri_cli = None
+        self.cli_info = {}
 
     def execute(self, *arguments, check=True, timeout=20):
         return self.run(["docker", "exec", self.node, *arguments], check=check, timeout=timeout)
+
+    def discover_tools(self):
+        """Use actual binaries, since some K3s images do not expose `k3s ctr/crictl`."""
+        for tool in ("ctr", "crictl"):
+            located = self.execute("sh", "-c", 'command -v "$1"', "sh", tool, check=False)
+            candidates = [located.stdout.strip()] if not located.returncode else []
+            candidates.extend(("/bin/" + tool, "/usr/bin/" + tool, "/bin/aux/" + tool,
+                               "/var/lib/rancher/k3s/data/current/bin/" + tool))
+            attempts = []
+            for path in dict.fromkeys(candidates):
+                if not path.startswith("/") or "\n" in path:
+                    continue
+                exists = self.execute("test", "-x", path, check=False)
+                if exists.returncode:
+                    continue
+                if tool == "ctr":
+                    prefix = [path, "--address", self.socket]
+                else:
+                    endpoint = "unix://" + self.socket
+                    prefix = [path, "--runtime-endpoint", endpoint, "--image-endpoint", endpoint]
+                version = self.execute(*prefix, "version", check=False)
+                if version.returncode:
+                    attempts.append({"path": path, "exit": version.returncode,
+                                     "state": command_error(version)})
+                    continue
+                self.cli_info[tool] = {"command": prefix, "version": version.stdout.strip()}
+                if tool == "ctr":
+                    self.ctr_cli = prefix
+                else:
+                    self.cri_cli = prefix
+                break
+            else:
+                self.cli_info[tool] = {"state": "unavailable", "attempts": attempts}
+                raise RuntimeError(f"Cannot initialize actual {tool} binary against {self.socket}: {attempts}")
 
     def stage(self):
         self.execute("mkdir", "-p", DIRECTORY)
@@ -103,15 +157,22 @@ class Verifier:
             self.execute("mv", "--", destination + ".partial", destination)
 
     def snapshot(self):
-        listed = self.execute("k3s", "ctr", "-n", "k8s.io", "images", "list", check=False)
-        metadata = image_metadata(listed.stdout, self.references) if not listed.returncode else {}
+        if not self.ctr_cli or not self.cri_cli:
+            raise RuntimeError("Containerd and CRI tools must pass discovery before inspection")
+        listed = self.execute(*self.ctr_cli, "-n", "k8s.io", "images", "list", check=False)
+        if listed.returncode:
+            self.cli_info["metadata_query"] = {"state": command_error(listed), "exit": listed.returncode}
+            raise RuntimeError("Containerd metadata query failed: " + command_error(listed))
+        metadata = image_metadata(listed.stdout, self.references)
         records = {}
         for reference in sorted(self.references):
-            inspected = self.execute("k3s", "crictl", "inspecti", reference, check=False, timeout=10)
+            inspected = self.execute(*self.cri_cli, "inspecti", "--quiet", reference, check=False, timeout=10)
             record = cri_status(inspected)
             record["containerd"] = metadata.get(reference)
             records[reference] = record
             self.last_records = records
+            if record["state"] in ("cli-error", "runtime-error", "inspect-error", "invalid-cri-response"):
+                raise RuntimeError(f"CRI inspection failed ({record['state']}): {reference}")
         return records
 
     @staticmethod
@@ -121,7 +182,7 @@ class Verifier:
                 and labels.get(PIN) == "pinned" and labels.get(OWNER) == "pinned")
 
     def evidence(self, phase, records):
-        result = {"phase": phase, "references": records}
+        result = {"phase": phase, "references": records, "cli": self.cli_info}
         report = self.artifacts / (phase + ".json")
         report.write_text(json.dumps(result, indent=2) + "\n")
         result["staged_archives"] = {}
@@ -161,9 +222,11 @@ class Verifier:
             time.sleep(2)
 
     def remove_own_aliases(self):
+        if not self.ctr_cli:
+            raise RuntimeError("Containerd CLI must pass discovery before recovery")
         for reference in sorted(self.references):
-            self.execute("k3s", "ctr", "-n", "k8s.io", "images", "rm", reference)
-        listed = self.execute("k3s", "ctr", "-n", "k8s.io", "images", "list", "--quiet")
+            self.execute(*self.ctr_cli, "-n", "k8s.io", "images", "rm", reference)
+        listed = self.execute(*self.ctr_cli, "-n", "k8s.io", "images", "list", "--quiet")
         if self.references.intersection(listed.stdout.splitlines()):
             raise RuntimeError("Bundle aliases remain before recovery test")
 
@@ -182,11 +245,13 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("bundle", type=Path)
     parser.add_argument("--node", default="k3d-zeabur-builder-server-0")
+    parser.add_argument("--socket", default=SOCKET)
     args = parser.parse_args()
     root = args.bundle.resolve()
     manifest = json.loads((root / "bundle.json").read_text())
-    verifier = Verifier(root, manifest, args.node)
+    verifier = Verifier(root, manifest, args.node, socket=args.socket)
     try:
+        verifier.discover_tools()
         verifier.stage()
         verifier.wait_pinned("imported")
         verifier.remove_own_aliases()

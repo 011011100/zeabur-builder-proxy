@@ -13,8 +13,8 @@ CHECK = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(CHECK)
 
 
-def completed(stdout="", code=0):
-    return subprocess.CompletedProcess([], code, stdout, "")
+def completed(stdout="", code=0, stderr=""):
+    return subprocess.CompletedProcess([], code, stdout, stderr)
 
 
 def fixture(root, archives=("images/shared.tar", "images/planner.tar")):
@@ -46,7 +46,11 @@ class ImportTests(unittest.TestCase):
         return completed()
 
     def verifier(self, **kwargs):
-        return CHECK.Verifier(self.root, self.manifest, "node", runner=self.runner, **kwargs)
+        verifier = CHECK.Verifier(self.root, self.manifest, "node", runner=self.runner, **kwargs)
+        verifier.ctr_cli = ["/bin/ctr", "--address", CHECK.SOCKET]
+        verifier.cri_cli = ["/bin/crictl", "--runtime-endpoint", "unix://" + CHECK.SOCKET,
+                            "--image-endpoint", "unix://" + CHECK.SOCKET]
+        return verifier
 
     def test_all_roles_and_both_references_are_grouped(self):
         plan = CHECK.archive_plan(self.root, self.manifest)
@@ -77,7 +81,8 @@ class ImportTests(unittest.TestCase):
             CHECK.archive_plan(self.root, self.manifest)
 
     def test_cri_requires_a_real_id_and_boolean_pinned(self):
-        self.assertEqual(CHECK.cri_status(completed(code=1))["state"], "missing")
+        self.assertEqual(CHECK.cri_status(completed(code=1))["state"], "inspect-error")
+        self.assertEqual(CHECK.cri_status(completed(code=1, stderr='no such image "own:tag" present'))["state"], "missing")
         self.assertEqual(CHECK.cri_status(completed("bad json"))["state"], "invalid-cri-response")
         for status in ({}, {"pinned": True}, {"id": "", "pinned": True}):
             self.assertEqual(CHECK.cri_status(completed(json.dumps({"status": status})))["state"],
@@ -90,6 +95,42 @@ class ImportTests(unittest.TestCase):
                                                        "info": {"env": ["PRIVATE=do-not-save"]}})))
         self.assertEqual(result["state"], "pinned")
         self.assertNotIn("PRIVATE", json.dumps(result))
+
+    def test_cli_and_runtime_errors_never_masquerade_as_missing_images(self):
+        for text in ("No help topic for 'crictl'", "unknown flag --image-endpoint"):
+            self.assertEqual(CHECK.cri_status(completed(code=1, stderr=text))["state"], "cli-error")
+        for text in ("dial unix /run/k3s/containerd/containerd.sock: no such file or directory",
+                     "rpc error: code = Unavailable desc = connection refused"):
+            self.assertEqual(CHECK.cri_status(completed(code=1, stderr=text))["state"], "runtime-error")
+
+    def test_discovers_real_binaries_with_explicit_socket_not_k3s_subcommands(self):
+        verifier = self.verifier()
+        def runner(args, **_kwargs):
+            self.commands.append(args)
+            if 'command -v "$1"' in args:
+                return completed("/actual/bin/" + args[-1] + "\n")
+            return completed("Client Version: test\nRuntimeName: containerd\n")
+        verifier.run = runner
+        verifier.discover_tools()
+        self.assertEqual(verifier.ctr_cli, ["/actual/bin/ctr", "--address", CHECK.SOCKET])
+        self.assertEqual(verifier.cri_cli[0], "/actual/bin/crictl")
+        self.assertIn("unix://" + CHECK.SOCKET, verifier.cri_cli)
+        self.assertFalse(any("k3s" in args for args in self.commands))
+
+    def test_unusable_cli_fails_preflight_instead_of_polling_images(self):
+        verifier = self.verifier()
+        def runner(args, **_kwargs):
+            self.commands.append(args)
+            if 'command -v "$1"' in args:
+                return completed("/bin/" + args[-1] + "\n")
+            if args[-1] == "version":
+                return completed(code=1, stderr="No help topic for 'ctr'")
+            return completed()
+        verifier.run = runner
+        with self.assertRaisesRegex(RuntimeError, "Cannot initialize actual ctr"):
+            verifier.discover_tools()
+        self.assertTrue(all(item["state"] == "cli-error" for item in verifier.cli_info["ctr"]["attempts"]))
+        self.assertFalse(any("inspecti" in args or "cp" in args for args in self.commands))
 
     def test_metadata_tracks_exact_own_aliases_and_labels(self):
         own = "ghcr.io/example/builder:test"
