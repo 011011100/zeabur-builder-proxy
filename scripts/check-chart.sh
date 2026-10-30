@@ -66,6 +66,23 @@ require "$proxied" "outbound proxy" 'cidr: 100\.66\.31\.168/32$' \
   "build Job proxy variables must match the chart's configured proxy" \
   "buildkitd proxy variables must match the chart's configured proxy" \
   'e\.name in variables\.proxyValues && has\(e\.value\) && !has\(e\.valueFrom\)'
+mandatory_no_proxy='localhost,127.0.0.1,::1,.svc,.svc.cluster.local,10.43.0.1,10.42.0.0/16,10.43.0.0/16,172.16.0.0/12'
+if ! grep -qF "value: \"$mandatory_no_proxy\"" <<<"$proxied"; then
+  echo "proxy bypass: a complete list changed its order or contents" >&2
+  exit 1
+fi
+extra_bypass=$(helm template builder "$chart" "${base[@]}" --set proxy.url=http://100.66.31.168:3128 \
+  --set-string proxy.noProxy=example.com)
+if ! grep -qF "value: \"example.com,$mandatory_no_proxy\"" <<<"$extra_bypass"; then
+  echo "proxy bypass: internal destinations were not appended to the provided list" >&2
+  exit 1
+fi
+deduplicated_bypass=$(helm template builder "$chart" "${base[@]}" --set proxy.url=http://100.66.31.168:3128 \
+  --set-json 'proxy.noProxy="example.com,example.com,localhost"')
+if ! grep -qF "value: \"example.com,$mandatory_no_proxy\"" <<<"$deduplicated_bypass"; then
+  echo "proxy bypass: provided order or deduplication differs from the controller" >&2
+  exit 1
+fi
 for invalid in https://100.66.31.168:3128 http://user:do-not-print@100.66.31.168:3128 \
   http://256.66.31.168:3128 http://100.066.31.168:3128 http://100.66.31.168:0 \
   http://100.66.31.168:65536 http://proxy.example:3128 http://100.66.31.168:3128/path; do

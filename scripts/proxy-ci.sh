@@ -19,16 +19,21 @@ RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --document-private-it
 nixfmt --check flake.nix
 ./scripts/check-levels.sh
 ./scripts/check-chart.sh
-shellcheck scripts/proxy-ci.sh
-actionlint .github/workflows/mingxing-proxy.yml
+shellcheck scripts/*.sh
+actionlint
 python3 -m unittest discover -s deploy/proxy -p 'test_*.py'
+python3 -m unittest discover -s tests/proxy -p 'test_*.py'
 
 version=$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[] | select(.name == "zeabur-builder") | .version')
 tag="$version-${GITHUB_SHA:0:12}"
 ./scripts/build-images.sh zeabur-builder "$tag"
 # Existing upstream end-to-end checks run in a disposable k3d cluster and cover unchanged
 # Dockerfile/Railpack builds, admission restrictions, cross-namespace isolation and archives.
-ZEABUR_CI_IMAGE_TAG="$tag" CI_ARTIFACTS="$root/target/proxy-artifacts/cluster" ./scripts/ci.sh kubernetes
+export KUBECONFIG="$root/target/ci/kubeconfig"
+trap 'k3d cluster delete zeabur-builder >/dev/null 2>&1 || true' EXIT
+ZEABUR_CI_SHELL=1 ZEABUR_CI_KEEP=1 ZEABUR_CI_PROXY_TESTS=1 ZEABUR_CI_IMAGE_TAG="$tag" \
+  CI_ARTIFACTS="$root/target/proxy-artifacts/cluster" ./scripts/ci.sh kubernetes
+cp -R target/ci/proxy-smoke target/proxy-artifacts/cluster/proxy-smoke
 
 prefix="ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/zeabur-builder-proxy"
 mkdir -p target/proxy-oci products
@@ -47,3 +52,4 @@ python3 scripts/package-proxy.py \
   --defaults products/default-values.json \
   --version "$version" --commit "$GITHUB_SHA" \
   --output target/proxy-artifacts
+python3 scripts/check-proxy-import.py "target/proxy-artifacts/zeabur-builder-proxy-$version-linux-amd64"

@@ -34,7 +34,9 @@ app.kubernetes.io/instance: {{ .Release.Name }}
 {{- if regexMatch "[[:space:]]" $proxy.noProxy -}}
 {{- fail "proxy.noProxy must not contain whitespace" -}}
 {{- end -}}
-{{- dict "url" $url "ip" $ip "port" $port "noProxy" $proxy.noProxy | toJson -}}
+{{- $mandatory := list "localhost" "127.0.0.1" "::1" ".svc" ".svc.cluster.local" "10.43.0.1" "10.42.0.0/16" "10.43.0.0/16" "172.16.0.0/12" -}}
+{{- $noProxy := concat (splitList "," $proxy.noProxy) $mandatory | compact | uniq | join "," -}}
+{{- dict "url" $url "ip" $ip "port" $port "noProxy" $noProxy | toJson -}}
 {{- else -}}
 {}
 {{- end -}}

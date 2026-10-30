@@ -183,7 +183,11 @@ case "$job" in
           --for 'jsonpath={.status.phase}=Failed' &&
         TAG="$tag" ./scripts/example-isolation.sh k3d-zeabur-builder &&
         TAG="$tag" ./scripts/example-admission.sh k3d-zeabur-builder &&
-        ./scripts/example-archive.sh k3d-zeabur-builder
+        ./scripts/example-archive.sh k3d-zeabur-builder &&
+        { if [[ "${ZEABUR_CI_PROXY_TESTS:-}" == 1 ]]; then
+            python3 ./scripts/check-proxy-yaml.py &&
+            TAG="$tag" bash ./scripts/example-proxy.sh k3d-zeabur-builder
+          fi; }
     }; then
       cluster_failure_context
       exit 1

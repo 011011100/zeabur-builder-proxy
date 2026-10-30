@@ -4,6 +4,7 @@ import argparse
 import hashlib
 import json
 from pathlib import Path
+import re
 import shutil
 import tarfile
 
@@ -21,20 +22,58 @@ def write_json(path, value):
     path.write_text(json.dumps(value, indent=2) + "\n")
 
 
+def checked_blob(source, descriptor, media_types):
+    """Validate an OCI reference before deriving a filesystem path from it."""
+    if not isinstance(descriptor, dict) or descriptor.get("mediaType") not in media_types:
+        raise ValueError("Unexpected OCI descriptor media type")
+    digest = descriptor.get("digest", "")
+    if not isinstance(digest, str) or not re.fullmatch(r"sha256:[0-9a-f]{64}", digest):
+        raise ValueError("OCI descriptors must use canonical SHA256 digests")
+    size = descriptor.get("size")
+    if type(size) is not int or size < 0:
+        raise ValueError("Invalid OCI descriptor size")
+    path = source / "blobs/sha256" / digest.split(":")[1]
+    if not path.is_file() or path.is_symlink():
+        raise ValueError("A referenced OCI blob is missing or unsafe")
+    if path.stat().st_size != size or sha256(path) != digest.split(":")[1]:
+        raise ValueError("OCI descriptor content or size does not match")
+    return path
+
+
 def merge_image(source, destination, ref):
+    if source.is_symlink() or (source / "blobs").is_symlink() or (source / "blobs/sha256").is_symlink():
+        raise ValueError("OCI source paths must not be symbolic links")
+    if json.loads((source / "oci-layout").read_text()).get("imageLayoutVersion") != "1.0.0":
+        raise ValueError("Unsupported OCI layout version")
     index = json.loads((source / "index.json").read_text())
+    if index.get("schemaVersion") != 2:
+        raise ValueError("Unsupported OCI index schema")
     entries = index.get("manifests", [])
     if len(entries) != 1:
         raise ValueError("Expected one amd64 image manifest per source layout")
     descriptor = entries[0]
+    manifest_file = checked_blob(source, descriptor, {
+        "application/vnd.oci.image.manifest.v1+json",
+        "application/vnd.docker.distribution.manifest.v2+json",
+    })
     digest = descriptor["digest"]
-    if not digest.startswith("sha256:") or len(digest) != 71:
-        raise ValueError("Expected a SHA256 image manifest")
-    manifest_file = source / "blobs/sha256" / digest.split(":")[1]
-    if sha256(manifest_file) != digest.split(":")[1]:
-        raise ValueError("Image manifest checksum mismatch")
     manifest = json.loads(manifest_file.read_text())
-    config_file = source / "blobs" / manifest["config"]["digest"].replace(":", "/")
+    if manifest.get("schemaVersion") != 2:
+        raise ValueError("Unsupported OCI manifest schema")
+    config_file = checked_blob(source, manifest.get("config"), {
+        "application/vnd.oci.image.config.v1+json",
+        "application/vnd.docker.container.image.v1+json",
+    })
+    layers = manifest.get("layers")
+    if not isinstance(layers, list):
+        raise ValueError("OCI manifest layers must be a list")
+    for layer in layers:
+        checked_blob(source, layer, {
+            "application/vnd.oci.image.layer.v1.tar",
+            "application/vnd.oci.image.layer.v1.tar+gzip",
+            "application/vnd.oci.image.layer.v1.tar+zstd",
+            "application/vnd.docker.image.rootfs.diff.tar.gzip",
+        })
     config = json.loads(config_file.read_text())
     if config.get("architecture") != "amd64" or config.get("os") != "linux":
         raise ValueError("Only Linux amd64 images may enter this installation bundle")

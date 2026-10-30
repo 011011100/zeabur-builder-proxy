@@ -106,54 +106,60 @@ mod tests {
     }
 
     #[test]
-    fn railpack_plan_keeps_proxy_values_out_of_deploy_environment() {
+    fn railpack_plan_keeps_proxy_values_out_of_deploy_environment() -> Result<(), String> {
         let mut plan = serde_json::json!({
             "secrets": ["NPM_TOKEN", "HTTPS_PROXY"],
             "steps": [{"name": "build", "variables": {"NODE_ENV": "production"}}],
             "deploy": {"variables": {"NODE_ENV": "production"}}
         });
-        let original_deploy = plan["deploy"].clone();
-        let original_steps = plan["steps"].clone();
-        railpack_secrets(&mut plan, &vars()).unwrap();
-        railpack_secrets(&mut plan, &vars()).unwrap();
-        assert_eq!(plan["secrets"], serde_json::json!(["NPM_TOKEN", "HTTPS_PROXY", "NO_PROXY"]));
-        assert_eq!(plan["deploy"], original_deploy);
-        assert_eq!(plan["steps"], original_steps);
+        let original_deploy = plan.get("deploy").cloned();
+        let original_steps = plan.get("steps").cloned();
+        railpack_secrets(&mut plan, &vars())?;
+        railpack_secrets(&mut plan, &vars())?;
+        assert_eq!(plan.get("secrets"), Some(&serde_json::json!(["NPM_TOKEN", "HTTPS_PROXY", "NO_PROXY"])));
+        assert_eq!(plan.get("deploy"), original_deploy.as_ref());
+        assert_eq!(plan.get("steps"), original_steps.as_ref());
         assert!(!plan.to_string().contains("100.66.31.168"));
         assert!(railpack_secrets(&mut serde_json::json!({"secrets": {}}), &vars()).is_err());
+        Ok(())
     }
 
     #[test]
-    fn dockerfile_receives_predefined_proxy_arguments_without_environment_instructions() {
+    fn dockerfile_receives_predefined_proxy_arguments_without_environment_instructions() -> Result<(), String> {
         let mut commands = vec![strings(&["buildctl", "build", "--frontend", "dockerfile.v0"])];
         configure_commands(&mut commands, &vars(), false);
-        assert!(commands[0].contains(&"build-arg:HTTPS_PROXY=http://100.66.31.168:3128".to_owned()));
-        assert!(commands[0].contains(&"build-arg:NO_PROXY=.svc,.svc.cluster.local,10.43.0.0/16".to_owned()));
-        assert!(!commands[0].contains(&"--secret".to_owned()));
+        let command = commands.first().ok_or("missing build command")?;
+        assert!(command.contains(&"build-arg:HTTPS_PROXY=http://100.66.31.168:3128".to_owned()));
+        assert!(command.contains(&"build-arg:NO_PROXY=.svc,.svc.cluster.local,10.43.0.0/16".to_owned()));
+        assert!(!command.contains(&"--secret".to_owned()));
+        Ok(())
     }
 
     #[test]
-    fn railpack_receives_only_secret_names_and_replaces_colliding_sources() {
+    fn railpack_receives_only_secret_names_and_replaces_colliding_sources() -> Result<(), String> {
         let mut commands = vec![strings(&[
             "buildctl", "build", "--frontend", "gateway.v0", "--secret",
             "id=HTTPS_PROXY,env=ZB_SECRET_HTTPS_PROXY",
         ])];
         configure_commands(&mut commands, &vars(), true);
-        assert_eq!(commands[0].iter().filter(|arg| arg.starts_with("id=HTTPS_PROXY,")).count(), 1);
-        assert!(commands[0].contains(&"id=HTTPS_PROXY,env=HTTPS_PROXY".to_owned()));
-        assert!(commands[0].contains(&"id=NO_PROXY,env=NO_PROXY".to_owned()));
-        assert!(!commands[0].iter().any(|arg| arg.contains("100.66.31.168")));
+        let command = commands.first().ok_or("missing build command")?;
+        assert_eq!(command.iter().filter(|arg| arg.starts_with("id=HTTPS_PROXY,")).count(), 1);
+        assert!(command.contains(&"id=HTTPS_PROXY,env=HTTPS_PROXY".to_owned()));
+        assert!(command.contains(&"id=NO_PROXY,env=NO_PROXY".to_owned()));
+        assert!(!command.iter().any(|arg| arg.contains("100.66.31.168")));
+        Ok(())
     }
 
     #[test]
-    fn disabled_proxy_preserves_commands_and_plan() {
+    fn disabled_proxy_preserves_commands_and_plan() -> Result<(), String> {
         let mut command = vec![strings(&["buildctl", "build", "--frontend", "dockerfile.v0"])];
         let original_command = command.clone();
         configure_commands(&mut command, &[], false);
         assert_eq!(command, original_command);
         let mut plan = serde_json::json!({"deploy": {}});
         let original_plan = plan.clone();
-        railpack_secrets(&mut plan, &[]).unwrap();
+        railpack_secrets(&mut plan, &[])?;
         assert_eq!(plan, original_plan);
+        Ok(())
     }
 }

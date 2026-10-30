@@ -1,6 +1,10 @@
 //! HTTP proxies below TLS: CONNECT negotiates a byte tunnel, then hyper-rustls verifies the
-//! original destination using the unchanged CA roots and server name. Plain HTTP uses absolute
-//! request targets, as RFC 9112 section 3.2.2 requires. Proxy responses are never logged.
+//! original destination using the unchanged CA roots and server name. Plain HTTP uses
+//! [absolute-form] request targets. A successful [CONNECT] response ends at the header boundary;
+//! no tunneled bytes are read ahead or discarded. Proxy responses are never logged.
+//!
+//! [absolute-form]: https://www.rfc-editor.org/rfc/rfc9112.html#section-3.2.2
+//! [CONNECT]: https://www.rfc-editor.org/rfc/rfc9110.html#section-9.3.6
 
 use std::future::Future;
 use std::io;
@@ -19,9 +23,8 @@ use tower_service::Service;
 
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
 const MAX_CONNECT_HEADERS: usize = 16 * 1024;
-// These are the installer's cluster CIDRs. Other cluster/VPC ranges belong in NO_PROXY.
-const INTERNAL_HOSTS: &str =
-    "localhost,127.0.0.1,::1,.svc,.svc.cluster.local,10.42.0.0/16,10.43.0.0/16";
+// These are the installer's cluster and VPC ranges. Keep this list in sync with the chart.
+const INTERNAL_HOSTS: &str = "localhost,127.0.0.1,::1,.svc,.svc.cluster.local,10.43.0.1,10.42.0.0/16,10.43.0.0/16,172.16.0.0/12";
 static CONFIG: OnceLock<Result<Arc<ProxyConfig>, String>> = OnceLock::new();
 
 fn configuration() -> Result<Arc<ProxyConfig>, String> {
@@ -51,7 +54,7 @@ impl Endpoint {
         let invalid = || {
             "proxy must be an http:// URL without credentials, a path, query or fragment".to_owned()
         };
-        let uri: Uri = value.parse().map_err(|_| invalid())?;
+        let uri: Uri = value.parse().map_err(|_error| invalid())?;
         let authority = uri.authority().ok_or_else(invalid)?;
         if uri.scheme_str() != Some("http")
             || authority.as_str().contains('@')
@@ -60,7 +63,7 @@ impl Endpoint {
         {
             return Err(invalid());
         }
-        let _ = host_port(authority.as_str()).map_err(|_| invalid())?;
+        let (_host, _port) = host_port(authority.as_str()).map_err(|()| invalid())?;
         Ok(Some(Self { uri }))
     }
 
@@ -87,7 +90,7 @@ impl ProxyConfig {
                 .map(|value| {
                     value
                         .into_string()
-                        .map_err(|_| format!("{lower} must be valid Unicode"))
+                        .map_err(|_value| format!("{lower} must be valid Unicode"))
                 })
                 .transpose()
         };
@@ -99,13 +102,11 @@ impl ProxyConfig {
     }
 
     fn parse(http: Option<&str>, https: Option<&str>, bypass: Option<&str>) -> Result<Self, String> {
-        let mut no_proxy = NoProxy::parse(&format!(
-            "{INTERNAL_HOSTS},{}",
-            bypass.unwrap_or_default()
-        ))?;
-        // The chart's admission rule compares this value exactly. Internal mandatory rules
-        // protect the controller too, but must not rewrite the configured Pod environment.
-        no_proxy.environment = bypass.unwrap_or(INTERNAL_HOSTS).to_owned();
+        let normalized = normalize_bypass(bypass.unwrap_or_default());
+        let mut no_proxy = NoProxy::parse(&normalized)?;
+        // The chart uses the same normalization for controller env and admission. All
+        // consumers receive exactly the list that the controller itself matches.
+        no_proxy.environment = normalized;
         Ok(Self {
             http: Endpoint::parse(http.unwrap_or_default())?,
             https: Endpoint::parse(https.unwrap_or_default())?,
@@ -144,6 +145,25 @@ impl ProxyConfig {
     }
 }
 
+fn normalize_bypass(provided: &str) -> String {
+    let mut values = Vec::new();
+    let mut changed = false;
+    for value in provided.split(',').map(str::trim).filter(|v| !v.is_empty()) {
+        if values.contains(&value) {
+            changed = true;
+        } else {
+            values.push(value);
+        }
+    }
+    for required in INTERNAL_HOSTS.split(',') {
+        if !values.contains(&required) {
+            values.push(required);
+            changed = true;
+        }
+    }
+    if changed { values.join(",") } else { provided.to_owned() }
+}
+
 #[derive(Clone, Debug)]
 struct NoProxy {
     rules: Vec<Bypass>,
@@ -174,9 +194,7 @@ impl NoProxy {
     fn matches(&self, uri: &Uri) -> bool {
         let Some(host) = uri.host() else { return false };
         let host = host.trim_matches(['[', ']']).trim_end_matches('.').to_ascii_lowercase();
-        let port = uri.port_u16().unwrap_or({
-            if uri.scheme_str() == Some("https") { 443 } else { 80 }
-        });
+        let port = uri.port_u16().unwrap_or(if uri.scheme_str() == Some("https") { 443 } else { 80 });
         self.rules.iter().any(|rule| rule.matches(&host, port))
     }
 }
@@ -188,14 +206,14 @@ impl Bypass {
             return Ok(Self::All);
         }
         if let Some((ip, prefix)) = value.split_once('/') {
-            let ip: IpAddr = ip.parse().map_err(|_| invalid())?;
-            let prefix: u8 = prefix.parse().map_err(|_| invalid())?;
+            let ip: IpAddr = ip.parse().map_err(|_error| invalid())?;
+            let prefix: u8 = prefix.parse().map_err(|_error| invalid())?;
             if prefix > if ip.is_ipv4() { 32 } else { 128 } {
                 return Err(invalid());
             }
             return Ok(Self::Network(ip, prefix));
         }
-        let (host, port) = host_port(value).map_err(|_| invalid())?;
+        let (host, port) = host_port(value).map_err(|()| invalid())?;
         let host = host.trim_matches(['[', ']']);
         if let Ok(ip) = host.parse::<IpAddr>() {
             return Ok(Self::Ip(ip, port));
@@ -300,7 +318,7 @@ impl Service<Uri> for ProxyConnector {
             if proxy.is_some() && !forward {
                 tokio::time::timeout(CONNECT_TIMEOUT, tunnel(stream.inner(), &target))
                     .await
-                    .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "HTTP proxy CONNECT timed out"))??;
+                    .map_err(|_error| io::Error::new(io::ErrorKind::TimedOut, "HTTP proxy CONNECT timed out"))??;
             }
             Ok(ProxyStream { io: stream, forward })
         })
@@ -310,7 +328,9 @@ impl Service<Uri> for ProxyConnector {
 async fn tunnel(stream: &TcpStream, target: &Uri) -> io::Result<()> {
     let host = target.host().ok_or_else(|| io::Error::other("CONNECT target has no host"))?;
     let host = if host.contains(':') && !host.starts_with('[') { format!("[{host}]") } else { host.to_owned() };
-    let authority = format!("{host}:{}", target.port_u16().unwrap_or(443));
+    let (_, port) = host_port(target.authority().ok_or_else(|| io::Error::other("CONNECT target has no authority"))?.as_str())
+        .map_err(|()| io::Error::other("CONNECT target has an invalid port"))?;
+    let authority = format!("{host}:{}", port.unwrap_or(443));
     let request = format!("CONNECT {authority} HTTP/1.1\r\nHost: {authority}\r\n\r\n");
     let mut remaining = request.as_bytes();
     while !remaining.is_empty() {
@@ -342,7 +362,7 @@ async fn tunnel(stream: &TcpStream, target: &Uri) -> io::Result<()> {
 
 fn connect_status(headers: &[u8]) -> io::Result<()> {
     let first = headers.split(|b| *b == b'\n').next().unwrap_or_default();
-    let first = std::str::from_utf8(first).map_err(|_| io::Error::other("invalid HTTP proxy CONNECT response"))?;
+    let first = std::str::from_utf8(first).map_err(|_error| io::Error::other("invalid HTTP proxy CONNECT response"))?;
     let mut fields = first.split_ascii_whitespace();
     let version = fields.next();
     let status = fields.next().filter(|s| s.len() == 3 && s.bytes().all(|b| b.is_ascii_digit()))

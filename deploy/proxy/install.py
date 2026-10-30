@@ -196,6 +196,13 @@ class Kube:
         return result
 
     def apply(self, document, *, dry_run=False):
+        metadata = document.get("metadata", {})
+        kind = document.get("kind")
+        scope = (kind in ("HelmChart", "HelmChartConfig") and metadata.get("name") == CHART_NAME
+                 and metadata.get("namespace") == CHART_NAMESPACE)
+        scope = scope or (kind == "StatefulSet" and metadata.get("namespace") == BUILDER_NAMESPACE
+                          and metadata.get("labels", {}).get("app.kubernetes.io/name") == "buildkitd")
+        require(scope, "Refusing to apply an object outside the Builder chart/daemon scope.")
         arguments = ["apply", "-f", "-"]
         if dry_run:
             arguments.append("--dry-run=server")
@@ -275,6 +282,8 @@ def check_overrides(kube, state, defaults):
         if not document:
             continue
         spec = document.get("spec", {})
+        require(not spec.get("valuesSecrets"),
+                key + " uses valuesSecrets; image/proxy overrides cannot be verified without reading Secrets.")
         values = kube.yaml_values(spec.get("valuesContent", ""))
         for section in ("image", "jobImage", "proxy"):
             if section in values:
@@ -316,6 +325,7 @@ def rewritten_chart(path, defaults):
 def desired_chart(state, manifest, archive):
     chart = clean_object(state["helmchart"])
     chart["spec"]["chartContent"] = base64.b64encode(archive).decode()
+    chart["spec"]["version"] = manifest["version"]
     annotations = chart["metadata"].setdefault("annotations", {})
     annotations[SOURCE_ANNOTATION] = manifest["source_commit"]
     annotations[VERSION_ANNOTATION] = manifest["version"]
@@ -415,17 +425,27 @@ def host_requirements():
 
 def rollback(kube, directory):
     path = directory.resolve() / "state.json"
-    require(path.is_file() and not path.is_symlink() and not (path.stat().st_mode & 0o077),
+    require(path.is_file() and not path.is_symlink() and not (path.stat().st_mode & 0o077)
+            and path.stat().st_uid == 0,
             "Rollback requires a private, regular backup state.json file.")
     state = json.loads(path.read_text())
     require(state.get("format") == 1 and state.get("node_ip") == EXPECTED_NODE_IP,
             "Backup does not identify this new cluster.")
+    require(state.get("helmchart", {}).get("kind") == "HelmChart"
+            and state["helmchart"].get("metadata", {}).get("name") == CHART_NAME
+            and state["helmchart"].get("metadata", {}).get("namespace") == CHART_NAMESPACE,
+            "Backup does not contain the expected Builder HelmChart.")
     nodes = kube.get("nodes")["items"]
     require(len(nodes) == 1 and nodes[0]["metadata"]["name"] == state["node"],
             "Backup belongs to a different cluster.")
     require(any(address.get("type") == "InternalIP" and address.get("address") == EXPECTED_NODE_IP
                 for address in nodes[0].get("status", {}).get("addresses", [])),
             "Backup node address does not match the current cluster.")
+    require(not any(item["metadata"]["name"].startswith("environment-")
+                    for item in kube.get("namespaces")["items"]),
+            "Legacy commercial environment namespaces found; stopped without changes.")
+    require(kube.get("service", "zeabur-dns", "default", missing=True) is None,
+            "Legacy default/zeabur-dns found; stopped without changes.")
     current_config = kube.get("helmchartconfig", CHART_NAME, CHART_NAMESPACE, missing=True)
     require(state.get("helmchartconfig") is not None or current_config is None,
             "A new HelmChartConfig appeared after this backup; review it before rollback.")
@@ -461,7 +481,7 @@ def main(arguments=None):
     mode.add_argument("--check", action="store_true", help="Validate and print the plan; default, no changes.")
     mode.add_argument("--apply", action="store_true", help="Stage verified images and update only the Builder HelmChart.")
     mode.add_argument("--rollback", type=Path, metavar="BACKUP", help="Restore a backup created by this installer.")
-    parser.add_argument("--bundle", type=Path, default=Path(__file__).resolve().parents[1])
+    parser.add_argument("--bundle", type=Path, default=Path(__file__).resolve().parent)
     parser.add_argument("--proxy", default="http://100.66.31.168:3128")
     parser.add_argument("--no-proxy", default=NO_PROXY)
     args = parser.parse_args(arguments)

@@ -82,6 +82,7 @@ fn generated_environment_keeps_internal_traffic_direct() -> TestResult {
         "https://buildkitd.builder-system.svc.cluster.local:1234/",
         "https://10.42.1.9/",
         "https://10.43.0.1/",
+        "https://172.16.1.144/",
     ] {
         assert!(config.no_proxy.matches(&value.parse()?));
     }
@@ -92,10 +93,18 @@ fn generated_environment_keeps_internal_traffic_direct() -> TestResult {
     let no_proxy = env.iter().find(|(key, _)| key == "no_proxy").map(|(_, value)| value);
     assert!(no_proxy.is_some_and(|value| value.contains(".svc")));
     assert!(ProxyConfig::parse(None, None, None)?.environment().is_empty());
-    let supplied = " localhost,.svc,10.43.0.0/16 ";
-    let configured = ProxyConfig::parse(None, Some("http://100.66.31.168:3128"), Some(supplied))?;
+    let supplied = format!("example.test,{INTERNAL_HOSTS}");
+    let configured = ProxyConfig::parse(None, Some("http://100.66.31.168:3128"), Some(&supplied))?;
     assert!(configured.environment().iter().filter(|(key, _)| key.eq_ignore_ascii_case("no_proxy"))
-        .all(|(_, value)| value == supplied));
+        .all(|(_, value)| value == &supplied));
+    let incomplete = ProxyConfig::parse(None, Some("http://100.66.31.168:3128"), Some("example.test,example.test"))?;
+    let normalized = format!("example.test,{INTERNAL_HOSTS}");
+    assert_eq!(incomplete.no_proxy.environment, normalized);
+    let exported = NoProxy::parse(&incomplete.no_proxy.environment)?;
+    for value in ["https://example.test/", "https://zot.zot.svc:5000/", "https://172.16.1.144/", "https://github.com/"] {
+        let uri = value.parse()?;
+        assert_eq!(incomplete.no_proxy.matches(&uri), exported.matches(&uri));
+    }
     Ok(())
 }
 
@@ -133,6 +142,7 @@ fn accept(listener: &TcpListener) -> io::Result<StdStream> {
     loop {
         match listener.accept() {
             Ok((stream, _)) => {
+                stream.set_nonblocking(false)?;
                 stream.set_read_timeout(Some(Duration::from_secs(3)))?;
                 stream.set_write_timeout(Some(Duration::from_secs(3)))?;
                 return Ok(stream);
@@ -218,7 +228,7 @@ fn proxy_server(origin: SocketAddr) -> io::Result<Server> {
         });
         let _copied = io::copy(&mut from_origin, &mut to_client);
         let _closed = to_client.shutdown(Shutdown::Write);
-        forward.join().map_err(|_| io::Error::other("proxy forwarding thread panicked"))?;
+        forward.join().map_err(|_panic| io::Error::other("proxy forwarding thread panicked"))?;
         Ok(request)
     });
     Ok((address, server))
@@ -226,13 +236,16 @@ fn proxy_server(origin: SocketAddr) -> io::Result<Server> {
 
 async fn finish(server: JoinHandle<io::Result<String>>) -> TestResult<String> {
     let result = tokio::task::spawn_blocking(move || {
-        server.join().map_err(|_| io::Error::other("test server panicked"))
+        server.join().map_err(|_panic| io::Error::other("test server panicked"))
     }).await??;
     Ok(result?)
 }
 
 async fn fetch(client: &super::super::HttpClient, url: &str) -> TestResult {
-    let response = client.request(Request::get(url).body(Full::new(Bytes::new()))?).await?;
+    let response = tokio::time::timeout(
+        Duration::from_secs(5),
+        client.request(Request::get(url).body(Full::new(Bytes::new()))?),
+    ).await??;
     assert_eq!(response.status(), StatusCode::OK);
     assert_eq!(response.into_body().collect().await?.to_bytes(), "ok");
     Ok(())
@@ -265,12 +278,13 @@ async fn rejected_tls(host: &str, trust: bool) -> TestResult {
     let config = ProxyConfig::parse(None, Some(&format!("http://{proxy}")), None)?;
     let client = client(config, roots)?;
     let request = Request::get(format!("https://{host}/")).body(Full::new(Bytes::new()))?;
-    assert!(client.request(request).await.is_err(), "untrusted TLS identity was accepted");
+    let answer = tokio::time::timeout(Duration::from_secs(5), client.request(request)).await?;
+    assert!(answer.is_err(), "untrusted TLS identity was accepted");
     drop(client);
     assert!(finish(proxy_task).await?.starts_with("CONNECT "));
     // Rejection is expected to arrive at the origin as a TLS alert, before any HTTP request.
     let rejected = tokio::task::spawn_blocking(move || {
-        origin_task.join().map_err(|_| io::Error::other("TLS test server panicked"))
+        origin_task.join().map_err(|_panic| io::Error::other("TLS test server panicked"))
     }).await??;
     assert!(rejected.is_err());
     Ok(())
@@ -284,6 +298,35 @@ async fn https_proxy_cannot_bypass_hostname_verification() -> TestResult {
 #[tokio::test]
 async fn https_proxy_cannot_bypass_ca_verification() -> TestResult {
     rejected_tls("origin.example.test", false).await
+}
+
+#[tokio::test]
+async fn rejected_connect_never_falls_back_to_a_direct_connection() -> TestResult {
+    let origin = TcpListener::bind(("127.0.0.1", 0))?;
+    origin.set_nonblocking(true)?;
+    let listener = TcpListener::bind(("127.0.0.1", 0))?;
+    listener.set_nonblocking(true)?;
+    let proxy = listener.local_addr()?;
+    let proxy_task = thread::spawn(move || {
+        let mut socket = accept(&listener)?;
+        let request = headers(&mut socket)?;
+        socket.write_all(b"HTTP/1.1 407 Proxy Authentication Required\r\nContent-Length: 0\r\n\r\n")?;
+        Ok(request)
+    });
+    let config = ProxyConfig {
+        http: None,
+        https: Endpoint::parse(&format!("http://{proxy}"))?,
+        no_proxy: NoProxy::parse("")?,
+    };
+    let client = client(config, RootCertStore::empty())?;
+    let request = Request::get(format!("https://{}/", origin.local_addr()?))
+        .body(Full::new(Bytes::new()))?;
+    let result = tokio::time::timeout(Duration::from_secs(5), client.request(request)).await?;
+    assert!(result.is_err());
+    drop(client);
+    assert!(finish(proxy_task).await?.starts_with("CONNECT 127.0.0.1:"));
+    assert!(origin.accept().is_err_and(|error| error.kind() == io::ErrorKind::WouldBlock));
+    Ok(())
 }
 
 #[tokio::test]

@@ -56,9 +56,9 @@ if helm --kube-context "$context" -n builder-system status builder >/dev/null 2>
   k apply --server-side -f "$root/deploy/chart/crds/crds.yaml"
 fi
 helm --kube-context "$context" upgrade --install builder "$root/deploy/chart" -n builder-system \
-  --set image.repository="$prefix/builder" --set image.tag="$tag" \
-  --set jobImage.repository="$prefix/builder-job" --set jobImage.tag="$tag" \
-  --set railpackImage.repository="$prefix/builder-railpack" --set railpackImage.tag="$tag" \
+  --set image.repository="$prefix/builder" --set image.tag="$tag" --set image.digest= \
+  --set jobImage.repository="$prefix/builder-job" --set jobImage.tag="$tag" --set jobImage.digest= \
+  --set railpackImage.repository="$prefix/builder-railpack" --set railpackImage.tag="$tag" --set railpackImage.digest= \
   --set registry.host="$registry" --set registry.http=true \
   --set registry.inCluster.namespace=builder-registry \
   --set registry.inCluster.podLabels.app\\.kubernetes\\.io/name=registry \
