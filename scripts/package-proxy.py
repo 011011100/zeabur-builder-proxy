@@ -142,6 +142,7 @@ def main():
     }
     write_json(bundle / "products/default-values.json", defaults)
     shutil.copyfile(root / "deploy/proxy/install.py", bundle / "install.py")
+    shutil.copyfile(root / "LICENSE", bundle / "LICENSE")
     write_json(bundle / "bundle.json", {
         "version": args.version, "source_commit": args.commit,
         "upstream_commit": "8fd8b6e9b6480cb2ea3fb28d250b4b71da663b8a",

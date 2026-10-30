@@ -24,6 +24,9 @@ def direct_opener():
 def inspect_image(reference):
     authority, repository = reference.split("/", 1)
     repository, digest = repository.rsplit("@", 1)
+    # Build.status.latestImage includes both the friendly tag and content digest. The registry
+    # API addresses a repository without that tag; the authority's optional port is already split.
+    repository = repository.rsplit(":", 1)[0]
     base = "http://" + authority + "/v2/" + repository
     request = urllib.request.Request(base + "/manifests/" + digest, headers={
         "Accept": "application/vnd.oci.image.manifest.v1+json, application/vnd.docker.distribution.manifest.v2+json",

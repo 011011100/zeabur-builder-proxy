@@ -38,6 +38,7 @@ VERSION_ANNOTATION = "mingxingwenhua.cn/builder-proxy-version"
 PROXY_NAMES = {"HTTP_PROXY", "http_proxy", "HTTPS_PROXY", "https_proxy", "NO_PROXY", "no_proxy"}
 NO_PROXY = "localhost,127.0.0.1,::1,.svc,.svc.cluster.local,10.43.0.1,10.42.0.0/16,10.43.0.0/16,172.16.0.0/12"
 BACKUP_ROOT = Path("/root/zeabur-builder-proxy-backups")
+IMAGES_ROOT = Path("/var/lib/rancher/k3s/agent/images")
 
 
 class InstallError(Exception):
@@ -162,7 +163,8 @@ class Kube:
     """The installed K3s CLI is also the YAML parser; no Python packages are required."""
 
     def command(self, *arguments, data=None, optional=False, timeout=30):
-        return run(["k3s", "kubectl", *arguments], data=data, optional=optional, timeout=timeout)
+        return run(["k3s", "kubectl", "--kubeconfig", "/etc/rancher/k3s/k3s.yaml", *arguments],
+                   data=data, optional=optional, timeout=timeout)
 
     def get(self, resource, name=None, namespace=None, missing=False, selector=None):
         arguments = ["get", resource]
@@ -351,21 +353,36 @@ def backup_state(state, manifest):
     return backup
 
 
+def image_is_pinned(reference):
+    result = run(["k3s", "crictl", "inspecti", reference], optional=True, timeout=15)
+    if result.returncode:
+        return False
+    try:
+        status = json.loads(result.stdout).get("status", {})
+    except (ValueError, TypeError, AttributeError):
+        return False
+    if not isinstance(status, dict):
+        return False
+    image_id = status.get("id")
+    return (isinstance(image_id, str) and bool(image_id)
+            and status.get("pinned") is True)
+
+
 def wait_images(images, timeout=240):
     pending = {reference for image in images for reference in (image["tag"], image["digest_reference"])}
     deadline = time.monotonic() + timeout
     while pending and time.monotonic() < deadline:
         for reference in list(pending):
-            if run(["k3s", "crictl", "inspecti", reference], optional=True, timeout=15).returncode == 0:
+            if image_is_pinned(reference):
                 pending.remove(reference)
         if pending:
-            print("Waiting for K3s to import {} image reference(s)...".format(len(pending)), flush=True)
+            print("Waiting for K3s to import and pin {} image reference(s)...".format(len(pending)), flush=True)
             time.sleep(5)
-    require(not pending, "K3s did not import all pinned image references before the timeout; chart was not changed.")
+    require(not pending, "K3s did not import and pin all image references before the timeout; chart was not changed.")
 
 
 def stage_images(root, manifest):
-    directory = Path("/var/lib/rancher/k3s/agent/images")
+    directory = IMAGES_ROOT
     require(directory.is_dir() and not directory.is_symlink(), "K3s image import directory is unavailable.")
     for index, archive in enumerate(sorted({image["archive"] for image in manifest["images"]})):
         source = bundle_path(root, archive)
@@ -374,6 +391,12 @@ def stage_images(root, manifest):
             require(destination.is_file() and not destination.is_symlink()
                     and file_hash(destination) == file_hash(source),
                     "An existing staged image archive differs; stopped without overwriting it.")
+            references = {reference for image in manifest["images"] if image["archive"] == archive
+                          for reference in (image["tag"], image["digest_reference"])}
+            if not all(image_is_pinned(reference) for reference in references):
+                # K3s owns pinning for archives in agent/images. Refresh only this bundle's
+                # verified archive so its watcher reimports missing/unpinned references.
+                os.utime(destination, None)
             continue
         descriptor, temporary = tempfile.mkstemp(prefix=".mingxing-builder-proxy-", dir=directory)
         try:

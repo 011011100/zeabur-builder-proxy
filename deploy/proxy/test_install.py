@@ -244,6 +244,13 @@ class ClusterAndOverrideTests(unittest.TestCase):
             self.assertIn("--dry-run=server", command.call_args.args)
             self.assertEqual(json.loads(command.call_args.kwargs["data"]), self.kube.chart)
 
+    def test_kube_uses_only_the_local_k3s_kubeconfig(self):
+        kube = install.Kube()
+        with mock.patch.object(install, "run") as run:
+            kube.command("get", "nodes")
+            self.assertEqual(run.call_args.args[0],
+                             ["k3s", "kubectl", "--kubeconfig", "/etc/rancher/k3s/k3s.yaml", "get", "nodes"])
+
     def test_apply_scope_cannot_include_business_workloads_or_secrets(self):
         kube = install.Kube()
         for kind, name, namespace in (("Deployment", "byts-tos", "mingxing"),
@@ -254,6 +261,74 @@ class ClusterAndOverrideTests(unittest.TestCase):
                 with self.assertRaisesRegex(install.InstallError, "outside"):
                     kube.apply({"kind": kind, "metadata": {"name": name, "namespace": namespace}})
                 command.assert_not_called()
+
+
+class ImagePinTests(unittest.TestCase):
+    def test_successful_inspect_requires_an_image_id_and_pinned_status(self):
+        for status in ({"id": "sha256:config", "pinned": False}, {"id": "sha256:config"},
+                       {"pinned": True}, {"id": "", "pinned": True}, {"id": "x", "pinned": "true"}):
+            with self.subTest(status=status), mock.patch.object(install, "run", return_value=mock.Mock(
+                    returncode=0, stdout=json.dumps({"status": status}))):
+                self.assertFalse(install.image_is_pinned("own:tag"))
+        with mock.patch.object(install, "run", return_value=mock.Mock(
+                returncode=0, stdout='{"status":{"id":"sha256:config","pinned":true}}')):
+            self.assertTrue(install.image_is_pinned("own:tag"))
+
+    def test_wait_images_does_not_accept_unpinned_successful_inspects(self):
+        images = [{"tag": "own:tag", "digest_reference": "own@sha256:digest"}]
+        attempts = {reference: 0 for reference in ("own:tag", "own@sha256:digest")}
+
+        def inspect(command, **_kwargs):
+            reference = command[-1]
+            attempts[reference] += 1
+            return mock.Mock(returncode=0, stdout=json.dumps({"status": {
+                "id": "sha256:config", "pinned": attempts[reference] >= 2}}))
+
+        with mock.patch.object(install, "run", side_effect=inspect), \
+                mock.patch.object(install.time, "sleep") as sleep, mock.patch("builtins.print"):
+            install.wait_images(images, timeout=10)
+        self.assertEqual(attempts, {"own:tag": 2, "own@sha256:digest": 2})
+        sleep.assert_called_once_with(5)
+
+    def test_existing_verified_archive_refreshes_only_its_own_missing_references(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary).resolve()
+            manifest = make_bundle(root)
+            images_root = root / "k3s-images"
+            images_root.mkdir()
+            destination = images_root / ("mingxing-builder-proxy-{}-0.oci.tar".format(manifest["source_commit"][:12]))
+            original = (root / "images/components.oci.tar").read_bytes()
+            destination.write_bytes(original)
+            other = images_root / "other.oci.tar"
+            other.write_bytes(b"unrelated")
+            install.os.utime(destination, (1, 1))
+            install.os.utime(other, (1, 1))
+            own_references = {reference for image in manifest["images"]
+                              for reference in (image["tag"], image["digest_reference"])}
+            with mock.patch.object(install, "IMAGES_ROOT", images_root), \
+                    mock.patch.object(install, "image_is_pinned", return_value=False) as inspect, \
+                    mock.patch.object(install, "wait_images") as wait:
+                install.stage_images(root, manifest)
+            self.assertGreater(destination.stat().st_mtime, 1)
+            self.assertEqual(destination.read_bytes(), original)
+            self.assertEqual(other.stat().st_mtime, 1)
+            self.assertTrue(all(call.args[0] in own_references for call in inspect.call_args_list))
+            wait.assert_called_once_with(manifest["images"])
+
+    def test_existing_pinned_archive_is_not_touched(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary).resolve()
+            manifest = make_bundle(root)
+            images_root = root / "k3s-images"
+            images_root.mkdir()
+            destination = images_root / ("mingxing-builder-proxy-{}-0.oci.tar".format(manifest["source_commit"][:12]))
+            destination.write_bytes((root / "images/components.oci.tar").read_bytes())
+            install.os.utime(destination, (1, 1))
+            with mock.patch.object(install, "IMAGES_ROOT", images_root), \
+                    mock.patch.object(install, "image_is_pinned", return_value=True), \
+                    mock.patch.object(install, "wait_images"):
+                install.stage_images(root, manifest)
+            self.assertEqual(destination.stat().st_mtime, 1)
 
 
 if __name__ == "__main__":

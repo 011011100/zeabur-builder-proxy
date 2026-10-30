@@ -215,13 +215,12 @@ impl NoProxy {
             .trim_matches(['[', ']'])
             .trim_end_matches('.')
             .to_ascii_lowercase();
-        let port = uri
-            .port_u16()
-            .unwrap_or(if uri.scheme_str() == Some("https") {
-                443
-            } else {
-                80
-            });
+        let default_port = if uri.scheme_str() == Some("https") {
+            443
+        } else {
+            80
+        };
+        let port = uri.port_u16().unwrap_or(default_port);
         self.rules.iter().any(|rule| rule.matches(&host, port))
     }
 }
@@ -412,7 +411,7 @@ async fn tunnel(stream: &TcpStream, target: &Uri) -> io::Result<()> {
             Ok(written) => {
                 remaining = remaining
                     .get(written..)
-                    .ok_or_else(|| io::Error::other("invalid CONNECT write"))?
+                    .ok_or_else(|| io::Error::other("invalid CONNECT write"))?;
             }
             Err(error) if error.kind() == io::ErrorKind::WouldBlock => {}
             Err(error) => return Err(error),

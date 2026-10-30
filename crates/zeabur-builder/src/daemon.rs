@@ -109,7 +109,7 @@ where
     .map(drop)
 }
 
-/// A ready Pod may still be the previous StatefulSet revision after server-side apply. Wait
+/// A ready Pod may still be the previous `StatefulSet` revision after server-side apply. Wait
 /// until its buildkitd container has the requested proxy configuration before giving it a Job.
 /// Compare only the six infrastructure variables; other environment settings do not affect this
 /// rollout check. Kubernetes may omit a literal empty `value`, which still means an empty string.

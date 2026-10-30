@@ -1,7 +1,7 @@
 //! Loopback-only proxy tests: no GitHub requests and no changes to process environment.
 
 use std::error::Error;
-use std::io::{Read as _, Write as _};
+use std::io::Write as _;
 use std::net::{Shutdown, SocketAddr, TcpListener, TcpStream as StdStream};
 use std::thread::{self, JoinHandle};
 use std::time::Instant;
@@ -112,10 +112,9 @@ fn generated_environment_keeps_internal_traffic_direct() -> TestResult {
         .find(|(key, _)| key == "no_proxy")
         .map(|(_, value)| value);
     assert!(no_proxy.is_some_and(|value| value.contains(".svc")));
-    assert!(
-        ProxyConfig::parse(None, None, None)?
-            .environment()
-            .is_empty()
+    assert_eq!(
+        ProxyConfig::parse(None, None, None)?.environment(),
+        Vec::<(String, String)>::new()
     );
     let supplied = format!("example.test,{INTERNAL_HOSTS}");
     let configured = ProxyConfig::parse(None, Some("http://100.66.31.168:3128"), Some(&supplied))?;
@@ -199,7 +198,7 @@ fn accept(listener: &TcpListener) -> io::Result<StdStream> {
     }
 }
 
-fn headers(stream: &mut impl std::io::Read) -> io::Result<String> {
+fn headers(stream: &mut impl io::Read) -> io::Result<String> {
     let mut bytes = Vec::new();
     while !bytes.ends_with(b"\r\n\r\n") {
         if bytes.len() > MAX_CONNECT_HEADERS {

@@ -1,7 +1,9 @@
 """Exercise the synthetic Git/probe fixture before spending time on a k3d build."""
 
+import contextlib
 import http.server
 import importlib.util
+import io
 import json
 import os
 from pathlib import Path
@@ -10,6 +12,7 @@ import sys
 import tempfile
 import threading
 import unittest
+from unittest import mock
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -63,6 +66,61 @@ class MockProxyTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(json.loads(output.read_text()), json.loads((context / "railpack-plan.json").read_text()))
         self.assertNotIn(self.proxy, output.read_text())
+
+
+class RegistryOpener:
+    """A strict registry HTTP stub: an incorrect repository/tag path cannot pass."""
+
+    digest = "sha256:" + "a" * 64
+    config_digest = "sha256:" + "b" * 64
+    base = "http://registry.test:5000/v2/team/app"
+
+    def __init__(self, image_env):
+        self.image_env = image_env
+        self.requests = []
+
+    def open(self, request, timeout):
+        url = request.full_url if hasattr(request, "full_url") else request
+        self.requests.append(url)
+        if url == self.base + "/manifests/" + self.digest:
+            body = {"schemaVersion": 2, "config": {"digest": self.config_digest}}
+        elif url == self.base + "/blobs/" + self.config_digest:
+            body = {"config": {"Env": self.image_env}}
+        else:
+            raise AssertionError("unexpected registry URL: " + url)
+        if timeout != 15:
+            raise AssertionError("registry requests must remain bounded")
+        return io.BytesIO(json.dumps(body).encode())
+
+
+class RegistryInspectionTests(unittest.TestCase):
+    def test_tag_and_digest_references_use_the_same_repository_api_paths(self):
+        for tag in ("", ":build-123"):
+            with self.subTest(tag=tag):
+                reference = "registry.test:5000/team/app" + tag + "@" + RegistryOpener.digest
+                opener = RegistryOpener(["PATH=/usr/local/bin:/usr/bin:/bin", "HOME=/root"])
+                output = io.StringIO()
+                with mock.patch.object(MOCK, "direct_opener", return_value=opener), contextlib.redirect_stdout(output):
+                    MOCK.inspect_image(reference)
+                self.assertEqual(opener.requests, [
+                    RegistryOpener.base + "/manifests/" + RegistryOpener.digest,
+                    RegistryOpener.base + "/blobs/" + RegistryOpener.config_digest,
+                ])
+                self.assertIn("IMAGE_ENV_OK " + reference, output.getvalue())
+
+    def test_each_proxy_variable_in_final_image_environment_is_rejected(self):
+        for name in sorted(MOCK.PROXY_NAMES):
+            with self.subTest(name=name):
+                opener = RegistryOpener([name + "=must-not-persist", "PATH=/bin"])
+                with mock.patch.object(MOCK, "direct_opener", return_value=opener), self.assertRaises(SystemExit) as error:
+                    MOCK.inspect_image("registry.test:5000/team/app:tag@" + RegistryOpener.digest)
+                self.assertIn("persisted", str(error.exception))
+                self.assertNotIn("must-not-persist", str(error.exception))
+
+    def test_empty_final_image_environment_is_allowed(self):
+        opener = RegistryOpener(None)
+        with mock.patch.object(MOCK, "direct_opener", return_value=opener), contextlib.redirect_stdout(io.StringIO()):
+            MOCK.inspect_image("registry.test:5000/team/app@" + RegistryOpener.digest)
 
 
 if __name__ == "__main__":
