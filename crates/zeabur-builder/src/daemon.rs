@@ -120,11 +120,11 @@ fn proxy_configuration_matches(pod: &Pod, expected: &[(String, String)]) -> bool
             "http_proxy" | "https_proxy" | "no_proxy" | "HTTP_PROXY" | "HTTPS_PROXY" | "NO_PROXY"
         )
     };
-    let Some(container) = pod
-        .spec
-        .as_ref()
-        .and_then(|spec| spec.containers.iter().find(|container| container.name == "buildkitd"))
-    else {
+    let Some(container) = pod.spec.as_ref().and_then(|spec| {
+        spec.containers
+            .iter()
+            .find(|container| container.name == "buildkitd")
+    }) else {
         return false;
     };
     let desired: BTreeMap<_, _> = expected
@@ -142,7 +142,10 @@ fn proxy_configuration_matches(pod: &Pod, expected: &[(String, String)]) -> bool
     {
         if variable.value_from.is_some()
             || observed
-                .insert(variable.name.as_str(), variable.value.as_deref().unwrap_or_default())
+                .insert(
+                    variable.name.as_str(),
+                    variable.value.as_deref().unwrap_or_default(),
+                )
                 .is_some()
         {
             return false;

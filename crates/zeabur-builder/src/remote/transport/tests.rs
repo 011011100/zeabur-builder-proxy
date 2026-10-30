@@ -380,13 +380,17 @@ async fn rejected_connect_never_falls_back_to_a_direct_connection() -> TestResul
         no_proxy: NoProxy::parse("")?,
     };
     let client = client(config, RootCertStore::empty())?;
-    let request = Request::get(format!("https://{}/", origin.local_addr()?))
-        .body(Full::new(Bytes::new()))?;
+    let request =
+        Request::get(format!("https://{}/", origin.local_addr()?)).body(Full::new(Bytes::new()))?;
     let result = tokio::time::timeout(Duration::from_secs(5), client.request(request)).await?;
     assert!(result.is_err());
     drop(client);
     assert!(finish(proxy_task).await?.starts_with("CONNECT 127.0.0.1:"));
-    assert!(origin.accept().is_err_and(|error| error.kind() == io::ErrorKind::WouldBlock));
+    assert!(
+        origin
+            .accept()
+            .is_err_and(|error| error.kind() == io::ErrorKind::WouldBlock)
+    );
     Ok(())
 }
 
